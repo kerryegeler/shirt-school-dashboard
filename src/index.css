@@ -1,0 +1,429 @@
+/* ─── Reset & Base ─────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Brand */
+  --orange:        #F5A623;
+  --orange-hover:  #e09820;
+  --orange-light:  rgba(245, 166, 35, 0.07);
+  --orange-dim:    rgba(245, 166, 35, 0.15);
+
+  /* Sidebar */
+  --sidebar-bg:    #111111;
+  --sidebar-hover: #1c1c1c;
+  --sidebar-active:#212121;
+  --sidebar-text:  #a0a0a0;
+  --sidebar-width: 224px;
+
+  /* Surface */
+  --bg-app:        #0c0c0c;
+  --bg-card:       #161616;
+  --bg-elevated:   #1e1e1e;
+  --bg-input:      #242424;
+
+  /* Text */
+  --text-primary:  #f0f0f0;
+  --text-secondary:#b2b2b2;
+  --text-tertiary: #6e6e6e;
+
+  /* Border */
+  --border:        #262626;
+  --border-strong: #383838;
+
+  /* Category badges — dark-mode tinted */
+  --cat-support-bg:      #0a1e33;
+  --cat-support-text:    #60a5fa;
+  --cat-sponsorship-bg:  #271a00;
+  --cat-sponsorship-text:#f5a623;
+  --cat-general-bg:      #1e1e1e;
+  --cat-general-text:    #666666;
+
+  /* Status */
+  --green:  #30d158;
+  --red:    #ff453a;
+
+  /* Misc */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 6px rgba(0,0,0,0.5);
+  --shadow-md: 0 8px 40px rgba(0,0,0,0.7);
+
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  background: none;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ─── App Layout ────────────────────────────────────────────────── */
+.app-layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ─── Sidebar ───────────────────────────────────────────────────── */
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-logo {
+  padding: 22px 18px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.sidebar-logo img {
+  height: 30px;
+  width: auto;
+  object-fit: contain;
+}
+
+.sidebar-section-label {
+  padding: 20px 16px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+}
+
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--sidebar-text);
+  font-size: 13.5px;
+  font-weight: 450;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+  position: relative;
+}
+
+.sidebar-item:hover {
+  background: var(--sidebar-hover);
+  color: #cccccc;
+}
+
+.sidebar-item.active {
+  background: var(--sidebar-active);
+  color: #ffffff;
+}
+
+.sidebar-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  background: var(--orange);
+  border-radius: 0 2px 2px 0;
+}
+
+.sidebar-item.coming-soon {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+
+.sidebar-item-icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sidebar-item-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar-badge-pill {
+  margin-left: auto;
+  font-size: 10px;
+  background: rgba(255,255,255,0.06);
+  color: #888888;
+  padding: 2px 7px;
+  border-radius: 20px;
+  font-weight: 500;
+}
+
+.sidebar-item.active .sidebar-badge-pill {
+  background: var(--orange-dim);
+  color: var(--orange);
+}
+
+.sidebar-unread-dot {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  background: var(--orange);
+  color: #000000;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.sidebar-footer {
+  padding: 14px 12px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+/* Per-account rows in sidebar footer */
+.sidebar-account-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  transition: background 0.1s;
+}
+
+.sidebar-account-row:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.sidebar-account-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-on  { background: var(--green); box-shadow: 0 0 6px rgba(48, 209, 88, 0.5); }
+.dot-off { background: #333333; }
+
+.sidebar-account-email {
+  flex: 1;
+  font-size: 11px;
+  color: #888888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.sidebar-account-action {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.12s;
+  text-decoration: none;
+}
+
+.sidebar-account-action:hover { color: var(--text-secondary); }
+
+.sidebar-account-connect {
+  color: var(--orange);
+  opacity: 0.9;
+}
+
+.sidebar-account-connect:hover {
+  opacity: 1;
+  color: var(--orange);
+}
+
+.sidebar-account-reconnect {
+  color: #5b9cf6;
+  opacity: 0.8;
+}
+
+.sidebar-account-reconnect:hover {
+  opacity: 1;
+  color: #7ab3ff;
+}
+
+/* ─── Page Header ───────────────────────────────────────────────── */
+.page-header {
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.page-header-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--orange-dim);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--orange);
+}
+
+.page-header-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.page-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.page-header-subtitle {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-left: 2px;
+}
+
+.page-header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ─── Buttons ───────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.12s, opacity 0.12s, transform 0.08s;
+  white-space: nowrap;
+}
+
+.btn:active { transform: scale(0.97); }
+
+.btn-primary {
+  background: var(--orange);
+  color: #000000;
+}
+.btn-primary:hover { background: var(--orange-hover); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+}
+.btn-secondary:hover { background: var(--bg-input); }
+
+.btn-ghost {
+  color: var(--text-secondary);
+  padding: 7px 10px;
+}
+.btn-ghost:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-success {
+  background: rgba(48, 209, 88, 0.12);
+  color: var(--green);
+  border: 1px solid rgba(48, 209, 88, 0.25);
+}
+
+.btn-send {
+  background: var(--orange);
+  color: #000000;
+}
+.btn-send:hover { background: var(--orange-hover); }
+.btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* ─── Category Badge ─────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.badge-support {
+  background: var(--cat-support-bg);
+  color: var(--cat-support-text);
+}
+
+.badge-sponsorship {
+  background: var(--cat-sponsorship-bg);
+  color: var(--cat-sponsorship-text);
+}
+
+.badge-general {
+  background: var(--cat-general-bg);
+  color: var(--cat-general-text);
+}
+
+/* ─── Utility ───────────────────────────────────────────────────── */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+}

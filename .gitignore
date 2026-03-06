@@ -1,0 +1,15 @@
+node_modules/
+dist/
+
+# Secrets & tokens
+.env
+.tokens.json
+.tokens-*.json
+.categories.json
+
+# macOS
+.DS_Store
+
+# Claude session data
+.claude/
+memory/

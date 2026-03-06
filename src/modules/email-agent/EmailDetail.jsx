@@ -1,0 +1,480 @@
+import { useState, useRef, useEffect } from 'react'
+import { generateReply, sendEmail } from '../../services/api.js'
+
+const CATEGORY_LABELS = {
+  student_support: 'Student Support',
+  sponsorship: 'Sponsorship',
+  general: 'Spam',
+}
+
+const PERSONA_INFO = {
+  student_support: { label: 'Shirt School Support Team', description: 'Helpful & professional' },
+  sponsorship:     { label: 'Support Team', description: 'Professional tone' },
+  general:         null,
+}
+
+const CATEGORIES = [
+  { value: 'student_support', label: 'Student Support' },
+  { value: 'sponsorship',     label: 'Sponsorship' },
+  { value: 'general',         label: 'Spam' },
+]
+
+// ─── Icons ────────────────────────────────────────────────────────────────────
+const IconSparkle = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 1v14M1 8h14M4.5 4.5l7 7M11.5 4.5l-7 7" />
+  </svg>
+)
+const IconCopy = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="5" y="5" width="9" height="9" rx="1" />
+    <path d="M3 11H2a1 1 0 01-1-1V2a1 1 0 011-1h8a1 1 0 011 1v1" />
+  </svg>
+)
+const IconCheck = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 8l5 5 7-8" />
+  </svg>
+)
+const IconRefresh = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M13.5 4A6.5 6.5 0 102 8.5" />
+    <path d="M13.5 1v3h-3" />
+  </svg>
+)
+const IconSend = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 2L1 7l5 3 2 5 2-5 4-8z" />
+  </svg>
+)
+const IconMarkUnread = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="3" width="14" height="10" rx="1.5" />
+    <path d="M1 5l7 5 7-5" />
+    <circle cx="13" cy="4" r="3" fill="var(--orange)" stroke="var(--bg-card)" strokeWidth="1.5" />
+  </svg>
+)
+const IconArchive = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="1" width="14" height="4" rx="1" />
+    <path d="M2 5v9a1 1 0 001 1h10a1 1 0 001-1V5" />
+    <path d="M6 9h4" />
+  </svg>
+)
+const IconChevron = ({ expanded }) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+    style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}>
+    <path d="M4 6l4 4 4-4" />
+  </svg>
+)
+
+function formatFullDate(isoString) {
+  return new Date(isoString).toLocaleString('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  })
+}
+
+function formatShortDate(isoString) {
+  return new Date(isoString).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  })
+}
+
+const AVATAR_COLORS = [
+  '#2563eb', '#7c3aed', '#059669', '#dc2626',
+  '#0891b2', '#d97706', '#db2777', '#65a30d',
+]
+function getAvatarColor(name) {
+  return AVATAR_COLORS[(name || '?').charCodeAt(0) % AVATAR_COLORS.length]
+}
+function getInitials(name) {
+  if (!name) return '?'
+  const parts = name.trim().split(/\s+/)
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+  return name.slice(0, 2).toUpperCase()
+}
+
+// ─── HTML email iframe ────────────────────────────────────────────────────────
+function HtmlEmail({ html, msgId }) {
+  const iframeRef = useRef(null)
+
+  const injectedStyles = `<style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 8px 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      font-size: 14px; line-height: 1.6; color: #1C1C1E;
+      word-wrap: break-word; overflow-wrap: break-word;
+    }
+    img { max-width: 100%; height: auto; }
+    a { color: #0066CC; }
+    pre, code { white-space: pre-wrap; font-size: 13px; }
+    table { max-width: 100%; }
+    blockquote { border-left: 3px solid #E5E5EA; margin: 0 0 0 8px; padding-left: 12px; color: #6C6C70; }
+  </style>`
+
+  const srcDoc = html.includes('</head>')
+    ? html.replace('</head>', `${injectedStyles}</head>`)
+    : `<!DOCTYPE html><html><head><meta charset="utf-8">${injectedStyles}</head><body>${html}</body></html>`
+
+  function adjustHeight() {
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc?.body) {
+        const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+        iframeRef.current.style.height = `${h + 8}px`
+      }
+    } catch (_) { /* cross-origin edge case */ }
+  }
+
+  useEffect(() => {
+    window.addEventListener('resize', adjustHeight)
+    return () => window.removeEventListener('resize', adjustHeight)
+  }, [])
+
+  return (
+    <iframe
+      ref={iframeRef}
+      srcDoc={srcDoc}
+      sandbox="allow-same-origin"
+      onLoad={adjustHeight}
+      className="email-html-frame"
+      title={`Email content${msgId ? ` (${msgId})` : ''}`}
+    />
+  )
+}
+
+// ─── Individual thread message ─────────────────────────────────────────────────
+function ThreadMessage({ message, defaultExpanded = true }) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
+
+  const senderLabel = message.isOutgoing
+    ? (message.senderName || message.from || 'You')
+    : (message.senderName || message.from)
+
+  return (
+    <div className={`thread-msg ${message.isOutgoing ? 'thread-msg--outgoing' : 'thread-msg--incoming'}`}>
+      <div className="thread-msg-header" onClick={() => setExpanded((v) => !v)}>
+        <div
+          className="thread-msg-avatar"
+          style={{ background: message.isOutgoing ? 'var(--orange)' : getAvatarColor(senderLabel) }}
+        >
+          {getInitials(senderLabel)}
+        </div>
+        <div className="thread-msg-meta">
+          <span className="thread-msg-sender">{senderLabel}</span>
+          {message.isOutgoing && <span className="thread-msg-you-tag">You</span>}
+          {!expanded && (
+            <span className="thread-msg-preview-collapsed">
+              {(message.bodyText || '').slice(0, 60)}…
+            </span>
+          )}
+        </div>
+        <span className="thread-msg-time">{formatShortDate(message.timestamp)}</span>
+        <span className="thread-msg-toggle">
+          <IconChevron expanded={expanded} />
+        </span>
+      </div>
+
+      {expanded && (
+        <div className="thread-msg-body">
+          {message.isOutgoing ? (
+            <pre className="thread-msg-text thread-msg-text--outgoing">
+              {message.bodyText || message.body || '(no content)'}
+            </pre>
+          ) : message.bodyHtml ? (
+            <div className="email-html-wrapper">
+              <HtmlEmail html={message.bodyHtml} msgId={message.id} />
+            </div>
+          ) : (
+            <pre className="thread-msg-text">{message.bodyText || message.body || '(no content)'}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, viewMode }) {
+  const [draft, setDraft] = useState('')
+  const [personaUsed, setPersonaUsed] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [fromAccount, setFromAccount] = useState(email.defaultFrom || connectedAccounts[0] || '')
+  const [confirmSend, setConfirmSend] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [sendError, setSendError] = useState('')
+
+  const persona = PERSONA_INFO[email.category]
+
+  const effectiveFrom = connectedAccounts.includes(fromAccount)
+    ? fromAccount
+    : connectedAccounts[0] || fromAccount
+
+  // If we have thread messages, use them; otherwise fall back to single-message view
+  const messages = email.messages && email.messages.length > 0 ? email.messages : null
+
+  async function handleGenerate() {
+    setLoading(true)
+    setError('')
+    setCopied(false)
+    setSent(false)
+    setSendError('')
+    setConfirmSend(false)
+    try {
+      const result = await generateReply(email, email.category)
+      setDraft(result.draft)
+      setPersonaUsed(result.persona)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleCopy() {
+    if (!draft) return
+    await navigator.clipboard.writeText(draft)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2500)
+  }
+
+  async function handleSend() {
+    setSending(true)
+    setSendError('')
+    try {
+      await sendEmail(email, draft, effectiveFrom)
+      setSent(true)
+      setConfirmSend(false)
+    } catch (err) {
+      setSendError(err.message)
+      setConfirmSend(false)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <div className="email-detail-panel">
+      {/* ── Thread Header ── */}
+      <div className="detail-header">
+        <div className="detail-header-top">
+          <div className={`category-select-wrapper cat-${email.category}`}>
+            <select
+              className="category-select"
+              value={email.category}
+              onChange={(e) => onReclassify?.(email, e.target.value)}
+              title="Change category"
+            >
+              {CATEGORIES.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <span className="detail-inbox-tag" title={`Fetched via ${email.account}`}>
+            {email.account}
+          </span>
+          {persona && (
+            <span className="persona-tag">
+              Reply as: <strong>{persona.label}</strong>
+              <span className="persona-tone">{persona.description}</span>
+            </span>
+          )}
+          <div className="detail-header-actions">
+            <button
+              className="btn-mark-unread"
+              onClick={() => onMarkUnread?.(email)}
+              title="Mark as unread"
+            >
+              <IconMarkUnread />
+              Mark unread
+            </button>
+            {viewMode === 'inbox' && (
+              <button
+                className="btn-archive-detail"
+                onClick={() => onArchive?.(email)}
+                title="Archive thread"
+              >
+                <IconArchive />
+                Archive
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="detail-subject-row">
+          <h2 className="detail-subject">{email.subject}</h2>
+          <div className="detail-subject-meta">
+            {messages && messages.length > 1 && (
+              <span className="thread-message-count">{messages.length} messages</span>
+            )}
+            {email.status === 'awaiting_reply' && (
+              <span className="status-badge status-awaiting">Awaiting reply</span>
+            )}
+            {email.status === 'replied' && (
+              <span className="status-badge status-replied">Replied</span>
+            )}
+          </div>
+        </div>
+
+        <div className="detail-meta">
+          <div className="detail-meta-row">
+            <span className="meta-label">From</span>
+            <span className="meta-value">{email.name} &lt;{email.from}&gt;</span>
+          </div>
+          <div className="detail-meta-row">
+            <span className="meta-label">To</span>
+            <span className="meta-value">{email.to}</span>
+          </div>
+          <div className="detail-meta-row">
+            <span className="meta-label">Date</span>
+            <span className="meta-value">{formatFullDate(email.timestamp)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Thread Messages ── */}
+      <div className="detail-body">
+        {messages ? (
+          <div className="thread-messages">
+            {messages.map((msg, i) => (
+              <ThreadMessage
+                key={msg.id || i}
+                message={msg}
+                defaultExpanded={i === messages.length - 1 || !msg.isOutgoing}
+              />
+            ))}
+          </div>
+        ) : (
+          // Fallback: single message (old data shape)
+          email.bodyHtml ? (
+            <div className="email-html-wrapper">
+              <HtmlEmail html={email.bodyHtml} />
+            </div>
+          ) : (
+            <pre className="email-body-text">{email.bodyText || email.body}</pre>
+          )
+        )}
+      </div>
+
+      {/* ── AI Draft Section ── */}
+      <div className="draft-section">
+        <div className="draft-section-header">
+          <div className="draft-section-title">
+            <span className="draft-sparkle-icon"><IconSparkle /></span>
+            AI Draft Reply
+          </div>
+          {email.category === 'general' ? (
+            <div className="no-reply-notice">Newsletter / spam — no reply needed.</div>
+          ) : (
+            <div className="draft-actions-top">
+              <button className="btn btn-primary" onClick={handleGenerate} disabled={loading}>
+                {draft ? (
+                  <><IconRefresh />{loading ? 'Regenerating...' : 'Regenerate'}</>
+                ) : (
+                  <><IconSparkle />{loading ? 'Drafting...' : 'Generate Draft'}</>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {error && <div className="draft-error">{error}</div>}
+
+        {loading && !draft && (
+          <div className="draft-loading">
+            <div className="loading-shimmer" />
+            <div className="loading-shimmer" style={{ width: '85%' }} />
+            <div className="loading-shimmer" style={{ width: '70%' }} />
+          </div>
+        )}
+
+        {draft && (
+          <div className="draft-content">
+            {connectedAccounts.length > 0 && (
+              <div className="draft-from-row">
+                <label className="draft-from-label">Send from</label>
+                <select
+                  className="draft-from-select"
+                  value={effectiveFrom}
+                  onChange={(e) => setFromAccount(e.target.value)}
+                  disabled={sent}
+                >
+                  {connectedAccounts.map((acc) => (
+                    <option key={acc} value={acc}>{acc}</option>
+                  ))}
+                </select>
+                {email.defaultFrom &&
+                  effectiveFrom !== email.defaultFrom &&
+                  connectedAccounts.includes(email.defaultFrom) && (
+                    <button
+                      className="draft-from-reset"
+                      onClick={() => setFromAccount(email.defaultFrom)}
+                    >
+                      Reset to suggested
+                    </button>
+                  )}
+              </div>
+            )}
+
+            {personaUsed && (
+              <div className="draft-persona-label">
+                Drafted as: <strong>{personaUsed}</strong>
+              </div>
+            )}
+
+            <textarea
+              className="draft-textarea"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={12}
+              disabled={sent}
+            />
+
+            {sendError && <div className="draft-error" style={{ marginTop: 8 }}>{sendError}</div>}
+
+            {confirmSend ? (
+              <div className="send-confirm-bar">
+                <span className="send-confirm-text">
+                  Send to <strong>{email.from}</strong> from <strong>{effectiveFrom}</strong>?
+                </span>
+                <button className="btn btn-ghost" onClick={() => setConfirmSend(false)}>Cancel</button>
+                <button className="btn btn-send" onClick={handleSend} disabled={sending}>
+                  <IconSend />{sending ? 'Sending...' : 'Send Now'}
+                </button>
+              </div>
+            ) : (
+              <div className="draft-footer">
+                <span className="draft-hint">
+                  {sent
+                    ? `Sent from ${effectiveFrom}.`
+                    : 'Edit above — nothing sends without your approval.'}
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className={`btn ${copied ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={handleCopy}
+                    disabled={sent}
+                  >
+                    {copied ? <IconCheck /> : <IconCopy />}
+                    {copied ? 'Copied!' : 'Copy'}
+                  </button>
+                  {sent ? (
+                    <button className="btn btn-success"><IconCheck />Sent</button>
+                  ) : (
+                    <button className="btn btn-send" onClick={() => setConfirmSend(true)} disabled={sending}>
+                      <IconSend />Send via Gmail
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
