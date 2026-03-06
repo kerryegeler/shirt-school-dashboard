@@ -197,7 +197,7 @@ function replaceCidReferences(html, attachments, messageId, account) {
   for (const att of attachments) {
     if (att.contentId && att.isInline) {
       const apiUrl =
-        `http://localhost:3001/api/emails/${messageId}/attachment/${att.attachmentId}` +
+        `/api/emails/${messageId}/attachment/${att.attachmentId}` +
         `?type=${encodeURIComponent(att.mimeType)}&account=${encodeURIComponent(account)}`
       const pattern = new RegExp(`cid:${escapeRegex(att.contentId)}(\\S*)?`, 'gi')
       html = html.replace(pattern, apiUrl)
