@@ -15,7 +15,7 @@ app.use(express.json())
 // ─── Hardcoded target accounts ───────────────────────────────────────────────
 // The app ALWAYS fetches from and sends on behalf of these two accounts only.
 const TARGET_ACCOUNTS = ['support@shirtschool.com', 'kerry@shirtschool.com']
-const REDIRECT_URI = 'http://localhost:5173/auth/callback'
+const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:5173/auth/callback'
 const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
@@ -654,6 +654,18 @@ Reply as instructed in the context above.`
     res.status(500).json({ error: 'Failed to generate reply. Check your API key.' })
   }
 })
+
+// ─── Serve built frontend (production) ────────────────────────────────────────
+const distPath = path.resolve('dist')
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath))
+  // SPA catch-all: serve index.html for any non-API route
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api')) {
+      res.sendFile(path.join(distPath, 'index.html'))
+    }
+  })
+}
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
