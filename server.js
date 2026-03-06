@@ -655,18 +655,6 @@ Reply as instructed in the context above.`
   }
 })
 
-// ─── Serve built frontend (production) ────────────────────────────────────────
-const distPath = path.resolve('dist')
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath))
-  // SPA catch-all: serve index.html for any non-API route
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(path.join(distPath, 'index.html'))
-    }
-  })
-}
-
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -677,7 +665,18 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
-app.listen(PORT, () => {
+// ─── Serve built frontend (production) ────────────────────────────────────────
+const distPath = path.resolve('dist')
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath))
+  // SPA catch-all: serve index.html for any non-API route
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next()
+    res.sendFile(path.join(distPath, 'index.html'))
+  })
+}
+
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\nShirt School API server → http://localhost:${PORT}`)
   if (!process.env.ANTHROPIC_API_KEY) console.warn('  WARNING: ANTHROPIC_API_KEY not set')
   if (!process.env.GOOGLE_CLIENT_ID) console.warn('  WARNING: GOOGLE_CLIENT_ID not set')
