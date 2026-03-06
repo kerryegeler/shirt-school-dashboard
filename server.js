@@ -15,7 +15,9 @@ app.use(express.json())
 // ─── Hardcoded target accounts ───────────────────────────────────────────────
 // The app ALWAYS fetches from and sends on behalf of these two accounts only.
 const TARGET_ACCOUNTS = ['support@shirtschool.com', 'kerry@shirtschool.com']
-const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:5173/auth/callback'
+const REDIRECT_URI = process.env.REDIRECT_URI ||
+  (process.env.RAILWAY_PUBLIC_URL ? process.env.RAILWAY_PUBLIC_URL + '/auth/callback' : null) ||
+  'http://localhost:5173/auth/callback'
 const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
