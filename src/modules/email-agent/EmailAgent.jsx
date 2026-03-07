@@ -185,7 +185,6 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         })
       } else {
         setEmails(data.emails)
-        if (!isRefresh) setSelectedEmail(data.emails[0] || null)
       }
 
       setNextPageTokens(data.nextPageTokens || null)
