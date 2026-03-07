@@ -71,6 +71,43 @@ export async function generateReply(email, category) {
   return data
 }
 
+export async function fetchFolders() {
+  const response = await fetch('/api/folders')
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to fetch folders')
+  return data.folders
+}
+
+export async function createFolder(name) {
+  const response = await fetch('/api/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to create folder')
+  return data.folder
+}
+
+export async function deleteFolder(id) {
+  const response = await fetch(`/api/folders/${id}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const data = await response.json()
+    throw new Error(data.error || 'Failed to delete folder')
+  }
+}
+
+export async function assignFolder(threadId, folderId) {
+  const response = await fetch(`/api/emails/${threadId}/folder`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderId }),
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to assign folder')
+  return data
+}
+
 export async function sendEmail(email, draft, fromAccount) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',

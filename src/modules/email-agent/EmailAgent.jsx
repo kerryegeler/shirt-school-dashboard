@@ -1,13 +1,31 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import EmailList from './EmailList.jsx'
 import EmailDetail from './EmailDetail.jsx'
-import { markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, fetchThread } from '../../services/api.js'
+import { markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, fetchThread, fetchFolders, createFolder, deleteFolder, assignFolder } from '../../services/api.js'
 import './EmailAgent.css'
 
 const IconEmail = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1" y="3" width="14" height="10" rx="1.5" />
     <path d="M1 5l7 5 7-5" />
+  </svg>
+)
+
+const IconFolder = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1 4a1 1 0 011-1h4l2 2h6a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1V4z" />
+  </svg>
+)
+
+const IconPlus = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+    <path d="M8 3v10M3 8h10" />
+  </svg>
+)
+
+const IconTrash = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 4h10M5 4V3h6v1M6 7v5M10 7v5M4 4l1 9h6l1-9" />
   </svg>
 )
 
@@ -19,10 +37,8 @@ const IconRefresh = () => (
 )
 
 const NAV_STATUS_VIEWS = [
-  { id: 'all',            label: 'All' },
-  { id: 'needs_reply',    label: 'Needs Reply' },
-  { id: 'awaiting_reply', label: 'Awaiting Response' },
-  { id: 'archived',       label: 'Archived' },
+  { id: 'all',      label: 'All' },
+  { id: 'archived', label: 'Archived' },
 ]
 
 const NAV_CATEGORY_VIEWS = [
@@ -40,6 +56,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
+  const [folders, setFolders] = useState([])
+  const [addingFolder, setAddingFolder] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
 
   const fetchEmails = useCallback(async (isRefresh = false, mode = null) => {
     const currentMode = mode ?? viewMode
@@ -65,6 +84,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   // Initial load
   useEffect(() => {
     fetchEmails()
+    fetchFolders().then(setFolders).catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-refresh every 2 minutes (inbox only)
@@ -89,16 +109,16 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setSelectedEmail(null)
         setSelectedIds(new Set())
         setSidebarView('all')
-        setEmails([]) // clear inbox data so it doesn't flash into archived views
-        fetchEmails(true, 'archived') // isRefresh=true keeps nav visible (no full skeleton)
+        setEmails([])
+        fetchEmails(true, 'archived')
       }
     } else {
       if (viewMode === 'archived') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setSelectedIds(new Set())
-        setEmails([]) // clear archived data so it doesn't appear in status views
-        fetchEmails(true, 'inbox') // isRefresh=true keeps nav visible (no full skeleton)
+        setEmails([])
+        fetchEmails(true, 'inbox')
       }
       setSidebarView(viewId)
     }
@@ -109,19 +129,21 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const filteredEmails = useMemo(() => {
     if (viewMode === 'archived') return emails
     switch (sidebarView) {
-      case 'needs_reply':    return emails.filter((e) => e.status === 'unread' || e.status === 'read')
-      case 'awaiting_reply': return emails.filter((e) => e.status === 'awaiting_reply')
       case 'student_support': return emails.filter((e) => e.category === 'student_support')
-      case 'sponsorship':    return emails.filter((e) => e.category === 'sponsorship')
-      case 'general':        return emails.filter((e) => e.category === 'general')
-      default:               return emails
+      case 'sponsorship':     return emails.filter((e) => e.category === 'sponsorship')
+      case 'general':         return emails.filter((e) => e.category === 'general')
+      default: {
+        // Check if sidebarView matches a folder id
+        if (folders.some((f) => f.id === sidebarView)) {
+          return emails.filter((e) => e.folderId === sidebarView)
+        }
+        return emails
+      }
     }
-  }, [emails, viewMode, sidebarView])
+  }, [emails, viewMode, sidebarView, folders])
 
   const counts = useMemo(() => ({
     all:             emails.length,
-    needs_reply:     emails.filter((e) => e.status === 'unread' || e.status === 'read').length,
-    awaiting_reply:  emails.filter((e) => e.status === 'awaiting_reply').length,
     student_support: emails.filter((e) => e.category === 'student_support').length,
     sponsorship:     emails.filter((e) => e.category === 'sponsorship').length,
     general:         emails.filter((e) => e.category === 'general').length,
@@ -151,12 +173,13 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   async function handleSelectEmail(email) {
     setSelectedEmail(email)
+    const primaryAccount = (email.accounts || [email.account])[0]
     if (!email.read) {
       setEmailRead(email.id, true)
-      markEmailRead(email.id, email.account).catch(() => setEmailRead(email.id, false))
+      markEmailRead(email.id, primaryAccount).catch(() => setEmailRead(email.id, false))
     }
     // Fetch fresh thread data in background (picks up new replies)
-    fetchThread(email.id, email.account)
+    fetchThread(email.id, primaryAccount)
       .then((fresh) => {
         if (!fresh) return
         setEmails((prev) => prev.map((e) => e.id === email.id ? { ...e, ...fresh } : e))
@@ -169,7 +192,8 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   async function handleMarkUnread(email) {
     setEmailRead(email.id, false)
-    markEmailUnread(email.id, email.account).catch(() => setEmailRead(email.id, true))
+    const primaryAccount = (email.accounts || [email.account])[0]
+    markEmailUnread(email.id, primaryAccount).catch(() => setEmailRead(email.id, true))
   }
 
   async function handleReclassify(email, newCategory) {
@@ -186,8 +210,11 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   async function handleArchive(email) {
     setEmails((prev) => prev.filter((e) => e.id !== email.id))
     if (selectedEmail?.id === email.id) setSelectedEmail(null)
-    archiveEmail(email.id, email.account).catch(() => {
-      setEmails((prev) => [...prev, email].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)))
+    const accounts = email.accounts || [email.account]
+    Promise.allSettled(accounts.map((acct) => archiveEmail(email.id, acct))).then((results) => {
+      if (results.every((r) => r.status === 'rejected')) {
+        setEmails((prev) => [...prev, email].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)))
+      }
     })
   }
 
@@ -214,7 +241,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     clearSelection()
     setEmails((prev) => prev.filter((e) => !ids.has(e.id)))
     if (selectedEmail && ids.has(selectedEmail.id)) setSelectedEmail(null)
-    await Promise.allSettled(toArchive.map((e) => archiveEmail(e.id, e.account)))
+    await Promise.allSettled(
+      toArchive.flatMap((e) => (e.accounts || [e.account]).map((acct) => archiveEmail(e.id, acct)))
+    )
   }
 
   async function handleBulkMarkRead(read) {
@@ -227,7 +256,10 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
       return { ...e, read, status }
     }))
     await Promise.allSettled(
-      targets.map((e) => read ? markEmailRead(e.id, e.account) : markEmailUnread(e.id, e.account))
+      targets.map((e) => {
+        const acct = (e.accounts || [e.account])[0]
+        return read ? markEmailRead(e.id, acct) : markEmailUnread(e.id, acct)
+      })
     )
   }
 
@@ -237,6 +269,35 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     setEmails((prev) => prev.map((e) => ids.has(e.id) ? { ...e, category: newCategory } : e))
     const targets = emails.filter((e) => ids.has(e.id))
     await Promise.allSettled(targets.map((e) => reclassifyEmail(e.id, newCategory)))
+  }
+
+  // ── Folder actions ──────────────────────────────────────────────────────────
+
+  async function handleCreateFolder() {
+    const name = newFolderName.trim()
+    if (!name) return
+    setNewFolderName('')
+    setAddingFolder(false)
+    try {
+      const folder = await createFolder(name)
+      setFolders((prev) => [...prev, folder])
+    } catch {}
+  }
+
+  async function handleDeleteFolder(folder) {
+    setFolders((prev) => prev.filter((f) => f.id !== folder.id))
+    if (sidebarView === folder.id) setSidebarView('all')
+    // Clear folderId from any emails assigned to this folder
+    setEmails((prev) => prev.map((e) => e.folderId === folder.id ? { ...e, folderId: null } : e))
+    deleteFolder(folder.id).catch(() => setFolders((prev) => [...prev, folder]))
+  }
+
+  async function handleBulkAssignFolder(folderId) {
+    const ids = new Set(selectedIds)
+    clearSelection()
+    setEmails((prev) => prev.map((e) => ids.has(e.id) ? { ...e, folderId: folderId || null } : e))
+    const targets = emails.filter((e) => ids.has(e.id))
+    await Promise.allSettled(targets.map((e) => assignFolder(e.id, folderId)))
   }
 
   // ── Active nav view id ──────────────────────────────────────────────────────
@@ -304,6 +365,54 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
               </button>
             ))}
           </div>
+
+          <div className="email-nav-section">
+            <div className="email-nav-section-label email-nav-section-label--folders">
+              <span>Folders</span>
+              <button
+                className="folder-add-btn"
+                title="New folder"
+                onClick={() => { setAddingFolder(true); setNewFolderName('') }}
+              >
+                <IconPlus />
+              </button>
+            </div>
+            {addingFolder && (
+              <form
+                className="folder-input-row"
+                onSubmit={(e) => { e.preventDefault(); handleCreateFolder() }}
+              >
+                <input
+                  className="folder-input"
+                  autoFocus
+                  placeholder="Folder name"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Escape' && setAddingFolder(false)}
+                />
+                <button type="submit" className="folder-input-ok" disabled={!newFolderName.trim()}>
+                  Add
+                </button>
+              </form>
+            )}
+            {folders.map((folder) => (
+              <div
+                key={folder.id}
+                className={`email-nav-item folder-nav-item ${activeNavId === folder.id ? 'active' : ''}`}
+                onClick={() => handleNavClick(folder.id)}
+              >
+                <span className="folder-nav-icon"><IconFolder /></span>
+                <span className="folder-nav-name">{folder.name}</span>
+                <button
+                  className="folder-delete-btn"
+                  title="Delete folder"
+                  onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder) }}
+                >
+                  <IconTrash />
+                </button>
+              </div>
+            ))}
+          </div>
         </nav>
 
         {loading ? (
@@ -341,6 +450,8 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
               onBulkMarkRead={handleBulkMarkRead}
               onBulkReclassify={handleBulkReclassify}
               onClearSelection={clearSelection}
+              folders={folders}
+              onBulkAssignFolder={handleBulkAssignFolder}
             />
 
             <div className="email-detail-wrapper">

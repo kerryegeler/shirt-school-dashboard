@@ -123,6 +123,20 @@ function saveCategoryOverride(id, category) {
   fs.writeFileSync(CATEGORIES_PATH, JSON.stringify(data, null, 2))
 }
 
+// ─── Folder storage ────────────────────────────────────────────────────────────
+const FOLDERS_PATH = path.resolve('.folders.json')
+
+function loadFolders() {
+  try {
+    if (fs.existsSync(FOLDERS_PATH)) return JSON.parse(fs.readFileSync(FOLDERS_PATH, 'utf8'))
+  } catch {}
+  return { folders: [], assignments: {} }
+}
+
+function saveFolders(data) {
+  fs.writeFileSync(FOLDERS_PATH, JSON.stringify(data, null, 2))
+}
+
 // ─── Per-account token storage ────────────────────────────────────────────────
 function tokenPath(account) {
   return path.resolve(`.tokens-${account.split('@')[0]}.json`)
@@ -343,6 +357,7 @@ function buildMessageObject(message, account) {
 
   return {
     id: message.id,
+    account,
     messageId,
     from: fromEmail,
     senderName,
@@ -397,11 +412,16 @@ function buildThreadObject(thread, account) {
     .map((m) => `[${m.isOutgoing ? 'Sent' : 'Received'} — ${new Date(m.timestamp).toLocaleDateString()}]\n${m.bodyText}`)
     .join('\n\n---\n\n')
 
+  const folderData = loadFolders()
+  const folderId = folderData.assignments[thread.id] || null
+
   return {
     id: thread.id,
     threadId: thread.id,
     account,
+    accounts: [account],
     category,
+    folderId,
     defaultFrom: defaultFromAccount(category, subject, firstMsg.bodyText),
     status,
     read: !hasUnread,
@@ -595,7 +615,25 @@ app.get('/api/emails', requireAuth, async (req, res) => {
         return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
       })
     )
-    const emails = threadsByAccount.flat().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    // Deduplicate threads that appear in both accounts (same thread ID = same conversation)
+    // and merge their messages chronologically
+    const threadMap = new Map()
+    for (const thread of threadsByAccount.flat()) {
+      if (threadMap.has(thread.id)) {
+        const existing = threadMap.get(thread.id)
+        const existingMsgIds = new Set(existing.messages.map((m) => m.messageId || m.id))
+        const newMsgs = thread.messages.filter((m) => !existingMsgIds.has(m.messageId || m.id))
+        existing.messages = [...existing.messages, ...newMsgs]
+          .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+        if (!existing.accounts.includes(thread.account)) existing.accounts.push(thread.account)
+        const latest = existing.messages[existing.messages.length - 1]
+        existing.timestamp = latest.timestamp
+        existing.preview = latest.preview
+      } else {
+        threadMap.set(thread.id, thread)
+      }
+    }
+    const emails = [...threadMap.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
     res.json({ emails })
   } catch (error) {
     console.error('Gmail fetch error:', error.message)
@@ -733,6 +771,51 @@ app.patch('/api/emails/:id/category', requireAuth, (req, res) => {
   // Return the new defaultFrom so the frontend can update it
   const defaultFrom = defaultFromAccount(category, '', '')
   res.json({ success: true, category, defaultFrom })
+})
+
+// ─── Folder routes ────────────────────────────────────────────────────────────
+
+app.get('/api/folders', requireAuth, (req, res) => {
+  const data = loadFolders()
+  const counts = {}
+  for (const folderId of Object.values(data.assignments)) {
+    counts[folderId] = (counts[folderId] || 0) + 1
+  }
+  res.json({ folders: data.folders.map((f) => ({ ...f, count: counts[f.id] || 0 })) })
+})
+
+app.post('/api/folders', requireAuth, (req, res) => {
+  const { name } = req.body
+  if (!name?.trim()) return res.status(400).json({ error: 'Folder name required' })
+  const data = loadFolders()
+  const folder = { id: crypto.randomUUID(), name: name.trim(), createdAt: new Date().toISOString() }
+  data.folders.push(folder)
+  saveFolders(data)
+  res.json({ folder })
+})
+
+app.delete('/api/folders/:id', requireAuth, (req, res) => {
+  const { id } = req.params
+  const data = loadFolders()
+  data.folders = data.folders.filter((f) => f.id !== id)
+  for (const [threadId, folderId] of Object.entries(data.assignments)) {
+    if (folderId === id) delete data.assignments[threadId]
+  }
+  saveFolders(data)
+  res.json({ success: true })
+})
+
+app.patch('/api/emails/:id/folder', requireAuth, (req, res) => {
+  const { id } = req.params
+  const { folderId } = req.body
+  const data = loadFolders()
+  if (folderId) {
+    data.assignments[id] = folderId
+  } else {
+    delete data.assignments[id]
+  }
+  saveFolders(data)
+  res.json({ success: true, folderId: folderId || null })
 })
 
 // ─── AI routes ────────────────────────────────────────────────────────────────

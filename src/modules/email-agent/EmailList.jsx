@@ -86,6 +86,12 @@ const IconTag = () => (
   </svg>
 )
 
+const IconFolderBulk = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1 4a1 1 0 011-1h4l2 2h6a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1V4z" />
+  </svg>
+)
+
 const IconArchiveBulk = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1" y="1" width="14" height="4" rx="1" />
@@ -106,13 +112,20 @@ export default function EmailList({
   emails, selectedId, onSelect, viewMode, onArchive,
   selectedIds, onToggleSelect,
   onBulkArchive, onBulkMarkRead, onBulkReclassify, onClearSelection,
+  folders = [], onBulkAssignFolder,
 }) {
   const [showCategoryPicker, setShowCategoryPicker] = useState(false)
+  const [showFolderPicker, setShowFolderPicker] = useState(false)
   const anySelected = selectedIds.size > 0
 
   function handleReclassify(value) {
     setShowCategoryPicker(false)
     onBulkReclassify(value)
+  }
+
+  function handleAssignFolder(folderId) {
+    setShowFolderPicker(false)
+    onBulkAssignFolder(folderId)
   }
 
   return (
@@ -165,12 +178,6 @@ export default function EmailList({
                   <span className={CATEGORY_BADGE_CLASS[email.category]}>
                     {CATEGORY_LABELS[email.category]}
                   </span>
-                  {email.status === 'awaiting_reply' && (
-                    <span className="status-badge status-awaiting">Awaiting reply</span>
-                  )}
-                  {email.status === 'replied' && (
-                    <span className="status-badge status-replied">Replied</span>
-                  )}
                   <span className="email-item-preview">{email.preview}</span>
                 </div>
               </div>
@@ -203,6 +210,23 @@ export default function EmailList({
             </div>
           )}
 
+          {/* Folder picker popover */}
+          {showFolderPicker && (
+            <div className="bulk-category-picker bulk-folder-picker">
+              {folders.length === 0 && (
+                <span className="bulk-folder-empty">No folders yet</span>
+              )}
+              {folders.map((f) => (
+                <button key={f.id} className="bulk-category-option" onClick={() => handleAssignFolder(f.id)}>
+                  {f.name}
+                </button>
+              ))}
+              <button className="bulk-category-option bulk-folder-remove" onClick={() => handleAssignFolder(null)}>
+                Remove from folder
+              </button>
+            </div>
+          )}
+
           <span className="bulk-toolbar-count">{selectedIds.size}</span>
           <div className="bulk-toolbar-divider" />
 
@@ -215,16 +239,23 @@ export default function EmailList({
           <button
             className={`bulk-toolbar-btn ${showCategoryPicker ? 'bulk-toolbar-btn--active' : ''}`}
             title="Reclassify"
-            onClick={() => setShowCategoryPicker((v) => !v)}
+            onClick={() => { setShowCategoryPicker((v) => !v); setShowFolderPicker(false) }}
           >
             <IconTag />
+          </button>
+          <button
+            className={`bulk-toolbar-btn ${showFolderPicker ? 'bulk-toolbar-btn--active' : ''}`}
+            title="Move to folder"
+            onClick={() => { setShowFolderPicker((v) => !v); setShowCategoryPicker(false) }}
+          >
+            <IconFolderBulk />
           </button>
           <button className="bulk-toolbar-btn" title="Archive" onClick={onBulkArchive}>
             <IconArchiveBulk />
           </button>
 
           <div className="bulk-toolbar-divider" />
-          <button className="bulk-toolbar-btn bulk-toolbar-btn--close" title="Clear selection" onClick={() => { onClearSelection(); setShowCategoryPicker(false) }}>
+          <button className="bulk-toolbar-btn bulk-toolbar-btn--close" title="Clear selection" onClick={() => { onClearSelection(); setShowCategoryPicker(false); setShowFolderPicker(false) }}>
             <IconClose />
           </button>
         </div>

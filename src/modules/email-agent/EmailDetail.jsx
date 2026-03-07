@@ -47,6 +47,11 @@ const IconSend = () => (
     <path d="M14 2L1 7l5 3 2 5 2-5 4-8z" />
   </svg>
 )
+const IconEdit = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M11 2l3 3-9 9H2v-3L11 2z" />
+  </svg>
+)
 const IconMarkUnread = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1" y="3" width="14" height="10" rx="1.5" />
@@ -198,6 +203,7 @@ function ThreadMessage({ message, defaultExpanded = true }) {
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, viewMode }) {
   const [draft, setDraft] = useState('')
+  const [manualMode, setManualMode] = useState(false)
   const [personaUsed, setPersonaUsed] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -217,7 +223,18 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   // If we have thread messages, use them; otherwise fall back to single-message view
   const messages = email.messages && email.messages.length > 0 ? email.messages : null
 
+  function handleWriteReply() {
+    setManualMode(true)
+    setDraft('')
+    setPersonaUsed('')
+    setError('')
+    setSent(false)
+    setSendError('')
+    setConfirmSend(false)
+  }
+
   async function handleGenerate() {
+    setManualMode(false)
     setLoading(true)
     setError('')
     setCopied(false)
@@ -311,12 +328,6 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
             {messages && messages.length > 1 && (
               <span className="thread-message-count">{messages.length} messages</span>
             )}
-            {email.status === 'awaiting_reply' && (
-              <span className="status-badge status-awaiting">Awaiting reply</span>
-            )}
-            {email.status === 'replied' && (
-              <span className="status-badge status-replied">Replied</span>
-            )}
           </div>
         </div>
 
@@ -371,8 +382,15 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
             <div className="no-reply-notice">Newsletter / spam — no reply needed.</div>
           ) : (
             <div className="draft-actions-top">
+              <button
+                className={`btn btn-secondary ${manualMode ? 'btn-active-outline' : ''}`}
+                onClick={handleWriteReply}
+                disabled={loading}
+              >
+                <IconEdit />Write Reply
+              </button>
               <button className="btn btn-primary" onClick={handleGenerate} disabled={loading}>
-                {draft ? (
+                {draft && !manualMode ? (
                   <><IconRefresh />{loading ? 'Regenerating...' : 'Regenerate'}</>
                 ) : (
                   <><IconSparkle />{loading ? 'Drafting...' : 'Generate Draft'}</>
@@ -392,7 +410,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
           </div>
         )}
 
-        {draft && (
+        {(draft || manualMode) && (
           <div className="draft-content">
             {connectedAccounts.length > 0 && (
               <div className="draft-from-row">
@@ -432,6 +450,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
               onChange={(e) => setDraft(e.target.value)}
               rows={12}
               disabled={sent}
+              placeholder={manualMode && !draft ? 'Write your reply here...' : ''}
             />
 
             {sendError && <div className="draft-error" style={{ marginTop: 8 }}>{sendError}</div>}

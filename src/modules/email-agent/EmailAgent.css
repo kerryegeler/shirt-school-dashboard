@@ -170,6 +170,151 @@
   color: var(--orange);
 }
 
+/* ─── Folder Nav ─────────────────────────────────────────────────── */
+.email-nav-section-label--folders {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 8px;
+}
+
+.folder-add-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.1s, background 0.1s;
+}
+
+.folder-add-btn:hover {
+  color: var(--orange);
+  background: var(--orange-dim);
+}
+
+.folder-add-btn svg {
+  width: 11px;
+  height: 11px;
+}
+
+.folder-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 6px;
+}
+
+.folder-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.folder-input:focus {
+  border-color: var(--orange);
+}
+
+.folder-input-ok {
+  background: var(--orange);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.folder-input-ok:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.folder-nav-item {
+  cursor: pointer;
+}
+
+.folder-nav-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.folder-nav-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.folder-nav-item.active .folder-nav-icon {
+  color: var(--orange);
+}
+
+.folder-nav-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: none;
+  align-items: center;
+  padding: 2px 3px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: color 0.1s;
+}
+
+.folder-delete-btn svg {
+  width: 11px;
+  height: 11px;
+}
+
+.folder-nav-item:hover .folder-delete-btn {
+  display: flex;
+}
+
+.folder-delete-btn:hover {
+  color: var(--red);
+}
+
+/* Folder picker in bulk toolbar */
+.bulk-folder-picker {
+  min-width: 150px;
+}
+
+.bulk-folder-empty {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  display: block;
+}
+
+.bulk-folder-remove {
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
 /* ─── Email List Panel ───────────────────────────────────────────── */
 .email-list-panel {
   width: 310px;
@@ -532,6 +677,11 @@
 .draft-actions-top {
   display: flex;
   gap: 8px;
+}
+
+.btn-active-outline {
+  border-color: var(--orange) !important;
+  color: var(--orange) !important;
 }
 
 .no-reply-notice {
