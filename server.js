@@ -4,6 +4,7 @@ import express from 'express'
 import cors from 'cors'
 import { google } from 'googleapis'
 import Anthropic from '@anthropic-ai/sdk'
+import { createClient } from '@supabase/supabase-js'
 import fs from 'fs'
 import path from 'path'
 
@@ -107,34 +108,40 @@ const GMAIL_SCOPES = [
 // ─── Anthropic ────────────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
+// ─── Supabase client ──────────────────────────────────────────────────────────
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
+  : null
+
+// ─── In-memory caches (hydrated at startup) ───────────────────────────────────
+// These let buildThreadObject stay synchronous while Supabase is the source of truth.
+let categoryOverridesCache = {}   // { [threadId]: category }
+let folderDataCache = { folders: [], assignments: {} }  // { folders: [], assignments: { [threadId]: folderId } }
+
 // ─── Category override storage ────────────────────────────────────────────────
 const CATEGORIES_PATH = path.resolve('.categories.json')
 
 function loadCategoryOverrides() {
-  try {
-    if (fs.existsSync(CATEGORIES_PATH)) return JSON.parse(fs.readFileSync(CATEGORIES_PATH, 'utf8'))
-  } catch {}
-  return {}
+  return categoryOverridesCache
 }
 
 function saveCategoryOverride(id, category) {
-  const data = loadCategoryOverrides()
-  data[id] = category
-  fs.writeFileSync(CATEGORIES_PATH, JSON.stringify(data, null, 2))
+  categoryOverridesCache[id] = category
+  if (supabase) {
+    supabase.from('category_overrides')
+      .upsert({ thread_id: id, category, updated_at: new Date().toISOString() })
+      .then(() => {})
+      .catch((err) => console.error('Supabase category save error:', err.message))
+  } else {
+    fs.writeFileSync(CATEGORIES_PATH, JSON.stringify(categoryOverridesCache, null, 2))
+  }
 }
 
 // ─── Folder storage ────────────────────────────────────────────────────────────
 const FOLDERS_PATH = path.resolve('.folders.json')
 
 function loadFolders() {
-  try {
-    if (fs.existsSync(FOLDERS_PATH)) return JSON.parse(fs.readFileSync(FOLDERS_PATH, 'utf8'))
-  } catch {}
-  return { folders: [], assignments: {} }
-}
-
-function saveFolders(data) {
-  fs.writeFileSync(FOLDERS_PATH, JSON.stringify(data, null, 2))
+  return folderDataCache
 }
 
 // ─── Per-account token storage ────────────────────────────────────────────────
@@ -142,7 +149,12 @@ function tokenPath(account) {
   return path.resolve(`.tokens-${account.split('@')[0]}.json`)
 }
 
-function loadTokens(account) {
+async function loadTokens(account) {
+  if (supabase) {
+    const { data, error } = await supabase.from('gmail_tokens').select('tokens').eq('account', account).single()
+    if (!error && data?.tokens) return data.tokens
+    return null
+  }
   try {
     const p = tokenPath(account)
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -151,12 +163,25 @@ function loadTokens(account) {
 }
 
 function saveTokens(account, tokens) {
-  fs.writeFileSync(tokenPath(account), JSON.stringify(tokens, null, 2))
+  if (supabase) {
+    supabase.from('gmail_tokens')
+      .upsert({ account, tokens, updated_at: new Date().toISOString() })
+      .then(() => {})
+      .catch((err) => console.error('Supabase token save error:', err.message))
+  } else {
+    fs.writeFileSync(tokenPath(account), JSON.stringify(tokens, null, 2))
+  }
 }
 
 function clearTokens(account) {
-  const p = tokenPath(account)
-  if (fs.existsSync(p)) fs.unlinkSync(p)
+  if (supabase) {
+    supabase.from('gmail_tokens').delete().eq('account', account)
+      .then(() => {})
+      .catch((err) => console.error('Supabase token clear error:', err.message))
+  } else {
+    const p = tokenPath(account)
+    if (fs.existsSync(p)) fs.unlinkSync(p)
+  }
 }
 
 // ─── One OAuth2 client per target account ────────────────────────────────────
@@ -168,14 +193,10 @@ for (const account of TARGET_ACCOUNTS) {
     process.env.GOOGLE_CLIENT_SECRET,
     REDIRECT_URI
   )
-  const saved = loadTokens(account)
-  if (saved) {
-    client.setCredentials(saved)
-    console.log(`  Loaded tokens for ${account}`)
-  }
+  // Tokens loaded async at startup (see init() below)
   client.on('tokens', (newTokens) => {
-    const current = loadTokens(account) || {}
-    const merged = { ...current, ...newTokens }
+    // Merge with current in-memory credentials to avoid losing refresh_token
+    const merged = { ...(client.credentials || {}), ...newTokens }
     saveTokens(account, merged)
     client.setCredentials(merged)
   })
@@ -558,7 +579,8 @@ app.post('/api/auth/exchange', async (req, res) => {
       })
     }
 
-    const merged = { ...(loadTokens(email) || {}), ...tokens }
+    const existing = await loadTokens(email) || {}
+    const merged = { ...existing, ...tokens }
     saveTokens(email, merged)
     clients[email].setCredentials(merged)
 
@@ -784,37 +806,61 @@ app.get('/api/folders', requireAuth, (req, res) => {
   res.json({ folders: data.folders.map((f) => ({ ...f, count: counts[f.id] || 0 })) })
 })
 
-app.post('/api/folders', requireAuth, (req, res) => {
+app.post('/api/folders', requireAuth, async (req, res) => {
   const { name } = req.body
   if (!name?.trim()) return res.status(400).json({ error: 'Folder name required' })
-  const data = loadFolders()
   const folder = { id: crypto.randomUUID(), name: name.trim(), createdAt: new Date().toISOString() }
-  data.folders.push(folder)
-  saveFolders(data)
+  if (supabase) {
+    const { error } = await supabase.from('folders')
+      .insert({ id: folder.id, name: folder.name, created_at: folder.createdAt })
+    if (error) return res.status(500).json({ error: 'Failed to create folder' })
+  } else {
+    fs.writeFileSync(FOLDERS_PATH, JSON.stringify(
+      { ...folderDataCache, folders: [...folderDataCache.folders, folder] }, null, 2))
+  }
+  folderDataCache.folders.push(folder)
   res.json({ folder })
 })
 
-app.delete('/api/folders/:id', requireAuth, (req, res) => {
+app.delete('/api/folders/:id', requireAuth, async (req, res) => {
   const { id } = req.params
-  const data = loadFolders()
-  data.folders = data.folders.filter((f) => f.id !== id)
-  for (const [threadId, folderId] of Object.entries(data.assignments)) {
-    if (folderId === id) delete data.assignments[threadId]
+  if (supabase) {
+    // ON DELETE CASCADE on folder_assignments handles cleanup
+    const { error } = await supabase.from('folders').delete().eq('id', id)
+    if (error) return res.status(500).json({ error: 'Failed to delete folder' })
+    // Remove from assignments cache
+    for (const [threadId, folderId] of Object.entries(folderDataCache.assignments)) {
+      if (folderId === id) delete folderDataCache.assignments[threadId]
+    }
+  } else {
+    for (const [threadId, folderId] of Object.entries(folderDataCache.assignments)) {
+      if (folderId === id) delete folderDataCache.assignments[threadId]
+    }
+    fs.writeFileSync(FOLDERS_PATH, JSON.stringify(folderDataCache, null, 2))
   }
-  saveFolders(data)
+  folderDataCache.folders = folderDataCache.folders.filter((f) => f.id !== id)
   res.json({ success: true })
 })
 
-app.patch('/api/emails/:id/folder', requireAuth, (req, res) => {
+app.patch('/api/emails/:id/folder', requireAuth, async (req, res) => {
   const { id } = req.params
   const { folderId } = req.body
-  const data = loadFolders()
-  if (folderId) {
-    data.assignments[id] = folderId
-  } else {
-    delete data.assignments[id]
+  if (supabase) {
+    if (folderId) {
+      const { error } = await supabase.from('folder_assignments')
+        .upsert({ thread_id: id, folder_id: folderId, updated_at: new Date().toISOString() })
+      if (error) return res.status(500).json({ error: 'Failed to assign folder' })
+    } else {
+      const { error } = await supabase.from('folder_assignments').delete().eq('thread_id', id)
+      if (error) return res.status(500).json({ error: 'Failed to remove folder assignment' })
+    }
   }
-  saveFolders(data)
+  if (folderId) {
+    folderDataCache.assignments[id] = folderId
+  } else {
+    delete folderDataCache.assignments[id]
+  }
+  if (!supabase) fs.writeFileSync(FOLDERS_PATH, JSON.stringify(folderDataCache, null, 2))
   res.json({ success: true, folderId: folderId || null })
 })
 
@@ -896,11 +942,75 @@ if (fs.existsSync(distPath)) {
   })
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\nShirt School API server → http://localhost:${PORT}`)
+// ─── Startup: load persisted state then start server ─────────────────────────
+async function init() {
+  console.log('\nShirt School Dashboard starting...')
+
+  if (supabase) {
+    console.log('  Supabase: connected')
+
+    // Load Gmail tokens
+    for (const account of TARGET_ACCOUNTS) {
+      const saved = await loadTokens(account)
+      if (saved) {
+        clients[account].setCredentials(saved)
+        console.log(`  Loaded tokens for ${account}`)
+      }
+    }
+
+    // Load category overrides into cache
+    const { data: catRows } = await supabase.from('category_overrides').select('thread_id, category')
+    if (catRows) {
+      for (const row of catRows) categoryOverridesCache[row.thread_id] = row.category
+      console.log(`  Loaded ${catRows.length} category override(s)`)
+    }
+
+    // Load folders into cache
+    const { data: folderRows } = await supabase.from('folders').select('*').order('created_at')
+    const { data: assignRows } = await supabase.from('folder_assignments').select('thread_id, folder_id')
+    if (folderRows) {
+      folderDataCache.folders = folderRows.map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at }))
+    }
+    if (assignRows) {
+      for (const row of assignRows) folderDataCache.assignments[row.thread_id] = row.folder_id
+    }
+    console.log(`  Loaded ${folderDataCache.folders.length} folder(s), ${Object.keys(folderDataCache.assignments).length} assignment(s)`)
+  } else {
+    console.log('  Supabase: not configured — using local filesystem')
+
+    // Load tokens from filesystem
+    for (const account of TARGET_ACCOUNTS) {
+      const saved = await loadTokens(account)
+      if (saved) {
+        clients[account].setCredentials(saved)
+        console.log(`  Loaded tokens for ${account}`)
+      }
+    }
+
+    // Load categories from filesystem
+    try {
+      if (fs.existsSync(CATEGORIES_PATH)) {
+        categoryOverridesCache = JSON.parse(fs.readFileSync(CATEGORIES_PATH, 'utf8'))
+      }
+    } catch {}
+
+    // Load folders from filesystem
+    try {
+      if (fs.existsSync(FOLDERS_PATH)) {
+        folderDataCache = JSON.parse(fs.readFileSync(FOLDERS_PATH, 'utf8'))
+      }
+    } catch {}
+  }
+
   if (!process.env.ANTHROPIC_API_KEY) console.warn('  WARNING: ANTHROPIC_API_KEY not set')
   if (!process.env.GOOGLE_CLIENT_ID) console.warn('  WARNING: GOOGLE_CLIENT_ID not set')
   console.log('  kerry-brain.md:', fs.existsSync(KERRY_BRAIN_PATH) ? 'loaded' : 'NOT FOUND — AI replies will have no context')
   const connected = connectedAccounts()
   console.log('  Connected:', connected.length ? connected.join(', ') : 'none')
-})
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`  Server → http://localhost:${PORT}\n`)
+  })
+}
+
+init().catch((err) => { console.error('Startup error:', err); process.exit(1) })
