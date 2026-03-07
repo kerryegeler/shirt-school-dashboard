@@ -40,6 +40,16 @@
   border-radius: 20px;
 }
 
+.btn-archive-all {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+  opacity: 0.7;
+}
+.btn-archive-all:hover {
+  opacity: 1;
+  color: var(--red, #ef4444) !important;
+}
+
 /* ─── Loading spinner ───────────────────────────────────────────── */
 .email-agent-spinner-area {
   flex: 1;

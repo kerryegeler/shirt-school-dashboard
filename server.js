@@ -718,6 +718,43 @@ app.get('/api/emails/search', requireAuth, async (req, res) => {
   }
 })
 
+// Archive all inbox threads across all connected accounts using Gmail batchModify
+app.post('/api/emails/archive-all', requireAuth, async (req, res) => {
+  const accounts = connectedAccounts()
+  if (!accounts.length) return res.status(401).json({ error: 'No accounts connected' })
+
+  let total = 0
+  try {
+    for (const account of accounts) {
+      const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+      let pageToken = undefined
+      const msgIds = []
+
+      // Collect all message IDs currently in inbox
+      do {
+        const r = await gmail.users.messages.list({
+          userId: 'me', q: 'in:inbox', maxResults: 500, ...(pageToken && { pageToken }),
+        })
+        for (const m of r.data.messages || []) msgIds.push(m.id)
+        pageToken = r.data.nextPageToken
+      } while (pageToken)
+
+      // batchModify removes INBOX label from up to 1000 messages per call
+      for (let i = 0; i < msgIds.length; i += 1000) {
+        await gmail.users.messages.batchModify({
+          userId: 'me',
+          requestBody: { ids: msgIds.slice(i, i + 1000), removeLabelIds: ['INBOX'] },
+        })
+      }
+      total += msgIds.length
+    }
+    res.json({ success: true, archived: total })
+  } catch (err) {
+    console.error('Archive-all error:', err.message)
+    res.status(500).json({ error: 'Failed to archive all emails' })
+  }
+})
+
 // Fetch a single fresh thread by ID (for real-time sync on click)
 app.get('/api/emails/:id', requireAuth, async (req, res) => {
   const { id } = req.params

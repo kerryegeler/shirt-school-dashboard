@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import EmailList from './EmailList.jsx'
 import EmailDetail from './EmailDetail.jsx'
 import {
-  markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, unarchiveEmail, fetchThread,
+  markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, archiveAll, unarchiveEmail, fetchThread,
   fetchFolders, createFolder, deleteFolder, assignFolder, searchEmails,
 } from '../../services/api.js'
 import './EmailAgent.css'
@@ -265,6 +265,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   // ── View switching ──────────────────────────────────────────────────────────
 
   function handleNavClick(viewId) {
+    const wasSearchMode = isSearchMode
     if (isSearchMode) { setIsSearchMode(false); setSearchQuery('') }
     setNextPageTokens(null)
     setTotalEstimate(0)
@@ -288,8 +289,35 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setEmails([])
         setViewSwitching(true)
         fetchEmails(true, 'inbox')
+      } else if (wasSearchMode) {
+        // Re-fetch fresh inbox data when leaving search — search results are stale
+        setSelectedEmail(null)
+        setEmails([])
+        setViewSwitching(true)
+        fetchEmails(true, 'inbox')
       }
       setSidebarView(viewId)
+    }
+  }
+
+  // ── Archive All ──────────────────────────────────────────────────────────────
+
+  const [archivingAll, setArchivingAll] = useState(false)
+
+  async function handleArchiveAll() {
+    if (!window.confirm(`Archive all ${totalEstimate || emails.length} inbox emails? They will be removed from your inbox in Gmail immediately.`)) return
+    setArchivingAll(true)
+    try {
+      await archiveAll()
+      setEmails([])
+      setSelectedEmail(null)
+      setSelectedIds(new Set())
+      setNextPageTokens(null)
+      setTotalEstimate(0)
+    } catch (err) {
+      alert(`Archive all failed: ${err.message}`)
+    } finally {
+      setArchivingAll(false)
     }
   }
 
@@ -521,7 +549,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
-            {isSearchMode && (
+            {(isSearchMode || searchQuery) && (
               <button type="button" className="email-search-clear" onClick={handleClearSearch} title="Clear search">
                 <IconClose />
               </button>
@@ -532,6 +560,16 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         <div className="page-header-right">
           {unreadCount > 0 && !loading && viewMode === 'inbox' && !isSearchMode && (
             <span className="header-unread-badge">{unreadCount} unread</span>
+          )}
+          {viewMode === 'inbox' && !isSearchMode && emails.length > 0 && (
+            <button
+              className="btn btn-ghost btn-archive-all"
+              onClick={handleArchiveAll}
+              disabled={archivingAll || loading}
+              title="Archive all inbox emails"
+            >
+              {archivingAll ? 'Archiving…' : 'Archive All'}
+            </button>
           )}
           <button
             className="btn btn-ghost"

@@ -8,6 +8,13 @@ export async function fetchThread(id, account) {
   return data.thread
 }
 
+export async function archiveAll() {
+  const response = await fetch('/api/emails/archive-all', { method: 'POST' })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to archive all')
+  return data
+}
+
 export async function archiveEmail(id, account) {
   const response = await fetch(`/api/emails/${id}/archive`, {
     method: 'PATCH',
