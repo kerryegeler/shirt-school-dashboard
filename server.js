@@ -104,6 +104,7 @@ const REDIRECT_URI = process.env.REDIRECT_URI ||
 const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/youtube.readonly',
   'openid',
   'email',
   'profile',
@@ -1462,6 +1463,30 @@ app.post('/api/slack/actions', async (req, res) => {
       }
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'pending')
 
+    } else if (actionId === 'content_save_idea') {
+      // Save a content idea from the daily brief to the Ideas Bank
+      const ideaId = threadId // action value is the idea UUID
+      if (supabase) {
+        const { data: existing } = await supabase.from('content_ideas').select('id, status, title').eq('id', ideaId).single()
+        if (existing && existing.status !== 'saved') {
+          await supabase.from('content_ideas').update({ status: 'saved' }).eq('id', ideaId)
+          await updateContentPreferences({ format: 'short', title: existing.title }) // format updated below
+          // Post ephemeral confirmation
+          if (slackClient && channelId && payload.user?.id) {
+            await slackClient.chat.postEphemeral({
+              channel: channelId, user: payload.user.id,
+              text: `⭐ Saved: *${existing.title}*`,
+            }).catch(() => {})
+          }
+        } else if (existing?.status === 'saved') {
+          if (slackClient && channelId && payload.user?.id) {
+            await slackClient.chat.postEphemeral({
+              channel: channelId, user: payload.user.id, text: `Already saved!`,
+            }).catch(() => {})
+          }
+        }
+      }
+
     } else if (actionId === 'skip_email' || actionId === 'edit_email') {
       if (supabase) {
         await supabase.from('slack_notifications')
@@ -1612,6 +1637,521 @@ app.patch('/api/feedback/:id/notes', requireAuth, async (req, res) => {
   res.json({ success: true })
 })
 
+// ─── Content Agent ────────────────────────────────────────────────────────────
+
+const DEFAULT_TOPICS = [
+  'print on demand',
+  't-shirts apparel business',
+  'Shopify',
+  'AI tools ecommerce content creation',
+  'ecommerce marketing',
+]
+
+async function getContentTopics() {
+  if (!supabase) return DEFAULT_TOPICS
+  const { data } = await supabase.from('content_topics').select('keyword').eq('active', true).order('created_at')
+  return data?.length ? data.map((r) => r.keyword) : DEFAULT_TOPICS
+}
+
+function formatNum(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
+  return String(n)
+}
+
+async function fetchYouTubeVideos(keyword) {
+  if (!process.env.YOUTUBE_API_KEY) return []
+  try {
+    const publishedAfter = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()
+    const yt = google.youtube({ version: 'v3', auth: process.env.YOUTUBE_API_KEY })
+    const searchRes = await yt.search.list({
+      part: ['snippet'], q: keyword, type: ['video'],
+      order: 'viewCount', publishedAfter, maxResults: 5, regionCode: 'US',
+    })
+    const items = searchRes.data.items || []
+    if (!items.length) return []
+    const ids = items.map((i) => i.id.videoId).filter(Boolean).join(',')
+    const statsRes = await yt.videos.list({ part: ['statistics'], id: [ids] })
+    const statsMap = {}
+    for (const v of (statsRes.data.items || [])) statsMap[v.id] = v.statistics
+    return items.map((item) => ({
+      title: item.snippet.title,
+      channel: item.snippet.channelTitle,
+      videoId: item.id.videoId,
+      url: `https://youtu.be/${item.id.videoId}`,
+      views: parseInt(statsMap[item.id.videoId]?.viewCount || 0),
+      publishedAt: item.snippet.publishedAt,
+    })).sort((a, b) => b.views - a.views)
+  } catch (err) {
+    console.error(`[Content] YouTube fetch error for "${keyword}":`, err.message)
+    return []
+  }
+}
+
+async function fetchSerperNews(query) {
+  if (!process.env.SERPER_API_KEY) return []
+  try {
+    const res = await fetch('https://google.serper.dev/news', {
+      method: 'POST',
+      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: query, num: 3, tbs: 'qdr:w' }),
+    })
+    const data = await res.json()
+    return (data.news || []).slice(0, 3).map((a) => ({
+      title: a.title, source: a.source,
+      snippet: a.snippet, url: a.link, date: a.date,
+    }))
+  } catch (err) {
+    console.error(`[Content] Serper news error for "${query}":`, err.message)
+    return []
+  }
+}
+
+async function fetchSerperReddit(subreddit) {
+  if (!process.env.SERPER_API_KEY) return []
+  try {
+    const res = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: `site:reddit.com/r/${subreddit}`, num: 3, tbs: 'qdr:w' }),
+    })
+    const data = await res.json()
+    return (data.organic || []).slice(0, 3).map((r) => ({
+      title: r.title, subreddit: `r/${subreddit}`,
+      snippet: r.snippet, url: r.link,
+    }))
+  } catch (err) {
+    console.error(`[Content] Serper Reddit error for "${subreddit}":`, err.message)
+    return []
+  }
+}
+
+async function fetchToolUpdates(topics) {
+  if (!process.env.SERPER_API_KEY) return []
+  try {
+    const q = `(${topics.slice(0, 3).join(' OR ')}) new tool release update`
+    const res = await fetch('https://google.serper.dev/news', {
+      method: 'POST',
+      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q, num: 5, tbs: 'qdr:m' }),
+    })
+    const data = await res.json()
+    return (data.news || []).slice(0, 4).map((a) => ({
+      title: a.title, source: a.source,
+      snippet: a.snippet, url: a.link, date: a.date,
+    }))
+  } catch (err) {
+    console.error('[Content] Tool updates error:', err.message)
+    return []
+  }
+}
+
+async function fetchKerryChannelStats() {
+  if (!hasTokens('kerry@shirtschool.com')) return null
+  try {
+    const ytKerry = google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
+    const channelRes = await ytKerry.channels.list({
+      part: ['statistics', 'snippet', 'contentDetails'], mine: true,
+    })
+    const channel = channelRes.data.items?.[0]
+    if (!channel) return null
+
+    const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
+    if (!uploadsPlaylistId) return null
+
+    const playlistRes = await ytKerry.playlistItems.list({
+      part: ['contentDetails'], playlistId: uploadsPlaylistId, maxResults: 50,
+    })
+    const videoIds = (playlistRes.data.items || []).map((i) => i.contentDetails.videoId)
+    if (!videoIds.length) return null
+
+    const videoStats = []
+    for (let i = 0; i < videoIds.length; i += 50) {
+      const vRes = await ytKerry.videos.list({
+        part: ['statistics', 'snippet'], id: [videoIds.slice(i, i + 50).join(',')],
+      })
+      videoStats.push(...(vRes.data.items || []))
+    }
+
+    const videos = videoStats.map((v) => ({
+      id: v.id,
+      title: v.snippet.title,
+      publishedAt: v.snippet.publishedAt,
+      url: `https://youtu.be/${v.id}`,
+      views: parseInt(v.statistics.viewCount || 0),
+      likes: parseInt(v.statistics.likeCount || 0),
+      comments: parseInt(v.statistics.commentCount || 0),
+    }))
+    const byViews = [...videos].sort((a, b) => b.views - a.views)
+    const byDate = [...videos].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))
+    const avgViews = videos.length ? Math.round(videos.reduce((s, v) => s + v.views, 0) / videos.length) : 0
+
+    return {
+      channelId: channel.id,
+      channelName: channel.snippet.title,
+      subscriberCount: parseInt(channel.statistics.subscriberCount || 0),
+      totalViews: parseInt(channel.statistics.viewCount || 0),
+      videoCount: parseInt(channel.statistics.videoCount || 0),
+      topVideos: byViews.slice(0, 10),
+      recentVideos: byDate.slice(0, 10),
+      avgViews,
+    }
+  } catch (err) {
+    console.error('[Content] Kerry channel stats error:', err.message)
+    return null
+  }
+}
+
+async function generateContentIdeas(research, preferences, channelStats) {
+  const { topVideos, topNews, topReddit, toolUpdates } = research
+  let prefContext = ''
+  if (preferences?.save_count >= 10) {
+    prefContext = `Kerry's content preferences (from her saved ideas):\n- Preferred topics: ${preferences.topic_keywords?.slice(0, 8).join(', ') || 'varies'}\n- Preferred format: ${preferences.preferred_format || 'both'}\nWeight ideas toward these preferences.\n\n`
+  }
+  let channelCtx = ''
+  if (channelStats?.topVideos?.length) {
+    const top5 = channelStats.topVideos.slice(0, 5).map((v) => `"${v.title}" (${formatNum(v.views)} views)`).join('\n')
+    channelCtx = `Kerry's top-performing videos for context:\n${top5}\nChannel avg views: ${formatNum(channelStats.avgViews)}\n\n`
+  }
+
+  const prompt = `You are a content strategist for "Shirt School" — Kerry's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce.
+${channelCtx}${prefContext}Based on today's industry intelligence, generate fresh content ideas for Kerry.
+
+TRENDING YOUTUBE (last 2 weeks):
+${topVideos.slice(0, 5).map((v) => `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`).join('\n') || 'N/A'}
+
+TOP NEWS:
+${topNews.slice(0, 5).map((n) => `- ${n.title} (${n.source}): ${n.snippet?.slice(0, 120)}`).join('\n') || 'N/A'}
+
+REDDIT BUZZ:
+${topReddit.slice(0, 3).map((r) => `- [${r.subreddit}] ${r.title}`).join('\n') || 'N/A'}
+
+TOOL UPDATES:
+${toolUpdates.slice(0, 3).map((t) => `- ${t.title}: ${t.snippet?.slice(0, 100)}`).join('\n') || 'N/A'}
+
+Return ONLY valid JSON (no markdown fences) in this exact format:
+{"short_form":[{"title":"...","hook":"opening hook line for the video","why_timely":"why now based on trends above"},...],"long_form":[{"title":"...","outline":"1-paragraph video outline","why_timely":"why now based on trends above"},...]}
+Generate exactly 5 short_form and 3 long_form ideas.`
+
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6', max_tokens: 2000,
+    messages: [{ role: 'user', content: prompt }],
+  })
+  const text = msg.content[0].text.trim()
+  const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+  return JSON.parse(clean)
+}
+
+async function updateContentPreferences(idea) {
+  if (!supabase) return
+  const { data: pref } = await supabase.from('content_preferences').select('*').single()
+  const saveCount = (pref?.save_count || 0) + 1
+  const stopWords = new Set(['a','an','the','and','or','for','to','with','how','your','you','what','this','that','make'])
+  const words = idea.title.toLowerCase().split(/\W+/).filter((w) => w.length > 3 && !stopWords.has(w))
+  const newKeywords = [...new Set([...(pref?.topic_keywords || []), ...words])].slice(0, 30)
+  const fmtCounts = { ...(pref?.format_counts || { short: 0, long: 0 }) }
+  fmtCounts[idea.format] = (fmtCounts[idea.format] || 0) + 1
+  const prefFormat = saveCount >= 10 ? (fmtCounts.short >= fmtCounts.long ? 'short' : 'long') : (pref?.preferred_format || null)
+  const upsertData = {
+    topic_keywords: newKeywords, preferred_format: prefFormat,
+    save_count: saveCount, format_counts: fmtCounts, updated_at: new Date().toISOString(),
+  }
+  if (pref) {
+    await supabase.from('content_preferences').update(upsertData).eq('id', pref.id)
+  } else {
+    await supabase.from('content_preferences').insert(upsertData)
+  }
+}
+
+async function sendBriefToSlack(brief) {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID) return
+  const date = new Date(brief.run_at).toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Chicago',
+  })
+  const blocks = []
+  blocks.push({ type: 'header', text: { type: 'plain_text', text: `📊 Daily Industry Brief — ${date}` } })
+  blocks.push({ type: 'divider' })
+
+  if (brief.youtube?.length) {
+    const lines = brief.youtube.slice(0, 5).map((v, i) =>
+      `${i + 1}. <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`
+    ).join('\n')
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎥 Trending YouTube Videos*\n${lines}` } })
+    blocks.push({ type: 'divider' })
+  }
+
+  if (brief.news?.length) {
+    const lines = brief.news.slice(0, 5).map((n, i) =>
+      `${i + 1}. <${n.url}|${n.title}>\n   _${n.source}_ — ${(n.snippet || '').slice(0, 100)}`
+    ).join('\n')
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*📰 Industry News*\n${lines}` } })
+    blocks.push({ type: 'divider' })
+  }
+
+  if (brief.reddit?.length) {
+    const lines = brief.reddit.slice(0, 3).map((r, i) =>
+      `${i + 1}. <${r.url}|${r.title}>\n   _${r.subreddit}_`
+    ).join('\n')
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 Reddit Buzz*\n${lines}` } })
+    blocks.push({ type: 'divider' })
+  }
+
+  if (brief.tools?.length) {
+    const lines = brief.tools.slice(0, 4).map((t, i) =>
+      `${i + 1}. <${t.url}|${t.title}> — ${(t.snippet || '').slice(0, 80)}`
+    ).join('\n')
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🛠️ Tool & Platform Updates*\n${lines}` } })
+    blocks.push({ type: 'divider' })
+  }
+
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*💡 Content Ideas for Kerry*\n_Click ⭐ Save to add an idea to your Ideas Bank_' } })
+
+  if (brief.ideas?.short_form?.length) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*📱 Short Form (Reels / Shorts)*' } })
+    for (const idea of brief.ideas.short_form) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*${idea.title}*\nHook: _${idea.hook}_\n${idea.why_timely}` },
+        accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
+      })
+    }
+  }
+
+  if (brief.ideas?.long_form?.length) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*🎬 Long Form (YouTube)*' } })
+    for (const idea of brief.ideas.long_form) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*${idea.title}*\n${idea.outline}\n_${idea.why_timely}_` },
+        accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
+      })
+    }
+  }
+
+  const msg = await slackClient.chat.postMessage({
+    channel: process.env.SLACK_CHANNEL_ID,
+    text: `📊 Daily Industry Brief — ${date}`,
+    blocks,
+  })
+  if (supabase && msg.ts) {
+    await supabase.from('content_briefs').update({ slack_ts: msg.ts }).eq('id', brief.id)
+  }
+}
+
+async function runContentBrief({ manual = false } = {}) {
+  console.log(`[Content] Running brief (${manual ? 'manual' : 'scheduled'})...`)
+  const topics = await getContentTopics()
+
+  const [ytResults, newsResults, redditResults, toolResults, channelStats] = await Promise.all([
+    Promise.all(topics.map((t) => fetchYouTubeVideos(t))).then((r) => r.flat()),
+    Promise.all(topics.map((t) => fetchSerperNews(t))).then((r) => r.flat()),
+    Promise.all(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur'].map((s) => fetchSerperReddit(s))).then((r) => r.flat()),
+    fetchToolUpdates(topics),
+    fetchKerryChannelStats(),
+  ])
+
+  const dedupeByUrl = (arr) => {
+    const seen = new Set()
+    return arr.filter((item) => { if (!item.url || seen.has(item.url)) return false; seen.add(item.url); return true })
+  }
+  const topVideos = dedupeByUrl(ytResults).sort((a, b) => b.views - a.views).slice(0, 5)
+  const topNews = dedupeByUrl(newsResults).slice(0, 5)
+  const topReddit = dedupeByUrl(redditResults).slice(0, 3)
+
+  let preferences = null
+  if (supabase) {
+    const { data } = await supabase.from('content_preferences').select('*').single()
+    preferences = data
+  }
+
+  let ideas = { short_form: [], long_form: [] }
+  try {
+    ideas = await generateContentIdeas({ topVideos, topNews, topReddit, toolUpdates: toolResults }, preferences, channelStats)
+  } catch (err) {
+    console.error('[Content] Idea generation error:', err.message)
+  }
+
+  const briefId = crypto.randomUUID()
+  const ideasWithIds = {
+    short_form: (ideas.short_form || []).map((i) => ({ ...i, id: crypto.randomUUID(), format: 'short' })),
+    long_form: (ideas.long_form || []).map((i) => ({ ...i, id: crypto.randomUUID(), format: 'long' })),
+  }
+
+  const briefData = {
+    id: briefId, run_at: new Date().toISOString(),
+    youtube: topVideos, news: topNews, reddit: topReddit,
+    tools: toolResults, ideas: ideasWithIds, channel_stats: channelStats,
+  }
+
+  if (supabase) {
+    await supabase.from('content_briefs').insert({
+      id: briefId, run_at: briefData.run_at,
+      youtube: topVideos, news: topNews, reddit: topReddit,
+      tools: toolResults, ideas: ideasWithIds, channel_stats: channelStats,
+    })
+    // Store all generated ideas as individual rows for easy lookup
+    const allIdeas = [...ideasWithIds.short_form, ...ideasWithIds.long_form]
+    if (allIdeas.length) {
+      await supabase.from('content_ideas').insert(allIdeas.map((idea) => ({
+        id: idea.id, brief_id: briefId, format: idea.format, title: idea.title,
+        hook: idea.hook || null, outline: idea.outline || null, why_timely: idea.why_timely || null,
+        status: 'generated', created_at: new Date().toISOString(),
+      })))
+    }
+    if (channelStats) {
+      await supabase.from('youtube_channel_stats').insert({
+        fetched_at: briefData.run_at, channel_id: channelStats.channelId,
+        channel_name: channelStats.channelName, subscriber_count: channelStats.subscriberCount,
+        view_count: channelStats.totalViews, video_count: channelStats.videoCount,
+        top_videos: channelStats.topVideos, recent_videos: channelStats.recentVideos, avg_views: channelStats.avgViews,
+      })
+    }
+  }
+
+  await sendBriefToSlack(briefData)
+  console.log('[Content] Brief complete.')
+  return briefData
+}
+
+// Compute ms until next 8 AM America/Chicago
+function msUntilNextBriefTime() {
+  const now = new Date()
+  const checkCentralHour = (d) => parseInt(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false })
+      .formatToParts(d).find((p) => p.type === 'hour')?.value || '0'
+  )
+  // Try UTC 13 and 14 (covers both CDT=UTC-5 and CST=UTC-6) for today + tomorrow
+  for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
+    for (const utcHour of [13, 14]) {
+      const candidate = new Date(now)
+      candidate.setUTCDate(candidate.getUTCDate() + dayOffset)
+      candidate.setUTCHours(utcHour, 0, 0, 0)
+      if (checkCentralHour(candidate) === 8 && candidate > now) return candidate.getTime() - now.getTime()
+    }
+  }
+  // Fallback: 14:00 UTC tomorrow
+  const fallback = new Date(now)
+  fallback.setUTCDate(fallback.getUTCDate() + 1)
+  fallback.setUTCHours(14, 0, 0, 0)
+  return fallback.getTime() - now.getTime()
+}
+
+function startContentBriefScheduler() {
+  if (!process.env.YOUTUBE_API_KEY && !process.env.SERPER_API_KEY) {
+    console.log('  Content Agent: not configured (set YOUTUBE_API_KEY + SERPER_API_KEY to enable)')
+    return
+  }
+  const scheduleNext = () => {
+    const delay = msUntilNextBriefTime()
+    const target = new Date(Date.now() + delay)
+    console.log(`  Content Agent: next brief at ${target.toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT`)
+    setTimeout(() => {
+      runContentBrief().catch((err) => console.error('[Content] Scheduled brief error:', err.message))
+      scheduleNext()
+    }, delay)
+  }
+  scheduleNext()
+}
+
+// ─── Content Agent API routes ─────────────────────────────────────────────────
+
+app.get('/api/content/ideas', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ ideas: [] })
+  const { data, error } = await supabase.from('content_ideas')
+    .select('*').neq('status', 'deleted').neq('status', 'generated')
+    .order('created_at', { ascending: false })
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ ideas: data || [] })
+})
+
+app.patch('/api/content/ideas/:id', requireAuth, async (req, res) => {
+  const { id } = req.params
+  const { notes, status, calendar_date } = req.body
+  if (!supabase) return res.json({ success: true })
+  const updates = {}
+  if (notes !== undefined) updates.notes = notes
+  if (status !== undefined) updates.status = status
+  if (calendar_date !== undefined) updates.calendar_date = calendar_date
+  const { error } = await supabase.from('content_ideas').update(updates).eq('id', id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.delete('/api/content/ideas/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('content_ideas').update({ status: 'deleted' }).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.get('/api/content/briefs', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ briefs: [] })
+  const { data, error } = await supabase.from('content_briefs')
+    .select('id, run_at, youtube, news, reddit, tools, ideas, channel_stats')
+    .order('run_at', { ascending: false }).limit(30)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ briefs: data || [] })
+})
+
+app.get('/api/content/briefs/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(404).json({ error: 'Not found' })
+  const { data, error } = await supabase.from('content_briefs').select('*').eq('id', req.params.id).single()
+  if (error) return res.status(404).json({ error: 'Brief not found' })
+  res.json({ brief: data })
+})
+
+app.post('/api/content/run-brief', requireAuth, async (req, res) => {
+  res.json({ success: true, message: 'Brief running in background…' })
+  runContentBrief({ manual: true }).catch((err) => console.error('[Content] Manual brief error:', err.message))
+})
+
+app.get('/api/content/topics', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ topics: DEFAULT_TOPICS.map((k, i) => ({ id: String(i), keyword: k, active: true })) })
+  const { data, error } = await supabase.from('content_topics').select('*').order('created_at')
+  if (error) return res.status(500).json({ error: error.message })
+  // Seed defaults if empty
+  if (!data?.length) {
+    const rows = DEFAULT_TOPICS.map((keyword) => ({ keyword, active: true }))
+    const { data: inserted } = await supabase.from('content_topics').insert(rows).select()
+    return res.json({ topics: inserted || [] })
+  }
+  res.json({ topics: data })
+})
+
+app.post('/api/content/topics', requireAuth, async (req, res) => {
+  const { keyword } = req.body
+  if (!keyword?.trim()) return res.status(400).json({ error: 'Keyword required' })
+  if (!supabase) return res.json({ topic: { id: crypto.randomUUID(), keyword: keyword.trim(), active: true } })
+  const { data, error } = await supabase.from('content_topics').insert({ keyword: keyword.trim(), active: true }).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ topic: data })
+})
+
+app.patch('/api/content/topics/:id', requireAuth, async (req, res) => {
+  const { keyword, active } = req.body
+  if (!supabase) return res.json({ success: true })
+  const updates = {}
+  if (keyword !== undefined) updates.keyword = keyword.trim()
+  if (active !== undefined) updates.active = active
+  const { error } = await supabase.from('content_topics').update(updates).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.delete('/api/content/topics/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('content_topics').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.get('/api/content/channel-stats', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ stats: null })
+  const { data } = await supabase.from('youtube_channel_stats')
+    .select('*').order('fetched_at', { ascending: false }).limit(1).single()
+  res.json({ stats: data || null })
+})
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -1736,6 +2276,7 @@ async function init() {
   console.log('  Connected:', connected.length ? connected.join(', ') : 'none')
 
   startSlackPolling()
+  startContentBriefScheduler()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Sidebar from './components/Sidebar.jsx'
 import EmailAgent from './modules/email-agent/EmailAgent.jsx'
 import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
+import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 
@@ -103,6 +104,7 @@ export default function App() {
           />
         )}
         {activeModule === 'ai-feedback' && <FeedbackTab />}
+        {activeModule === 'content-agent' && <ContentAgent />}
       </main>
     </div>
   )

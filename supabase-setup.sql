@@ -78,3 +78,71 @@ create table if not exists ai_feedback (
 );
 
 alter table ai_feedback disable row level security;
+
+-- ─── Content Agent ────────────────────────────────────────────────────────────
+
+-- Configurable research topics
+create table if not exists content_topics (
+  id         uuid primary key default gen_random_uuid(),
+  keyword    text not null,
+  active     boolean not null default true,
+  created_at timestamptz not null default now()
+);
+alter table content_topics disable row level security;
+
+-- Daily brief archive
+create table if not exists content_briefs (
+  id           uuid primary key,
+  run_at       timestamptz not null default now(),
+  youtube      jsonb,
+  news         jsonb,
+  reddit       jsonb,
+  tools        jsonb,
+  ideas        jsonb,
+  channel_stats jsonb,
+  slack_ts     text,
+  created_at   timestamptz not null default now()
+);
+alter table content_briefs disable row level security;
+
+-- Generated and saved content ideas
+create table if not exists content_ideas (
+  id           uuid primary key,
+  brief_id     uuid references content_briefs(id),
+  format       text not null,  -- 'short' | 'long'
+  title        text not null,
+  hook         text,
+  outline      text,
+  why_timely   text,
+  notes        text,
+  status       text not null default 'generated',  -- 'generated' | 'saved' | 'filmed' | 'deleted'
+  calendar_date date,
+  created_at   timestamptz not null default now()
+);
+alter table content_ideas disable row level security;
+
+-- Learning preference profile
+create table if not exists content_preferences (
+  id              uuid primary key default gen_random_uuid(),
+  topic_keywords  text[] default '{}',
+  preferred_format text,
+  save_count      int not null default 0,
+  format_counts   jsonb default '{"short":0,"long":0}',
+  updated_at      timestamptz not null default now()
+);
+alter table content_preferences disable row level security;
+
+-- Kerry's YouTube channel stats (refreshed daily)
+create table if not exists youtube_channel_stats (
+  id               uuid primary key default gen_random_uuid(),
+  fetched_at       timestamptz not null default now(),
+  channel_id       text,
+  channel_name     text,
+  subscriber_count bigint,
+  view_count       bigint,
+  video_count      int,
+  top_videos       jsonb,
+  recent_videos    jsonb,
+  avg_views        bigint
+);
+alter table youtube_channel_stats disable row level security;

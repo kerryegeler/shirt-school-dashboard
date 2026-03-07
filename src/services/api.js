@@ -187,6 +187,83 @@ export async function updateFeedbackNotes(id, notes) {
   }
 }
 
+// ─── Content Agent ─────────────────────────────────────────────────────────────
+
+export async function fetchContentIdeas() {
+  const r = await fetch('/api/content/ideas')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch ideas')
+  return d.ideas
+}
+
+export async function updateContentIdea(id, updates) {
+  const r = await fetch(`/api/content/ideas/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update idea') }
+}
+
+export async function deleteContentIdea(id) {
+  const r = await fetch(`/api/content/ideas/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete idea') }
+}
+
+export async function fetchContentBriefs() {
+  const r = await fetch('/api/content/briefs')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch briefs')
+  return d.briefs
+}
+
+export async function fetchContentBrief(id) {
+  const r = await fetch(`/api/content/briefs/${id}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Brief not found')
+  return d.brief
+}
+
+export async function runContentBrief() {
+  const r = await fetch('/api/content/run-brief', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to run brief')
+  return d
+}
+
+export async function fetchContentTopics() {
+  const r = await fetch('/api/content/topics')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch topics')
+  return d.topics
+}
+
+export async function createContentTopic(keyword) {
+  const r = await fetch('/api/content/topics', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keyword }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create topic')
+  return d.topic
+}
+
+export async function updateContentTopic(id, updates) {
+  const r = await fetch(`/api/content/topics/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update topic') }
+}
+
+export async function deleteContentTopic(id) {
+  const r = await fetch(`/api/content/topics/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete topic') }
+}
+
+export async function fetchChannelStats() {
+  const r = await fetch('/api/content/channel-stats')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch channel stats')
+  return d.stats
+}
+
 export async function sendEmail(email, draft, fromAccount) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',

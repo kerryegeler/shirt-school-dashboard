@@ -29,7 +29,7 @@ const IconChart = () => (
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
-  { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: true },
+  { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: false },
   { id: 'sponsorship-tracker', label: 'Sponsorship Tracker', icon: IconChart, comingSoon: true },
 ]
 
