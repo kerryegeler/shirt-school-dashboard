@@ -131,6 +131,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
+  const [inboxEmailCount, setInboxEmailCount] = useState(0)
 
   // View switching
   const [viewSwitching, setViewSwitching] = useState(false)
@@ -262,6 +263,11 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     onUnreadChange?.(unreadCount)
   }, [unreadCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keep inboxEmailCount in sync with inbox emails (stays frozen when viewing archived)
+  useEffect(() => {
+    if (viewMode === 'inbox') setInboxEmailCount(emails.filter((e) => !e.folderId).length)
+  }, [emails, viewMode])
+
   // ── View switching ──────────────────────────────────────────────────────────
 
   function handleNavClick(viewId) {
@@ -340,11 +346,11 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   }, [emails, viewMode, sidebarView, folders])
 
   const counts = useMemo(() => ({
-    inbox:           emails.filter((e) => !e.folderId).length,
+    inbox:           inboxEmailCount,
     student_support: emails.filter((e) => e.category === 'student_support').length,
     sponsorship:     emails.filter((e) => e.category === 'sponsorship').length,
     general:         emails.filter((e) => e.category === 'general').length,
-  }), [emails])
+  }), [emails, inboxEmailCount])
 
   // ── Field helpers ───────────────────────────────────────────────────────────
 

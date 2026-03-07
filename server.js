@@ -81,6 +81,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/auth/dashboard-complete',
   '/api/auth/dashboard-logout',
   '/api/slack/actions',  // Called by Slack, not the dashboard user
+  '/api/slack/events',   // Slack Event Subscriptions
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -725,17 +726,22 @@ app.post('/api/emails/archive-all', requireAuth, async (req, res) => {
 
   let total = 0
   try {
+    // Build set of thread IDs that are assigned to a folder — skip these
+    const folderedThreadIds = new Set(Object.keys(folderDataCache.assignments))
+
     for (const account of accounts) {
       const gmail = google.gmail({ version: 'v1', auth: clients[account] })
       let pageToken = undefined
       const msgIds = []
 
-      // Collect all message IDs currently in inbox
+      // Collect inbox message IDs, skipping messages that belong to foldered threads
       do {
         const r = await gmail.users.messages.list({
           userId: 'me', q: 'in:inbox', maxResults: 500, ...(pageToken && { pageToken }),
         })
-        for (const m of r.data.messages || []) msgIds.push(m.id)
+        for (const m of r.data.messages || []) {
+          if (!folderedThreadIds.has(m.threadId)) msgIds.push(m.id)
+        }
         pageToken = r.data.nextPageToken
       } while (pageToken)
 
@@ -1091,13 +1097,14 @@ function confidenceEmoji(c) {
   return { high: '🟢', medium: '🟡', low: '🔴' }[c] || '🟡'
 }
 
-function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status) {
-  const truncDraft = draft.length > 600 ? draft.slice(0, 600) + '…' : draft
+function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false) {
+  const truncDraft = draft.length > 2800 ? draft.slice(0, 2800) + '…' : draft
   const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
   const capConf = (confidence || 'medium').charAt(0).toUpperCase() + (confidence || 'medium').slice(1)
+  const headerText = checkIfNeeded ? '📧 New Email — Reply needed?' : '📧 New Email — Action Required'
 
   const blocks = [
-    { type: 'header', text: { type: 'plain_text', text: '📧 New Email — Action Required' } },
+    { type: 'header', text: { type: 'plain_text', text: headerText } },
     {
       type: 'section',
       fields: [
@@ -1106,6 +1113,13 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
       ],
     },
     { type: 'section', text: { type: 'mrkdwn', text: `*Subject:* ${thread.subject}\n*Summary:* ${summary}` } },
+  ]
+
+  if (checkIfNeeded) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `⚠️ _AI is uncertain whether this email needs a reply. Draft is ready if you approve._` } })
+  }
+
+  blocks.push(
     { type: 'section', text: { type: 'mrkdwn', text: `*Draft Reply:*\n\`\`\`${truncDraft}\`\`\`` } },
     {
       type: 'section',
@@ -1114,7 +1128,7 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
         text: `*Confidence:* ${confidenceEmoji(confidence)} ${capConf}${confidenceReason ? `\n_${confidenceReason}_` : ''}`,
       },
     },
-  ]
+  )
 
   const statusMessages = {
     approved: '✅ *Approved* — sending in 5 minutes…',
@@ -1181,8 +1195,9 @@ async function updateSlackMessage(notif, status) {
     id: notif.thread_id, name: meta.fromName, from: meta.from,
     to: meta.to, subject: meta.subject, category: notif.category,
   }
+  const checkIfNeeded = notif.category === 'general' || notif.confidence === 'low'
   const blocks = buildSlackBlocks(mockThread, notif.draft || '', notif.summary || '',
-    notif.confidence, notif.confidence_reason, status)
+    notif.confidence, notif.confidence_reason, status, checkIfNeeded)
   await slackClient.chat.update({
     channel: notif.channel_id,
     ts: notif.slack_ts,
@@ -1203,7 +1218,8 @@ async function postEmailToSlack(thread) {
   }
 
   const { draft, summary, confidence, confidence_reason } = result
-  const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending')
+  const checkIfNeeded = thread.category === 'general' || confidence === 'low'
+  const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending', checkIfNeeded)
 
   const msg = await slackClient.chat.postMessage({
     channel: process.env.SLACK_CHANNEL_ID,
@@ -1228,6 +1244,12 @@ async function postEmailToSlack(thread) {
       summary, thread_meta: threadMeta,
       created_at: new Date().toISOString(),
     })
+
+    // Save draft to saved_drafts so it auto-loads in EmailDetail ("Edit in Dashboard")
+    await supabase.from('saved_drafts').upsert({
+      thread_id: thread.id, content: draft, updated_at: new Date().toISOString(),
+    })
+    savedDraftsCache.add(thread.id)
   }
 }
 
@@ -1307,9 +1329,8 @@ async function runSlackPoll() {
           const thread = buildThreadObject(threadRes.data, account)
           if (!thread) continue
 
-          // Skip: too old, spam, or we already sent the last message
+          // Skip: too old, or we already sent the last message
           if (new Date(thread.timestamp).getTime() < cutoff) continue
-          if (thread.category === 'general') continue
           const lastMsg = (thread.messages || []).at(-1)
           if (lastMsg?.isOutgoing) continue
 
@@ -1459,6 +1480,97 @@ app.post('/api/slack/actions', async (req, res) => {
     }
   } catch (err) {
     console.error('[Slack] Action handler error:', err.message)
+  }
+})
+
+// ─── Slack Events endpoint (for conversational thread editing) ────────────────
+
+app.post('/api/slack/events', async (req, res) => {
+  const body = req.body || {}
+
+  // Slack URL verification challenge (sent once when you configure the endpoint)
+  if (body.type === 'url_verification') {
+    return res.json({ challenge: body.challenge })
+  }
+
+  // Respond 200 immediately so Slack doesn't retry
+  res.status(200).send()
+
+  if (body.type !== 'event_callback') return
+  const event = body.event
+  if (!event) return
+
+  // Only handle plain messages that are replies in a thread (not bot messages, not edits)
+  if (event.type !== 'message') return
+  if (event.subtype) return          // ignore message_changed, message_deleted, bot_message subtypes
+  if (event.bot_id) return           // ignore bot messages
+  if (!event.thread_ts) return       // must be a thread reply
+  if (event.thread_ts === event.ts) return // top-level message, not a reply
+
+  const instruction = (event.text || '').trim()
+  if (!instruction) return
+
+  // Look up if this thread_ts matches a Slack notification
+  if (!supabase) return
+  const { data: notif } = await supabase
+    .from('slack_notifications')
+    .select('*')
+    .eq('slack_ts', event.thread_ts)
+    .single()
+
+  if (!notif) return
+  if (!['pending', 'approved'].includes(notif.status)) return // don't edit already-sent/skipped
+
+  const currentDraft = notif.draft
+  if (!currentDraft) return
+
+  try {
+    // Ask Claude to apply the edit instruction to the draft
+    const editMsg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1500,
+      system: 'You are editing an email draft. Apply the instruction and return ONLY the revised email body — no subject line, no labels, no explanation, just the reply text.',
+      messages: [{
+        role: 'user',
+        content: `Current draft:\n---\n${currentDraft}\n---\n\nEdit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`,
+      }],
+    })
+    const revisedDraft = editMsg.content[0].text.trim()
+
+    // Update slack_notifications with new draft
+    await supabase.from('slack_notifications')
+      .update({ draft: revisedDraft })
+      .eq('thread_id', notif.thread_id)
+
+    // Update saved_drafts so EmailDetail picks it up
+    await supabase.from('saved_drafts').upsert({
+      thread_id: notif.thread_id, content: revisedDraft, updated_at: new Date().toISOString(),
+    })
+    savedDraftsCache.add(notif.thread_id)
+
+    // Post revised draft back to the Slack thread as confirmation
+    if (slackClient && notif.channel_id) {
+      const truncRevised = revisedDraft.length > 2800 ? revisedDraft.slice(0, 2800) + '…' : revisedDraft
+      await slackClient.chat.postMessage({
+        channel: notif.channel_id,
+        thread_ts: notif.slack_ts,
+        text: `✏️ Draft updated. Here's the revised version:\n\`\`\`${truncRevised}\`\`\`\n\nReply again to make more edits, or use the buttons above to approve/skip.`,
+      })
+
+      // Also update the original message with the new draft
+      await updateSlackMessage({ ...notif, draft: revisedDraft }, notif.status)
+    }
+
+    console.log(`[Slack] Draft edited for thread ${notif.thread_id}: "${instruction.slice(0, 60)}"`)
+  } catch (err) {
+    console.error('[Slack] Edit handler error:', err.message)
+    if (slackClient && notif.channel_id) {
+      await slackClient.chat.postMessage({
+        channel: notif.channel_id,
+        thread_ts: notif.slack_ts,
+        text: `⚠️ Failed to apply edit: ${err.message}`,
+      }).catch(() => {})
+    }
   }
 })
 
