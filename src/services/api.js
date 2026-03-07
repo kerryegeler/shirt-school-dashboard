@@ -20,6 +20,18 @@ export async function archiveEmail(id, account) {
   }
 }
 
+export async function unarchiveEmail(id, account) {
+  const response = await fetch(`/api/emails/${id}/unarchive`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account }),
+  })
+  if (!response.ok) {
+    const data = await response.json()
+    throw new Error(data.error || 'Failed to move to inbox')
+  }
+}
+
 export async function markEmailRead(id, account) {
   const response = await fetch(`/api/emails/${id}/read`, {
     method: 'PATCH',

@@ -73,6 +73,12 @@ const IconArchive = () => (
     <path d="M6 9h4" />
   </svg>
 )
+const IconInbox = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="1" width="14" height="14" rx="1.5" />
+    <path d="M1 10h3.5l1.5 2h4l1.5-2H15" />
+  </svg>
+)
 const IconChevron = ({ expanded }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
     style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}>
@@ -208,7 +214,7 @@ function ThreadMessage({ message, defaultExpanded = true }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, viewMode, onDraftSaved, onDraftDeleted }) {
+export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, onUnarchive, viewMode, onDraftSaved, onDraftDeleted }) {
   const [draft, setDraft] = useState('')
   const [manualMode, setManualMode] = useState(false)
   const [personaUsed, setPersonaUsed] = useState('')
@@ -348,6 +354,16 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
               >
                 <IconArchive />
                 Archive
+              </button>
+            )}
+            {viewMode === 'archived' && (
+              <button
+                className="btn-archive-detail"
+                onClick={() => onUnarchive?.(email)}
+                title="Move back to inbox"
+              >
+                <IconInbox />
+                Move to Inbox
               </button>
             )}
           </div>

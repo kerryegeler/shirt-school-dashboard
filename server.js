@@ -831,6 +831,21 @@ app.patch('/api/emails/:id/archive', requireAuth, async (req, res) => {
   }
 })
 
+app.patch('/api/emails/:id/unarchive', requireAuth, async (req, res) => {
+  const { id } = req.params
+  const { account } = req.body
+  const client = (account && hasTokens(account)) ? clients[account] : clients[connectedAccounts()[0]]
+  if (!client) return res.status(401).json({ error: 'Not authenticated' })
+  try {
+    const gmail = google.gmail({ version: 'v1', auth: client })
+    await gmail.users.threads.modify({ userId: 'me', id, requestBody: { addLabelIds: ['INBOX'] } })
+    res.json({ success: true })
+  } catch (error) {
+    console.error('Unarchive error:', error.message)
+    res.status(500).json({ error: 'Failed to move to inbox' })
+  }
+})
+
 app.patch('/api/emails/:id/category', requireAuth, (req, res) => {
   const { id } = req.params
   const { category } = req.body

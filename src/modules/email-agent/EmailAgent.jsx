@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import EmailList from './EmailList.jsx'
 import EmailDetail from './EmailDetail.jsx'
 import {
-  markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, fetchThread,
+  markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, unarchiveEmail, fetchThread,
   fetchFolders, createFolder, deleteFolder, assignFolder, searchEmails,
 } from '../../services/api.js'
 import './EmailAgent.css'
@@ -273,14 +273,14 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setSelectedEmail(null)
         setSidebarView('inbox')
         setEmails([])
-        fetchEmails(true, 'archived')
+        fetchEmails(false, 'archived')
       }
     } else {
       if (viewMode === 'archived') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setEmails([])
-        fetchEmails(true, 'inbox')
+        fetchEmails(false, 'inbox')
       }
       setSidebarView(viewId)
     }
@@ -375,6 +375,17 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     if (selectedEmail?.id === email.id) setSelectedEmail(null)
     const accounts = email.accounts || [email.account]
     Promise.allSettled(accounts.map((acct) => archiveEmail(email.id, acct))).then((results) => {
+      if (results.every((r) => r.status === 'rejected')) {
+        setEmails((prev) => [...prev, email].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)))
+      }
+    })
+  }
+
+  async function handleUnarchive(email) {
+    setEmails((prev) => prev.filter((e) => e.id !== email.id))
+    if (selectedEmail?.id === email.id) setSelectedEmail(null)
+    const accounts = email.accounts || [email.account]
+    Promise.allSettled(accounts.map((acct) => unarchiveEmail(email.id, acct))).then((results) => {
       if (results.every((r) => r.status === 'rejected')) {
         setEmails((prev) => [...prev, email].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)))
       }
@@ -714,6 +725,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
                   onMarkUnread={handleMarkUnread}
                   onReclassify={handleReclassify}
                   onArchive={handleArchive}
+                  onUnarchive={handleUnarchive}
                   viewMode={viewMode}
                   onDraftSaved={handleDraftSaved}
                   onDraftDeleted={handleDraftDeleted}
