@@ -132,6 +132,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
 
+  // View switching
+  const [viewSwitching, setViewSwitching] = useState(false)
+
   // Pagination
   const [nextPageTokens, setNextPageTokens] = useState(null)
   const [totalEstimate, setTotalEstimate] = useState(0)
@@ -165,8 +168,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
     try {
       const base = currentMode === 'archived' ? '/api/emails?archived=true' : '/api/emails'
+      const sep = base.includes('?') ? '&' : '?'
       const url = pageTokens
-        ? `${base}&pageTokens=${encodeURIComponent(JSON.stringify(pageTokens))}`
+        ? `${base}${sep}pageTokens=${encodeURIComponent(JSON.stringify(pageTokens))}`
         : base
       const res = await fetch(url)
       const data = await res.json()
@@ -191,6 +195,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
       setLoading(false)
       setRefreshing(false)
       setLoadingMore(false)
+      setViewSwitching(false)
     }
   }, [viewMode])
 
@@ -273,14 +278,16 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setSelectedEmail(null)
         setSidebarView('inbox')
         setEmails([])
-        fetchEmails(false, 'archived')
+        setViewSwitching(true)
+        fetchEmails(true, 'archived')
       }
     } else {
       if (viewMode === 'archived') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setEmails([])
-        fetchEmails(false, 'inbox')
+        setViewSwitching(true)
+        fetchEmails(true, 'inbox')
       }
       setSidebarView(viewId)
     }
@@ -622,7 +629,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         </nav>
 
         {/* ── Main content area ── */}
-        {loading || searching ? (
+        {loading || searching || viewSwitching ? (
           <div className="email-agent-spinner-area">
             <div className="email-spinner" />
           </div>
