@@ -478,6 +478,95 @@
   border-top: 1px solid var(--border, #3a3a3c);
 }
 
+.ca-channel-name-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f5f5f7);
+  flex: 1;
+}
+
+/* ─── Channel setup / selector ─────────────────────────────────────────────── */
+
+.ca-channel-setup {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ca-channel-setup-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #f5f5f7);
+}
+
+.ca-channel-setup-desc {
+  font-size: 13px;
+  color: var(--text-secondary, #8e8e93);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.ca-channel-setup-desc code {
+  background: var(--bg-elevated, #1c1c1e);
+  border: 1px solid var(--border, #3a3a3c);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  color: var(--orange, #f97316);
+}
+
+.ca-channel-lookup-form {
+  display: flex;
+  gap: 8px;
+}
+
+.ca-lookup-error {
+  font-size: 13px;
+  color: #f87171;
+  padding: 8px 0;
+}
+
+.ca-lookup-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ca-lookup-channel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-elevated, #1c1c1e);
+  border: 1px solid var(--border, #3a3a3c);
+  border-radius: 8px;
+}
+
+.ca-ch-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.ca-ch-info { flex: 1; }
+
+.ca-ch-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f5f5f7);
+}
+
+.ca-ch-id {
+  font-size: 11px;
+  color: var(--text-tertiary, #636366);
+  margin-top: 2px;
+  font-family: monospace;
+}
+
 /* ─── Topics Settings ──────────────────────────────────────────────────────── */
 
 .ca-topics-intro {

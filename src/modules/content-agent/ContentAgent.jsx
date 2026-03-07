@@ -3,7 +3,7 @@ import {
   fetchContentIdeas, updateContentIdea, deleteContentIdea,
   fetchContentBriefs, fetchContentBrief, runContentBrief,
   fetchContentTopics, createContentTopic, updateContentTopic, deleteContentTopic,
-  fetchChannelStats,
+  fetchChannelStats, fetchYouTubeChannels, lookupChannel, selectChannel, refreshChannelStats,
 } from '../../services/api.js'
 import './ContentAgent.css'
 
@@ -432,31 +432,136 @@ function BriefDetail({ brief }) {
 // ─── Channel Stats tab ────────────────────────────────────────────────────────
 
 function ChannelStats() {
-  const [stats, setStats] = useState(null)
+  const [state, setState] = useState({ stats: null, configured: false, channelId: null, kerryConnected: false })
   const [loading, setLoading] = useState(true)
-  const [noAccess, setNoAccess] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMsg, setRefreshMsg] = useState('')
 
-  useEffect(() => {
-    fetchChannelStats()
-      .then((data) => {
-        setStats(data)
-        if (!data) setNoAccess(true)
-      })
-      .catch(() => setNoAccess(true))
-      .finally(() => setLoading(false))
+  // Channel selector state
+  const [lookupQuery, setLookupQuery] = useState('')
+  const [lookupResults, setLookupResults] = useState(null)
+  const [lookupError, setLookupError] = useState('')
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await fetchChannelStats()
+      setState(data)
+    } catch {}
+    setLoading(false)
   }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function handleLookup(e) {
+    e.preventDefault()
+    if (!lookupQuery.trim()) return
+    setLookupLoading(true)
+    setLookupError('')
+    setLookupResults(null)
+    try {
+      const channels = await lookupChannel(lookupQuery.trim())
+      setLookupResults(channels)
+    } catch (err) {
+      setLookupError(err.message)
+    }
+    setLookupLoading(false)
+  }
+
+  async function handleSelectChannel(channelId) {
+    setSaving(true)
+    try {
+      await selectChannel(channelId)
+      setLookupResults(null)
+      setLookupQuery('')
+      // Kick off stats refresh right away
+      await refreshChannelStats()
+      setRefreshMsg('Fetching stats… refresh in ~10 seconds.')
+      setTimeout(() => load(), 10_000)
+    } catch (err) {
+      setLookupError(err.message)
+    }
+    setSaving(false)
+  }
+
+  async function handleRefresh() {
+    setRefreshing(true)
+    setRefreshMsg('')
+    try {
+      await refreshChannelStats()
+      setRefreshMsg('Fetching stats… refresh in ~10 seconds.')
+      setTimeout(() => load(), 10_000)
+    } catch (err) {
+      setRefreshMsg(`Error: ${err.message}`)
+    }
+    setRefreshing(false)
+  }
 
   if (loading) return <div className="ca-panel"><div className="ca-loading"><div className="ca-spinner" /></div></div>
 
-  if (noAccess || !stats) {
+  const { stats, configured, channelId, kerryConnected } = state
+
+  // Channel selector (shown when not configured OR user wants to change)
+  const ChannelSelector = () => (
+    <div className="ca-channel-setup">
+      <div className="ca-channel-setup-title">Connect your YouTube channel</div>
+      <p className="ca-channel-setup-desc">
+        Enter your channel handle (e.g. <code>@shirtschool</code>) or channel ID (starts with <code>UC…</code> — find it in YouTube Studio → Settings → Channel → Basic info).
+      </p>
+      <form className="ca-channel-lookup-form" onSubmit={handleLookup}>
+        <input
+          className="ca-topic-input"
+          value={lookupQuery}
+          onChange={(e) => setLookupQuery(e.target.value)}
+          placeholder="@shirtschool or UCxxxxxxx…"
+        />
+        <button className="btn btn-primary" type="submit" disabled={lookupLoading || !lookupQuery.trim()}>
+          {lookupLoading ? 'Searching…' : 'Find Channel'}
+        </button>
+      </form>
+      {lookupError && <div className="ca-lookup-error">{lookupError}</div>}
+      {lookupResults && (
+        <div className="ca-lookup-results">
+          {lookupResults.length === 0 && <div className="ca-lookup-error">No channels found.</div>}
+          {lookupResults.map((ch) => (
+            <div key={ch.id} className="ca-lookup-channel">
+              {ch.thumbnail && <img src={ch.thumbnail} alt="" className="ca-ch-thumb" />}
+              <div className="ca-ch-info">
+                <div className="ca-ch-name">{ch.name}</div>
+                <div className="ca-ch-id">{ch.id} · {formatNum(ch.subscribers)} subscribers</div>
+              </div>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => handleSelectChannel(ch.id)}
+                disabled={saving}
+              >
+                {saving ? 'Saving…' : 'Use This Channel'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
+  if (!kerryConnected) {
     return (
       <div className="ca-panel">
         <div className="ca-empty">
-          <p>No channel data yet.</p>
-          <p style={{ marginTop: 8, fontSize: 13 }}>
-            YouTube channel data is pulled during the daily brief. Click "Reconnect" next to kerry@shirtschool.com in the sidebar to grant YouTube access, then run a brief.
-          </p>
+          <p>kerry@shirtschool.com is not connected.</p>
+          <p style={{ marginTop: 8, fontSize: 13 }}>Click "Reconnect" next to kerry@shirtschool.com in the sidebar to grant YouTube access.</p>
         </div>
+      </div>
+    )
+  }
+
+  if (!configured || !stats) {
+    return (
+      <div className="ca-panel ca-channel-panel">
+        <ChannelSelector />
+        {refreshMsg && <div className="ca-brief-msg" style={{ marginTop: 12 }}>{refreshMsg}</div>}
       </div>
     )
   }
@@ -467,6 +572,17 @@ function ChannelStats() {
 
   return (
     <div className="ca-panel ca-channel-panel">
+      <div className="ca-panel-toolbar">
+        <span className="ca-channel-name-label">{stats.channel_name}</span>
+        <button className="btn btn-ghost btn-sm" onClick={handleRefresh} disabled={refreshing}>
+          <IconRefresh /> {refreshing ? 'Refreshing…' : 'Refresh Stats'}
+        </button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setState((s) => ({ ...s, configured: false }))}>
+          Change Channel
+        </button>
+        {refreshMsg && <span className="ca-brief-msg">{refreshMsg}</span>}
+      </div>
+
       <div className="ca-channel-stats-row">
         <div className="ca-stat-card">
           <div className="ca-stat-value">{formatNum(stats.subscriber_count)}</div>

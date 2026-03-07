@@ -146,3 +146,11 @@ create table if not exists youtube_channel_stats (
   avg_views        bigint
 );
 alter table youtube_channel_stats disable row level security;
+
+-- Simple key-value config store (e.g. youtube_channel_id)
+create table if not exists content_config (
+  key        text primary key,
+  value      text not null,
+  updated_at timestamptz not null default now()
+);
+alter table content_config disable row level security;

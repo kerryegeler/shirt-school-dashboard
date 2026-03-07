@@ -1746,13 +1746,24 @@ async function fetchToolUpdates(topics) {
   }
 }
 
-async function fetchKerryChannelStats() {
+async function getStoredChannelId() {
+  if (!supabase) return null
+  const { data } = await supabase.from('content_config').select('value').eq('key', 'youtube_channel_id').single()
+  return data?.value || null
+}
+
+async function fetchKerryChannelStats(channelIdOverride) {
   if (!hasTokens('kerry@shirtschool.com')) return null
   try {
     const ytKerry = google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
-    const channelRes = await ytKerry.channels.list({
-      part: ['statistics', 'snippet', 'contentDetails'], mine: true,
-    })
+    const channelId = channelIdOverride || await getStoredChannelId()
+
+    // Build channel list params: use stored/provided ID, or fall back to mine:true
+    const channelParams = channelId
+      ? { part: ['statistics', 'snippet', 'contentDetails'], id: [channelId] }
+      : { part: ['statistics', 'snippet', 'contentDetails'], mine: true }
+
+    const channelRes = await ytKerry.channels.list(channelParams)
     const channel = channelRes.data.items?.[0]
     if (!channel) return null
 
@@ -2146,10 +2157,84 @@ app.delete('/api/content/topics/:id', requireAuth, async (req, res) => {
 })
 
 app.get('/api/content/channel-stats', requireAuth, async (req, res) => {
-  if (!supabase) return res.json({ stats: null })
-  const { data } = await supabase.from('youtube_channel_stats')
-    .select('*').order('fetched_at', { ascending: false }).limit(1).single()
-  res.json({ stats: data || null })
+  if (!supabase) return res.json({ stats: null, configured: false })
+  const [statsResult, configResult] = await Promise.all([
+    supabase.from('youtube_channel_stats').select('*').order('fetched_at', { ascending: false }).limit(1).single(),
+    supabase.from('content_config').select('value').eq('key', 'youtube_channel_id').single(),
+  ])
+  res.json({
+    stats: statsResult.data || null,
+    configured: !!configResult.data?.value,
+    channelId: configResult.data?.value || null,
+    kerryConnected: hasTokens('kerry@shirtschool.com'),
+  })
+})
+
+// Resolve a channel handle or ID to a channel object (for the selector UI)
+app.post('/api/content/channel-lookup', requireAuth, async (req, res) => {
+  const { query } = req.body // can be a channel ID (UC...) or handle (@shirtschool)
+  if (!query?.trim()) return res.status(400).json({ error: 'Query required' })
+  if (!hasTokens('kerry@shirtschool.com')) return res.status(401).json({ error: 'kerry@shirtschool.com not connected' })
+  try {
+    const ytKerry = google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
+    const q = query.trim()
+    const isId = q.startsWith('UC')
+    const params = {
+      part: ['snippet', 'statistics'],
+      ...(isId ? { id: [q] } : { forHandle: q.startsWith('@') ? q.slice(1) : q }),
+    }
+    const res2 = await ytKerry.channels.list(params)
+    const channels = res2.data.items || []
+    if (!channels.length) return res.status(404).json({ error: 'Channel not found. Try using the channel ID (starts with UC…) from YouTube Studio.' })
+    res.json({ channels: channels.map((c) => ({ id: c.id, name: c.snippet.title, thumbnail: c.snippet.thumbnails?.default?.url, subscribers: c.statistics.subscriberCount })) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Also expose mine:true channel for quick detection
+app.get('/api/content/youtube-channels', requireAuth, async (req, res) => {
+  if (!hasTokens('kerry@shirtschool.com')) return res.json({ channels: [], kerryConnected: false })
+  try {
+    const ytKerry = google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
+    const r = await ytKerry.channels.list({ part: ['snippet', 'statistics'], mine: true })
+    const channels = (r.data.items || []).map((c) => ({
+      id: c.id, name: c.snippet.title,
+      thumbnail: c.snippet.thumbnails?.default?.url,
+      subscribers: c.statistics.subscriberCount,
+    }))
+    res.json({ channels, kerryConnected: true })
+  } catch (err) {
+    res.json({ channels: [], kerryConnected: true, error: err.message })
+  }
+})
+
+app.post('/api/content/channel-select', requireAuth, async (req, res) => {
+  const { channelId } = req.body
+  if (!channelId?.trim()) return res.status(400).json({ error: 'channelId required' })
+  if (supabase) {
+    await supabase.from('content_config').upsert({ key: 'youtube_channel_id', value: channelId.trim(), updated_at: new Date().toISOString() })
+  }
+  res.json({ success: true })
+})
+
+// Standalone channel stats refresh (no full brief needed)
+app.post('/api/content/channel-stats/refresh', requireAuth, async (req, res) => {
+  if (!hasTokens('kerry@shirtschool.com')) return res.status(401).json({ error: 'kerry@shirtschool.com not connected' })
+  res.json({ success: true, message: 'Fetching channel stats…' })
+  try {
+    const channelStats = await fetchKerryChannelStats()
+    if (channelStats && supabase) {
+      await supabase.from('youtube_channel_stats').insert({
+        fetched_at: new Date().toISOString(), channel_id: channelStats.channelId,
+        channel_name: channelStats.channelName, subscriber_count: channelStats.subscriberCount,
+        view_count: channelStats.totalViews, video_count: channelStats.videoCount,
+        top_videos: channelStats.topVideos, recent_videos: channelStats.recentVideos, avg_views: channelStats.avgViews,
+      })
+    }
+  } catch (err) {
+    console.error('[Content] Channel stats refresh error:', err.message)
+  }
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

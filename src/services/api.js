@@ -261,7 +261,37 @@ export async function fetchChannelStats() {
   const r = await fetch('/api/content/channel-stats')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch channel stats')
-  return d.stats
+  return d  // returns { stats, configured, channelId, kerryConnected }
+}
+
+export async function fetchYouTubeChannels() {
+  const r = await fetch('/api/content/youtube-channels')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch channels')
+  return d
+}
+
+export async function lookupChannel(query) {
+  const r = await fetch('/api/content/channel-lookup', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Channel not found')
+  return d.channels
+}
+
+export async function selectChannel(channelId) {
+  const r = await fetch('/api/content/channel-select', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelId }),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to save channel') }
+}
+
+export async function refreshChannelStats() {
+  const r = await fetch('/api/content/channel-stats/refresh', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to refresh stats')
+  return d
 }
 
 export async function sendEmail(email, draft, fromAccount) {
