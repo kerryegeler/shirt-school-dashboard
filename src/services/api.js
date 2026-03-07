@@ -294,11 +294,11 @@ export async function refreshChannelStats() {
   return d
 }
 
-export async function sendEmail(email, draft, fromAccount) {
+export async function sendEmail(email, draft, fromAccount, toEmail) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, draft, fromAccount }),
+    body: JSON.stringify({ email, draft, fromAccount, toEmail }),
   })
 
   const data = await response.json()

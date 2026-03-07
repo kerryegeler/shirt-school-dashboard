@@ -222,6 +222,8 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [fromAccount, setFromAccount] = useState(email.defaultFrom || connectedAccounts[0] || '')
+  const [toEmail, setToEmail] = useState(email.from || '')
+  const [editingTo, setEditingTo] = useState(false)
   const [confirmSend, setConfirmSend] = useState(false)
   const [sending, setSending] = useState(false)
   const [sent, setSent] = useState(false)
@@ -300,7 +302,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
     setSending(true)
     setSendError('')
     try {
-      await sendEmail(email, draft, effectiveFrom)
+      await sendEmail(email, draft, effectiveFrom, toEmail)
       setSent(true)
       setConfirmSend(false)
       // Log feedback if user edited the AI draft (not in manual mode)
@@ -499,6 +501,31 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
               </div>
             )}
 
+            <div className="draft-to-row">
+              <span className="draft-to-label">To:</span>
+              {editingTo ? (
+                <input
+                  className="draft-to-input"
+                  value={toEmail}
+                  onChange={(e) => setToEmail(e.target.value)}
+                  onBlur={() => setEditingTo(false)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditingTo(false) }}
+                  autoFocus
+                  placeholder="recipient@example.com"
+                />
+              ) : (
+                <button
+                  className="draft-to-value"
+                  onClick={() => !sent && setEditingTo(true)}
+                  title={sent ? undefined : 'Click to edit recipient'}
+                  disabled={sent}
+                >
+                  {toEmail || email.from}
+                  {!sent && <span className="draft-to-edit-hint">✎</span>}
+                </button>
+              )}
+            </div>
+
             <textarea
               className="draft-textarea"
               value={draft}
@@ -513,7 +540,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
             {confirmSend ? (
               <div className="send-confirm-bar">
                 <span className="send-confirm-text">
-                  Send to <strong>{email.from}</strong> from <strong>{effectiveFrom}</strong>?
+                  Send to <strong>{toEmail || email.from}</strong> from <strong>{effectiveFrom}</strong>?
                 </span>
                 <button className="btn btn-ghost" onClick={() => setConfirmSend(false)}>Cancel</button>
                 <button className="btn btn-send" onClick={handleSend} disabled={sending}>

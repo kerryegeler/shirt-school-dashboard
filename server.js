@@ -803,7 +803,7 @@ app.get('/api/emails/:messageId/attachment/:attachmentId', requireAuth, async (r
 })
 
 app.post('/api/emails/send', requireAuth, async (req, res) => {
-  const { email, draft, fromAccount } = req.body
+  const { email, draft, fromAccount, toEmail } = req.body
   if (!email || !draft) return res.status(400).json({ error: 'Missing email or draft' })
 
   const sendFrom =
@@ -815,6 +815,11 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
     return res.status(400).json({ error: `${sendFrom} is not connected. Connect it first.` })
   }
 
+  // Use override recipient if provided, otherwise fall back to the original sender
+  const recipientAddress = toEmail?.trim() || email.from
+  const isOverride = toEmail?.trim() && toEmail.trim() !== email.from
+  const toField = isOverride ? recipientAddress : `${email.name} <${email.from}>`
+
   const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
   try {
     const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendFrom] })
@@ -822,7 +827,7 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
 
     const raw = buildReplyRaw({
       from: `${userInfo.name || sendFrom} <${sendFrom}>`,
-      to: `${email.name} <${email.from}>`,
+      to: toField,
       subject: email.subject,
       inReplyTo: email.messageId,
       references: email.messageId,

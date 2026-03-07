@@ -820,6 +820,62 @@
   color: var(--orange);
 }
 
+.draft-to-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.draft-to-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  width: 24px;
+  flex-shrink: 0;
+}
+
+.draft-to-value {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.1s;
+}
+
+.draft-to-value:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(255,255,255,0.05));
+}
+
+.draft-to-value:disabled { cursor: default; }
+
+.draft-to-edit-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+.draft-to-input {
+  flex: 1;
+  background: var(--bg-input, #2c2c2e);
+  color: var(--text-primary);
+  border: 1px solid var(--orange);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
 .draft-textarea {
   width: 100%;
   padding: 14px 16px;
