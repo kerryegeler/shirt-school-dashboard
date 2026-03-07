@@ -19,14 +19,13 @@ export default function LoginScreen() {
           Sign in with your Shirt School Google account to get started.
         </p>
 
-        <a href="/api/auth/google" className="google-signin-btn">
+        <a href="/api/auth/dashboard-login" className="google-signin-btn">
           <IconGoogle />
           Sign in with Google
         </a>
 
         <p className="login-notice">
-          Sign in as support@shirtschool.com or kerry@shirtschool.com.
-          You can connect both accounts from inside the app.
+          Only @shirtschool.com accounts can access this dashboard.
         </p>
       </div>
     </div>

@@ -9,12 +9,7 @@ export default function AuthCallback({ onComplete }) {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
     const error = params.get('error')
-    // Google echoes back our `state` param. Also check localStorage as fallback.
-    const stateAccount = params.get('state')
-    const lsIntent = localStorage.getItem('oauth_account_intent')
-    localStorage.removeItem('oauth_account_intent')
-    // Use state if it looks like an email; otherwise use localStorage fallback
-    const expectedAccount = (stateAccount && stateAccount.includes('@')) ? stateAccount : (lsIntent || 'auto')
+    const stateParam = params.get('state')
 
     if (error) {
       setStatus('Authorization was denied. You can close this page and try again.')
@@ -26,6 +21,36 @@ export default function AuthCallback({ onComplete }) {
       setIsError(true)
       return
     }
+
+    // state='dashboard' means this is a dashboard sign-in, not a Gmail account connect
+    if (stateParam === 'dashboard') {
+      setStatus('Signing in...')
+      fetch('/api/auth/dashboard-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.success) {
+            setStatus(`Signed in as ${data.email}. Redirecting...`)
+            setTimeout(onComplete, 800)
+          } else {
+            setStatus(data.error || 'Sign-in failed.')
+            setIsError(true)
+          }
+        })
+        .catch(() => {
+          setStatus('Sign-in failed. Please try again.')
+          setIsError(true)
+        })
+      return
+    }
+
+    // Gmail account connect flow
+    const lsIntent = localStorage.getItem('oauth_account_intent')
+    localStorage.removeItem('oauth_account_intent')
+    const expectedAccount = (stateParam && stateParam.includes('@')) ? stateParam : (lsIntent || 'auto')
 
     setStatus('Connecting account...')
 

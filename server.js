@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import crypto from 'crypto'
 import express from 'express'
 import cors from 'cors'
 import { google } from 'googleapis'
@@ -11,6 +12,83 @@ const PORT = process.env.PORT || 3001
 
 app.use(cors())
 app.use(express.json())
+
+// ─── Dashboard session (signed HTTP-only cookie, no DB needed) ────────────────
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production'
+const SESSION_COOKIE = 'ss_session'
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60
+
+function getCookie(req, name) {
+  const header = req.headers.cookie || ''
+  const match = header.split(';').find((c) => c.trim().startsWith(name + '='))
+  return match ? match.trim().slice(name.length + 1) : null
+}
+
+function createSessionToken(email) {
+  const ts = Date.now()
+  const payload = `${email}:${ts}`
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex')
+  return `${payload}:${sig}`
+}
+
+function verifySessionToken(raw) {
+  if (!raw) return null
+  try {
+    const lastColon = raw.lastIndexOf(':')
+    if (lastColon === -1) return null
+    const payload = raw.slice(0, lastColon)
+    const sig = raw.slice(lastColon + 1)
+    const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex')
+    if (sig.length !== expected.length) return null
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+    const tsColon = payload.lastIndexOf(':')
+    const email = payload.slice(0, tsColon)
+    const ts = parseInt(payload.slice(tsColon + 1))
+    if (!email.includes('@') || isNaN(ts)) return null
+    if (Date.now() - ts > SESSION_MAX_AGE_MS) return null
+    return { email }
+  } catch {
+    return null
+  }
+}
+
+function setSessionCookie(res, email) {
+  const value = createSessionToken(email)
+  const secureFlag = process.env.RAILWAY_PUBLIC_URL ? 'Secure; ' : ''
+  res.setHeader('Set-Cookie',
+    `${SESSION_COOKIE}=${value}; Max-Age=${SESSION_MAX_AGE_S}; Path=/; HttpOnly; ${secureFlag}SameSite=Lax`)
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`)
+}
+
+function getDashboardUser(req) {
+  return verifySessionToken(getCookie(req, SESSION_COOKIE))
+}
+
+// Only @shirtschool.com accounts may access the dashboard
+const ALLOWED_DOMAIN = 'shirtschool.com'
+
+const DASHBOARD_PUBLIC_PATHS = new Set([
+  '/api/health',
+  '/api/auth/me',
+  '/api/auth/dashboard-login',
+  '/api/auth/dashboard-complete',
+  '/api/auth/dashboard-logout',
+])
+
+function requireDashboardAuth(req, res, next) {
+  if (!req.path.startsWith('/api')) return next()
+  if (DASHBOARD_PUBLIC_PATHS.has(req.path)) return next()
+  const user = getDashboardUser(req)
+  if (!user) return res.status(401).json({ error: 'Unauthorized', requiresLogin: true })
+  req.dashboardUser = user
+  next()
+}
+
+app.use(requireDashboardAuth)
 
 // ─── Hardcoded target accounts ───────────────────────────────────────────────
 // The app ALWAYS fetches from and sends on behalf of these two accounts only.
@@ -357,6 +435,63 @@ function buildReplyRaw({ from, to, subject, inReplyTo, references, body }) {
     ].join('\r\n')
   ).toString('base64url')
 }
+
+// ─── Dashboard auth routes ────────────────────────────────────────────────────
+
+// Step 1: redirect to Google with minimal scopes (openid + email only)
+app.get('/api/auth/dashboard-login', (req, res) => {
+  const client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    REDIRECT_URI
+  )
+  res.redirect(client.generateAuthUrl({
+    access_type: 'online',
+    scope: ['openid', 'email', 'profile'],
+    state: 'dashboard',
+    prompt: 'select_account',
+  }))
+})
+
+// Step 2: frontend posts code here after the OAuth callback
+app.post('/api/auth/dashboard-complete', async (req, res) => {
+  const { code } = req.body
+  if (!code) return res.status(400).json({ error: 'Missing authorization code' })
+  try {
+    const tempClient = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      REDIRECT_URI
+    )
+    const { tokens } = await tempClient.getToken(code)
+    tempClient.setCredentials(tokens)
+    const { data: userInfo } = await google.oauth2({ version: 'v2', auth: tempClient }).userinfo.get()
+    const email = userInfo.email.toLowerCase()
+    if (!email.endsWith('@' + ALLOWED_DOMAIN)) {
+      return res.status(403).json({
+        error: `Access denied. Only @${ALLOWED_DOMAIN} accounts can access this dashboard. You signed in as ${email}.`,
+      })
+    }
+    setSessionCookie(res, email)
+    res.json({ success: true, email })
+  } catch (error) {
+    console.error('Dashboard login error:', error.message)
+    res.status(500).json({ error: 'Sign-in failed. Please try again.' })
+  }
+})
+
+// Returns the current logged-in dashboard user (or 401)
+app.get('/api/auth/me', (req, res) => {
+  const user = getDashboardUser(req)
+  if (!user) return res.status(401).json({ error: 'Not authenticated' })
+  res.json({ user })
+})
+
+// Sign out of dashboard
+app.post('/api/auth/dashboard-logout', (req, res) => {
+  clearSessionCookie(res)
+  res.json({ success: true })
+})
 
 // ─── Auth routes ──────────────────────────────────────────────────────────────
 

@@ -89,14 +89,16 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setSelectedEmail(null)
         setSelectedIds(new Set())
         setSidebarView('all')
-        fetchEmails(false, 'archived')
+        setEmails([]) // clear inbox data so it doesn't flash into archived views
+        fetchEmails(true, 'archived') // isRefresh=true keeps nav visible (no full skeleton)
       }
     } else {
       if (viewMode === 'archived') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setSelectedIds(new Set())
-        fetchEmails(false, 'inbox')
+        setEmails([]) // clear archived data so it doesn't appear in status views
+        fetchEmails(true, 'inbox') // isRefresh=true keeps nav visible (no full skeleton)
       }
       setSidebarView(viewId)
     }
@@ -270,7 +272,42 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
       </div>
 
       <div className="email-agent-body">
+        {/* ── Left nav sidebar — always visible so switching views never flashes ── */}
+        <nav className="email-nav">
+          <div className="email-nav-section">
+            <div className="email-nav-section-label">Status</div>
+            {NAV_STATUS_VIEWS.map(({ id, label }) => (
+              <button
+                key={id}
+                className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
+                onClick={() => handleNavClick(id)}
+              >
+                {label}
+                {id !== 'archived' && counts[id] > 0 && (
+                  <span className="email-nav-count">{counts[id]}</span>
+                )}
+              </button>
+            ))}
+          </div>
+          <div className="email-nav-section">
+            <div className="email-nav-section-label">Category</div>
+            {NAV_CATEGORY_VIEWS.map(({ id, label }) => (
+              <button
+                key={id}
+                className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
+                onClick={() => handleNavClick(id)}
+              >
+                {label}
+                {counts[id] > 0 && (
+                  <span className="email-nav-count">{counts[id]}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+
         {loading ? (
+          // Skeleton only fills the list panel — nav stays visible above
           <div className="email-agent-loading">
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="email-list-skeleton">
@@ -292,40 +329,6 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
           </div>
         ) : (
           <>
-            {/* ── Left nav sidebar ── */}
-            <nav className="email-nav">
-              <div className="email-nav-section">
-                <div className="email-nav-section-label">Status</div>
-                {NAV_STATUS_VIEWS.map(({ id, label }) => (
-                  <button
-                    key={id}
-                    className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
-                    onClick={() => handleNavClick(id)}
-                  >
-                    {label}
-                    {id !== 'archived' && counts[id] > 0 && (
-                      <span className="email-nav-count">{counts[id]}</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-              <div className="email-nav-section">
-                <div className="email-nav-section-label">Category</div>
-                {NAV_CATEGORY_VIEWS.map(({ id, label }) => (
-                  <button
-                    key={id}
-                    className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
-                    onClick={() => handleNavClick(id)}
-                  >
-                    {label}
-                    {counts[id] > 0 && (
-                      <span className="email-nav-count">{counts[id]}</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </nav>
-
             <EmailList
               emails={filteredEmails}
               selectedId={selectedEmail?.id}
