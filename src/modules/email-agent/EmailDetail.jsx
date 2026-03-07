@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft } from '../../services/api.js'
+import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback } from '../../services/api.js'
 
 const CATEGORY_LABELS = {
   student_support: 'Student Support',
@@ -228,6 +228,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   const [sendError, setSendError] = useState('')
   const [savingDraft, setSavingDraft] = useState(false)
   const [draftSavedAt, setDraftSavedAt] = useState(null)
+  const aiDraftRef = useRef('') // Original AI-generated draft before user edits
 
   // Load saved draft on mount
   useEffect(() => {
@@ -269,6 +270,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       const result = await generateReply(email, email.category)
       setDraft(result.draft)
       setPersonaUsed(result.persona)
+      aiDraftRef.current = result.draft // Save original for feedback comparison
     } catch (err) {
       setError(err.message)
     } finally {
@@ -301,6 +303,12 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       await sendEmail(email, draft, effectiveFrom)
       setSent(true)
       setConfirmSend(false)
+      // Log feedback if user edited the AI draft (not in manual mode)
+      const original = aiDraftRef.current
+      if (original && draft !== original && !manualMode) {
+        logFeedback({ threadId: email.id, category: email.category, originalDraft: original, finalVersion: draft })
+          .catch(() => {})
+      }
       // Delete saved draft on successful send
       deleteDraft(email.id).then(() => onDraftDeleted?.(email.id)).catch(() => {})
     } catch (err) {

@@ -7,6 +7,12 @@ const IconEmail = () => (
   </svg>
 )
 
+const IconFeedback = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 1v14M1 8h14M4.5 4.5l7 7M11.5 4.5l-7 7" />
+  </svg>
+)
+
 const IconEdit = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M11 2l3 3-9 9H2v-3L11 2z" />
@@ -22,6 +28,7 @@ const IconChart = () => (
 
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
+  { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
   { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: true },
   { id: 'sponsorship-tracker', label: 'Sponsorship Tracker', icon: IconChart, comingSoon: true },
 ]

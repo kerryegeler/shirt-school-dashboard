@@ -5,6 +5,7 @@ import cors from 'cors'
 import { google } from 'googleapis'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
+import { WebClient as SlackWebClient } from '@slack/web-api'
 import fs from 'fs'
 import path from 'path'
 
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 3001
 
 app.use(cors())
 app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
 
 // ─── Dashboard session (signed HTTP-only cookie, no DB needed) ────────────────
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production'
@@ -78,6 +80,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/auth/dashboard-login',
   '/api/auth/dashboard-complete',
   '/api/auth/dashboard-logout',
+  '/api/slack/actions',  // Called by Slack, not the dashboard user
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -113,11 +116,16 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
   : null
 
+// ─── Slack client ──────────────────────────────────────────────────────────────
+const slackClient = process.env.SLACK_BOT_TOKEN ? new SlackWebClient(process.env.SLACK_BOT_TOKEN) : null
+
 // ─── In-memory caches (hydrated at startup) ───────────────────────────────────
 // These let buildThreadObject stay synchronous while Supabase is the source of truth.
 let categoryOverridesCache = {}   // { [threadId]: category }
 let folderDataCache = { folders: [], assignments: {} }  // { folders: [], assignments: { [threadId]: folderId } }
 let savedDraftsCache = new Set()  // Set of threadIds that have a saved draft
+let slackNotifiedCache = new Set() // Set of threadIds already posted to Slack
+const approvalTimers = new Map()   // threadId → setTimeout ref (for 5-min send delay)
 const DRAFTS_PATH = path.resolve('.drafts.json')
 
 // ─── Category override storage ────────────────────────────────────────────────
@@ -996,6 +1004,302 @@ const PERSONA_NAMES = {
   general: 'Kerry',
 }
 
+// ─── Feedback helpers ─────────────────────────────────────────────────────────
+
+function computeDiffSummary(original, final) {
+  const ow = original.trim().split(/\s+/)
+  const fw = final.trim().split(/\s+/)
+  const owSet = new Set(ow)
+  const fwSet = new Set(fw)
+  const added = fw.filter((w) => !owSet.has(w)).length
+  const removed = ow.filter((w) => !fwSet.has(w)).length
+  return `${ow.length}→${fw.length} words; ~${added} added, ~${removed} removed`
+}
+
+// ─── Slack workflow helpers ───────────────────────────────────────────────────
+
+async function generateDraftForSlack(thread) {
+  const kerryBrain = loadKerryBrain()
+  const category = thread.category
+  const personaName = PERSONA_NAMES[category] || 'Kerry'
+
+  const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
+${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}
+Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
+{"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
+
+  const userPrompt = `Category: ${category}. Reply as ${personaName}.
+
+From: ${thread.name} <${thread.from}>
+Subject: ${thread.subject}
+---
+${(thread.bodyText || '').slice(0, 2000)}
+---
+Return JSON only.`
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1500,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  })
+
+  const text = message.content[0].text.trim()
+  // Strip any accidental markdown fences
+  const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+  return { ...JSON.parse(clean), persona: personaName }
+}
+
+function confidenceEmoji(c) {
+  return { high: '🟢', medium: '🟡', low: '🔴' }[c] || '🟡'
+}
+
+function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status) {
+  const truncDraft = draft.length > 600 ? draft.slice(0, 600) + '…' : draft
+  const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
+  const capConf = (confidence || 'medium').charAt(0).toUpperCase() + (confidence || 'medium').slice(1)
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: '📧 New Email — Action Required' } },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*From:* ${thread.name} <${thread.from}>` },
+        { type: 'mrkdwn', text: `*Category:* ${thread.category}` },
+      ],
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: `*Subject:* ${thread.subject}\n*Summary:* ${summary}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*Draft Reply:*\n\`\`\`${truncDraft}\`\`\`` } },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Confidence:* ${confidenceEmoji(confidence)} ${capConf}${confidenceReason ? `\n_${confidenceReason}_` : ''}`,
+      },
+    },
+  ]
+
+  const statusMessages = {
+    approved: '✅ *Approved* — sending in 5 minutes…',
+    sent:     '✅ *Sent* via Gmail.',
+    skipped:  '⏭️ *Skipped* — no reply needed.',
+  }
+  if (statusMessages[status]) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: statusMessages[status] } })
+  }
+
+  if (status === 'pending') {
+    blocks.push({
+      type: 'actions',
+      block_id: 'email_approval',
+      elements: [
+        {
+          type: 'button', style: 'primary',
+          text: { type: 'plain_text', text: '✅ Approve & Send' },
+          action_id: 'approve_email', value: thread.id,
+          confirm: {
+            title: { type: 'plain_text', text: 'Approve this reply?' },
+            text: { type: 'mrkdwn', text: 'The draft will be sent in 5 minutes. You can cancel during that window.' },
+            confirm: { type: 'plain_text', text: 'Approve' },
+            deny: { type: 'plain_text', text: 'Cancel' },
+          },
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '✏️ Edit in Dashboard' },
+          action_id: 'edit_email', value: thread.id, url: dashUrl,
+        },
+        {
+          type: 'button', style: 'danger',
+          text: { type: 'plain_text', text: '⏭️ Skip' },
+          action_id: 'skip_email', value: thread.id,
+        },
+      ],
+    })
+  } else if (status === 'approved') {
+    blocks.push({
+      type: 'actions',
+      block_id: 'email_approval',
+      elements: [{
+        type: 'button', style: 'danger',
+        text: { type: 'plain_text', text: '❌ Cancel Send' },
+        action_id: 'cancel_email', value: thread.id,
+      }],
+    })
+  }
+
+  return blocks
+}
+
+async function getSlackNotification(threadId) {
+  if (!supabase) return null
+  const { data } = await supabase.from('slack_notifications').select('*').eq('thread_id', threadId).single()
+  return data || null
+}
+
+async function updateSlackMessage(notif, status) {
+  if (!slackClient || !notif?.slack_ts || !notif?.channel_id) return
+  const meta = notif.thread_meta || {}
+  const mockThread = {
+    id: notif.thread_id, name: meta.fromName, from: meta.from,
+    to: meta.to, subject: meta.subject, category: notif.category,
+  }
+  const blocks = buildSlackBlocks(mockThread, notif.draft || '', notif.summary || '',
+    notif.confidence, notif.confidence_reason, status)
+  await slackClient.chat.update({
+    channel: notif.channel_id,
+    ts: notif.slack_ts,
+    text: `${meta.subject || 'Email'} — ${status}`,
+    blocks,
+  })
+}
+
+async function postEmailToSlack(thread) {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID) return
+
+  let result
+  try {
+    result = await generateDraftForSlack(thread)
+  } catch (err) {
+    console.error(`[Slack] Draft generation failed for ${thread.id}:`, err.message)
+    return
+  }
+
+  const { draft, summary, confidence, confidence_reason } = result
+  const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending')
+
+  const msg = await slackClient.chat.postMessage({
+    channel: process.env.SLACK_CHANNEL_ID,
+    text: `New email from ${thread.name}: ${thread.subject}`,
+    blocks,
+  })
+
+  const threadMeta = {
+    from: thread.from, fromName: thread.name, to: thread.to,
+    subject: thread.subject, messageId: thread.messageId,
+    threadId: thread.id, defaultFrom: thread.defaultFrom,
+  }
+
+  slackNotifiedCache.add(thread.id)
+
+  if (supabase) {
+    await supabase.from('slack_notifications').upsert({
+      thread_id: thread.id, account: thread.account,
+      slack_ts: msg.ts, channel_id: process.env.SLACK_CHANNEL_ID,
+      status: 'pending', draft, category: thread.category,
+      confidence, confidence_reason: confidence_reason || null,
+      summary, thread_meta: threadMeta,
+      created_at: new Date().toISOString(),
+    })
+  }
+}
+
+async function sendApprovedEmail(threadId) {
+  try {
+    const notif = await getSlackNotification(threadId)
+    if (!notif || notif.status !== 'approved') return
+
+    const meta = notif.thread_meta || {}
+    const sendFrom = meta.defaultFrom || notif.account
+
+    if (!hasTokens(sendFrom)) {
+      console.error(`[Slack] Cannot send from ${sendFrom}: not connected`)
+      return
+    }
+
+    const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
+    const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendFrom] })
+    const { data: userInfo } = await oauth2.userinfo.get()
+
+    const raw = buildReplyRaw({
+      from: `${userInfo.name || sendFrom} <${sendFrom}>`,
+      to: `${meta.fromName} <${meta.from}>`,
+      subject: meta.subject,
+      inReplyTo: meta.messageId,
+      references: meta.messageId,
+      body: notif.draft,
+    })
+
+    await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw, threadId: meta.threadId },
+    })
+
+    approvalTimers.delete(threadId)
+
+    if (supabase) {
+      await supabase.from('slack_notifications')
+        .update({ status: 'sent', sent_at: new Date().toISOString() })
+        .eq('thread_id', threadId)
+    }
+
+    await updateSlackMessage({ ...notif, status: 'sent' }, 'sent')
+    console.log(`[Slack] Auto-sent reply for thread ${threadId}`)
+  } catch (err) {
+    console.error(`[Slack] sendApprovedEmail error for ${threadId}:`, err.message)
+  }
+}
+
+function scheduleApprovalSend(threadId, delayMs) {
+  if (approvalTimers.has(threadId)) clearTimeout(approvalTimers.get(threadId))
+  const timer = setTimeout(() => sendApprovedEmail(threadId), delayMs)
+  approvalTimers.set(threadId, timer)
+}
+
+async function runSlackPoll() {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID || !supabase) return
+  const accounts = connectedAccounts()
+  if (!accounts.length) return
+
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000 // Only process emails from last 48h
+
+  for (const account of accounts) {
+    try {
+      const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+      const listRes = await gmail.users.threads.list({ userId: 'me', q: 'in:inbox', maxResults: 20 })
+      const threads = listRes.data.threads || []
+
+      for (const t of threads) {
+        if (slackNotifiedCache.has(t.id)) continue
+
+        // Mark in cache immediately to prevent duplicate processing
+        slackNotifiedCache.add(t.id)
+
+        try {
+          const threadRes = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' })
+          const thread = buildThreadObject(threadRes.data, account)
+          if (!thread) continue
+
+          // Skip: too old, spam, or we already sent the last message
+          if (new Date(thread.timestamp).getTime() < cutoff) continue
+          if (thread.category === 'general') continue
+          const lastMsg = (thread.messages || []).at(-1)
+          if (lastMsg?.isOutgoing) continue
+
+          await postEmailToSlack(thread)
+          await new Promise((r) => setTimeout(r, 800)) // Rate limit guard
+        } catch (err) {
+          console.error(`[Slack] Error processing thread ${t.id}:`, err.message)
+          slackNotifiedCache.delete(t.id) // Allow retry next poll
+        }
+      }
+    } catch (err) {
+      console.error(`[Slack] Poll error for ${account}:`, err.message)
+    }
+  }
+}
+
+function startSlackPolling() {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID) {
+    console.log('  Slack: not configured (set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID to enable)')
+    return
+  }
+  console.log('  Slack: approval workflow enabled, polling every 15 min')
+  setTimeout(runSlackPoll, 15_000) // First run 15s after startup
+  setInterval(runSlackPoll, 15 * 60 * 1000)
+}
+
+
 app.post('/api/generate-reply', async (req, res) => {
   const { email, category } = req.body
   if (!email || !category) return res.status(400).json({ error: 'Missing email or category' })
@@ -1004,10 +1308,30 @@ app.post('/api/generate-reply', async (req, res) => {
   const kerryBrain = loadKerryBrain()
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
+  // Fetch last 10 feedback examples for this category to improve drafts
+  let feedbackContext = ''
+  if (supabase) {
+    const { data: feedbackRows } = await supabase.from('ai_feedback')
+      .select('original_draft, final_version, diff_summary')
+      .eq('category', category)
+      .order('created_at', { ascending: false })
+      .limit(10)
+    if (feedbackRows?.length) {
+      feedbackContext = `\n\nHere are recent examples where Kerry edited your AI drafts. Learn from these patterns:\n\n${
+        feedbackRows.map((f, i) => {
+          const orig = f.original_draft.slice(0, 300)
+          const final = f.final_version.slice(0, 300)
+          return `Example ${i + 1}:\nOriginal: ${orig}\nKerry changed to: ${final}${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
+        }).join('\n\n---\n\n')
+      }`
+    }
+  }
+
   const systemPrompt = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
 ${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}
 The email you are replying to is categorized as: ${category}
+${feedbackContext}
 
 Write only the email body — no subject line, no "From:", no metadata. Start directly with the greeting.`
 
@@ -1034,6 +1358,109 @@ Reply as instructed in the context above.`
     console.error('Anthropic API error:', error.message)
     res.status(500).json({ error: 'Failed to generate reply. Check your API key.' })
   }
+})
+
+// ─── Slack actions endpoint ───────────────────────────────────────────────────
+
+app.post('/api/slack/actions', async (req, res) => {
+  res.status(200).send() // Respond to Slack immediately (3s timeout requirement)
+
+  let payload
+  try {
+    payload = JSON.parse(req.body?.payload || '{}')
+  } catch {
+    console.error('[Slack] Invalid payload JSON')
+    return
+  }
+
+  const action = payload.actions?.[0]
+  if (!action) return
+  const { action_id: actionId, value: threadId } = action
+  const slackTs = payload.message?.ts
+  const channelId = payload.channel?.id
+  if (!threadId) return
+
+  try {
+    const notif = await getSlackNotification(threadId)
+
+    if (actionId === 'approve_email') {
+      if (supabase) {
+        await supabase.from('slack_notifications')
+          .update({ status: 'approved', approved_at: new Date().toISOString() })
+          .eq('thread_id', threadId)
+      }
+      scheduleApprovalSend(threadId, 5 * 60 * 1000)
+      if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'approved')
+
+    } else if (actionId === 'cancel_email') {
+      if (approvalTimers.has(threadId)) {
+        clearTimeout(approvalTimers.get(threadId))
+        approvalTimers.delete(threadId)
+      }
+      if (supabase) {
+        await supabase.from('slack_notifications')
+          .update({ status: 'pending' })
+          .eq('thread_id', threadId)
+      }
+      if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'pending')
+
+    } else if (actionId === 'skip_email' || actionId === 'edit_email') {
+      if (supabase) {
+        await supabase.from('slack_notifications')
+          .update({ status: 'skipped' })
+          .eq('thread_id', threadId)
+      }
+      if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped')
+      // For edit: also reply in thread with dashboard link
+      if (actionId === 'edit_email' && slackClient && channelId && slackTs) {
+        const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
+        await slackClient.chat.postMessage({
+          channel: channelId, thread_ts: slackTs,
+          text: `Open the dashboard to edit this reply: ${dashUrl}`,
+        })
+      }
+    }
+  } catch (err) {
+    console.error('[Slack] Action handler error:', err.message)
+  }
+})
+
+// ─── AI Feedback routes ───────────────────────────────────────────────────────
+
+app.get('/api/feedback', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ entries: [] })
+  const { data, error } = await supabase.from('ai_feedback')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ entries: data || [] })
+})
+
+app.post('/api/feedback', requireAuth, async (req, res) => {
+  const { threadId, category, originalDraft, finalVersion } = req.body
+  if (!originalDraft || !finalVersion || !category) {
+    return res.status(400).json({ error: 'Missing required fields' })
+  }
+  const diffSummary = computeDiffSummary(originalDraft, finalVersion)
+  if (supabase) {
+    const { error } = await supabase.from('ai_feedback').insert({
+      thread_id: threadId || null, category,
+      original_draft: originalDraft, final_version: finalVersion,
+      diff_summary: diffSummary, created_at: new Date().toISOString(),
+    })
+    if (error) return res.status(500).json({ error: error.message })
+  }
+  res.json({ success: true, diffSummary })
+})
+
+app.patch('/api/feedback/:id/notes', requireAuth, async (req, res) => {
+  const { id } = req.params
+  const { notes } = req.body
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('ai_feedback').update({ notes }).eq('id', id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -1097,6 +1524,27 @@ async function init() {
       savedDraftsCache = new Set(draftRows.map((r) => r.thread_id))
       console.log(`  Loaded ${draftRows.length} saved draft(s)`)
     }
+
+    // Load Slack notified thread IDs into cache
+    const { data: slackRows } = await supabase.from('slack_notifications').select('thread_id, status, approved_at')
+    if (slackRows) {
+      for (const row of slackRows) slackNotifiedCache.add(row.thread_id)
+      console.log(`  Loaded ${slackRows.length} Slack notification(s)`)
+
+      // Recover any pending approval timers (server was restarted mid-countdown)
+      const pendingApprovals = slackRows.filter((r) => r.status === 'approved' && r.approved_at)
+      for (const row of pendingApprovals) {
+        const elapsed = Date.now() - new Date(row.approved_at).getTime()
+        const remaining = 5 * 60 * 1000 - elapsed
+        if (remaining > 0) {
+          console.log(`  Rescheduling Slack send for ${row.thread_id} in ${Math.round(remaining / 1000)}s`)
+          scheduleApprovalSend(row.thread_id, remaining)
+        } else {
+          console.log(`  Sending overdue Slack approval for ${row.thread_id}`)
+          sendApprovedEmail(row.thread_id)
+        }
+      }
+    }
   } else {
     console.log('  Supabase: not configured — using local filesystem')
 
@@ -1137,6 +1585,8 @@ async function init() {
   console.log('  kerry-brain.md:', fs.existsSync(KERRY_BRAIN_PATH) ? 'loaded' : 'NOT FOUND — AI replies will have no context')
   const connected = connectedAccounts()
   console.log('  Connected:', connected.length ? connected.join(', ') : 'none')
+
+  startSlackPolling()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)

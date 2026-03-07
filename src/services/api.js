@@ -150,6 +150,36 @@ export async function assignFolder(threadId, folderId) {
   return data
 }
 
+export async function fetchFeedback() {
+  const response = await fetch('/api/feedback')
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to fetch feedback')
+  return data.entries
+}
+
+export async function logFeedback({ threadId, category, originalDraft, finalVersion }) {
+  const response = await fetch('/api/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId, category, originalDraft, finalVersion }),
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to log feedback')
+  return data
+}
+
+export async function updateFeedbackNotes(id, notes) {
+  const response = await fetch(`/api/feedback/${id}/notes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes }),
+  })
+  if (!response.ok) {
+    const data = await response.json()
+    throw new Error(data.error || 'Failed to update notes')
+  }
+}
+
 export async function sendEmail(email, draft, fromAccount) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',

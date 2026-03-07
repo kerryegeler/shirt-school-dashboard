@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@slack/web-api": "^7.14.1",
     "@supabase/supabase-js": "^2.98.0",
     "concurrently": "^9.1.2",
     "cors": "^2.8.5",

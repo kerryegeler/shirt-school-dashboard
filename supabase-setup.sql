@@ -44,3 +44,37 @@ create table if not exists saved_drafts (
 );
 
 alter table saved_drafts disable row level security;
+
+-- Slack approval workflow (tracks which emails have been posted to Slack)
+create table if not exists slack_notifications (
+  thread_id        text primary key,
+  account          text not null,
+  slack_ts         text,           -- Slack message timestamp (for updates)
+  channel_id       text,
+  status           text not null default 'pending',  -- pending | approved | sent | skipped
+  draft            text,
+  category         text,
+  confidence       text,
+  confidence_reason text,
+  summary          text,
+  thread_meta      jsonb,          -- { from, fromName, to, subject, messageId, threadId, defaultFrom }
+  approved_at      timestamptz,
+  sent_at          timestamptz,
+  created_at       timestamptz not null default now()
+);
+
+alter table slack_notifications disable row level security;
+
+-- AI feedback loop (logs AI draft vs final sent version)
+create table if not exists ai_feedback (
+  id              uuid primary key default gen_random_uuid(),
+  thread_id       text,
+  category        text not null,
+  original_draft  text not null,
+  final_version   text not null,
+  diff_summary    text,
+  notes           text,
+  created_at      timestamptz not null default now()
+);
+
+alter table ai_feedback disable row level security;
