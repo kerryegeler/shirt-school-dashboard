@@ -40,7 +40,28 @@
   border-radius: 20px;
 }
 
-/* ─── Loading / Error ───────────────────────────────────────────── */
+/* ─── Loading spinner ───────────────────────────────────────────── */
+.email-agent-spinner-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.email-spinner {
+  width: 32px;
+  height: 32px;
+  border: 2.5px solid var(--border-strong);
+  border-top-color: var(--orange);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Legacy skeleton (kept for any other uses) */
 .email-agent-loading {
   width: 360px;
   flex-shrink: 0;
@@ -100,7 +121,7 @@
 
 /* ─── Email Nav Sidebar ──────────────────────────────────────────── */
 .email-nav {
-  width: 155px;
+  width: 200px;
   flex-shrink: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-card);
@@ -1347,5 +1368,229 @@
 .bulk-category-option:hover {
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.95);
+}
+
+/* ─── Search bar ─────────────────────────────────────────────────── */
+.email-search-form {
+  flex: 1;
+  max-width: 340px;
+  margin: 0 16px;
+}
+
+.email-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.email-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-tertiary);
+  display: flex;
+  pointer-events: none;
+}
+
+.email-search-icon svg { width: 13px; height: 13px; }
+
+.email-search-input {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 32px 6px 30px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.email-search-input::placeholder { color: var(--text-tertiary); }
+.email-search-input:focus { border-color: var(--orange); background: var(--bg-card); }
+
+.email-search-clear {
+  position: absolute;
+  right: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 50%;
+  transition: color 0.1s;
+}
+
+.email-search-clear svg { width: 11px; height: 11px; }
+.email-search-clear:hover { color: var(--text-primary); }
+
+/* ─── Bulk toolbar bar (top of right panel) ──────────────────────── */
+.bulk-toolbar-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px;
+  height: 46px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.bulk-bar-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 0 8px 0 4px;
+  white-space: nowrap;
+}
+
+.bulk-bar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.bulk-bar-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+
+.bulk-bar-btn svg { width: 15px; height: 15px; }
+.bulk-bar-btn:hover { background: var(--bg-card); color: var(--text-primary); }
+.bulk-bar-btn--active { background: var(--orange-dim); color: var(--orange); }
+.bulk-bar-btn--active:hover { background: var(--orange-dim); color: var(--orange); }
+.bulk-bar-btn--close:hover { color: var(--red); }
+
+/* Bulk picker popover (for toolbar bar) */
+.bulk-picker-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 80px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 140px;
+  z-index: 30;
+}
+
+.bulk-picker-option {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  border-radius: 7px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.bulk-picker-option:hover { background: var(--bg-elevated); }
+
+.bulk-picker-empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: block;
+}
+
+.bulk-picker-remove {
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  padding-top: 8px;
+}
+
+/* ─── Select all button ──────────────────────────────────────────── */
+.email-list-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.select-all-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 4px;
+  transition: color 0.1s, background 0.1s;
+  flex-shrink: 0;
+}
+
+.select-all-btn svg { width: 14px; height: 14px; }
+.select-all-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.select-all-btn--active { color: var(--orange); }
+
+/* ─── Load more ──────────────────────────────────────────────────── */
+.load-more-btn {
+  width: 100%;
+  padding: 12px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--orange);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 0.1s;
+}
+
+.load-more-btn:hover { background: var(--bg-elevated); }
+.load-more-btn:disabled { opacity: 0.5; cursor: default; }
+
+.load-more-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--orange);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ─── Draft indicator in email list ─────────────────────────────── */
+.draft-indicator {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--orange);
+  background: var(--orange-dim);
+  padding: 1px 6px;
+  border-radius: 10px;
+  flex-shrink: 0;
 }
 

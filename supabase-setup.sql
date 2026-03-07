@@ -35,3 +35,12 @@ alter table gmail_tokens        disable row level security;
 alter table category_overrides  disable row level security;
 alter table folders             disable row level security;
 alter table folder_assignments  disable row level security;
+
+-- Saved reply drafts (persists in-progress replies across sessions)
+create table if not exists saved_drafts (
+  thread_id   text primary key,
+  content     text not null,
+  updated_at  timestamptz not null default now()
+);
+
+alter table saved_drafts disable row level security;

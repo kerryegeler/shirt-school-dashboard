@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import './EmailAgent.css'
 
 const CATEGORY_LABELS = {
@@ -12,12 +11,6 @@ const CATEGORY_BADGE_CLASS = {
   sponsorship: 'badge badge-sponsorship',
   general: 'badge badge-general',
 }
-
-const CATEGORY_OPTIONS = [
-  { value: 'student_support', label: 'Support' },
-  { value: 'sponsorship',     label: 'Sponsorship' },
-  { value: 'general',         label: 'Spam' },
-]
 
 const AVATAR_COLORS = [
   '#2563eb', '#7c3aed', '#059669', '#dc2626',
@@ -63,46 +56,17 @@ const IconCheck = () => (
   </svg>
 )
 
-const IconMarkRead = () => (
+const IconSelectAll = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="1" y="3" width="14" height="10" rx="1.5" />
-    <path d="M1 5l7 5 7-5" />
-    <path d="M5 10.5l2 2 4-4.5" />
+    <rect x="1" y="1" width="14" height="14" rx="2" />
+    <path d="M4 8l3 3 5-5" />
   </svg>
 )
 
-const IconMarkUnread = () => (
+const IconDeselectAll = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="1" y="3" width="14" height="10" rx="1.5" />
-    <path d="M1 5l7 5 7-5" />
-    <circle cx="12.5" cy="4.5" r="2.5" fill="currentColor" stroke="none" />
-  </svg>
-)
-
-const IconTag = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M1 1h6.5l7 7-6.5 6.5-7-7V1z" />
-    <circle cx="5" cy="5" r="1.2" fill="currentColor" stroke="none" />
-  </svg>
-)
-
-const IconFolderBulk = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M1 4a1 1 0 011-1h4l2 2h6a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1V4z" />
-  </svg>
-)
-
-const IconArchiveBulk = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="1" y="1" width="14" height="4" rx="1" />
-    <path d="M2 5v9a1 1 0 001 1h10a1 1 0 001-1V5" />
-    <path d="M6 9h4" />
-  </svg>
-)
-
-const IconClose = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-    <path d="M4 4l8 8M12 4l-8 8" />
+    <rect x="1" y="1" width="14" height="14" rx="2" />
+    <path d="M5 5l6 6M11 5l-6 6" />
   </svg>
 )
 
@@ -110,29 +74,36 @@ const IconClose = () => (
 
 export default function EmailList({
   emails, selectedId, onSelect, viewMode, onArchive,
-  selectedIds, onToggleSelect,
-  onBulkArchive, onBulkMarkRead, onBulkReclassify, onClearSelection,
-  folders = [], onBulkAssignFolder,
+  selectedIds, onToggleSelect, onSelectAll,
+  totalEstimate, nextPageTokens, onLoadMore, loadingMore,
+  isSearchMode, searchQuery,
 }) {
-  const [showCategoryPicker, setShowCategoryPicker] = useState(false)
-  const [showFolderPicker, setShowFolderPicker] = useState(false)
   const anySelected = selectedIds.size > 0
-
-  function handleReclassify(value) {
-    setShowCategoryPicker(false)
-    onBulkReclassify(value)
-  }
-
-  function handleAssignFolder(folderId) {
-    setShowFolderPicker(false)
-    onBulkAssignFolder(folderId)
-  }
+  const allSelected = emails.length > 0 && selectedIds.size === emails.length
+  const showLoadMore = !!nextPageTokens && !isSearchMode
 
   return (
     <div className="email-list-panel">
       {/* ── Slim header ── */}
       <div className="email-list-header">
-        <span className="email-count">{emails.length} thread{emails.length !== 1 ? 's' : ''}</span>
+        <div className="email-list-header-left">
+          <button
+            className={`select-all-btn ${allSelected ? 'select-all-btn--active' : ''}`}
+            onClick={onSelectAll}
+            title={allSelected ? 'Deselect all' : 'Select all'}
+          >
+            {allSelected ? <IconDeselectAll /> : <IconSelectAll />}
+          </button>
+          {isSearchMode ? (
+            <span className="email-count">Results for &ldquo;{searchQuery}&rdquo;</span>
+          ) : (
+            <span className="email-count">
+              {showLoadMore
+                ? `${emails.length} of ~${totalEstimate}`
+                : `${emails.length} thread${emails.length !== 1 ? 's' : ''}`}
+            </span>
+          )}
+        </div>
         {anySelected && (
           <span className="email-selected-count">{selectedIds.size} selected</span>
         )}
@@ -142,7 +113,7 @@ export default function EmailList({
       <div className="email-list">
         {emails.length === 0 && (
           <div className="email-list-empty">
-            {viewMode === 'archived' ? 'No archived emails.' : 'Nothing here.'}
+            {isSearchMode ? 'No results.' : viewMode === 'archived' ? 'No archived emails.' : 'Nothing here.'}
           </div>
         )}
         {emails.map((email) => {
@@ -178,6 +149,9 @@ export default function EmailList({
                   <span className={CATEGORY_BADGE_CLASS[email.category]}>
                     {CATEGORY_LABELS[email.category]}
                   </span>
+                  {email.hasDraft && (
+                    <span className="draft-indicator">Draft</span>
+                  )}
                   <span className="email-item-preview">{email.preview}</span>
                 </div>
               </div>
@@ -194,72 +168,14 @@ export default function EmailList({
             </div>
           )
         })}
+
+        {/* ── Load more ── */}
+        {showLoadMore && (
+          <button className="load-more-btn" onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore ? <><span className="load-more-spinner" />Loading…</> : 'Load more'}
+          </button>
+        )}
       </div>
-
-      {/* ── Floating bulk toolbar (icon pill) ── */}
-      {anySelected && (
-        <div className="bulk-toolbar">
-          {/* Category picker popover */}
-          {showCategoryPicker && (
-            <div className="bulk-category-picker">
-              {CATEGORY_OPTIONS.map(({ value, label }) => (
-                <button key={value} className="bulk-category-option" onClick={() => handleReclassify(value)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Folder picker popover */}
-          {showFolderPicker && (
-            <div className="bulk-category-picker bulk-folder-picker">
-              {folders.length === 0 && (
-                <span className="bulk-folder-empty">No folders yet</span>
-              )}
-              {folders.map((f) => (
-                <button key={f.id} className="bulk-category-option" onClick={() => handleAssignFolder(f.id)}>
-                  {f.name}
-                </button>
-              ))}
-              <button className="bulk-category-option bulk-folder-remove" onClick={() => handleAssignFolder(null)}>
-                Remove from folder
-              </button>
-            </div>
-          )}
-
-          <span className="bulk-toolbar-count">{selectedIds.size}</span>
-          <div className="bulk-toolbar-divider" />
-
-          <button className="bulk-toolbar-btn" title="Mark as read" onClick={() => onBulkMarkRead(true)}>
-            <IconMarkRead />
-          </button>
-          <button className="bulk-toolbar-btn" title="Mark as unread" onClick={() => onBulkMarkRead(false)}>
-            <IconMarkUnread />
-          </button>
-          <button
-            className={`bulk-toolbar-btn ${showCategoryPicker ? 'bulk-toolbar-btn--active' : ''}`}
-            title="Reclassify"
-            onClick={() => { setShowCategoryPicker((v) => !v); setShowFolderPicker(false) }}
-          >
-            <IconTag />
-          </button>
-          <button
-            className={`bulk-toolbar-btn ${showFolderPicker ? 'bulk-toolbar-btn--active' : ''}`}
-            title="Move to folder"
-            onClick={() => { setShowFolderPicker((v) => !v); setShowCategoryPicker(false) }}
-          >
-            <IconFolderBulk />
-          </button>
-          <button className="bulk-toolbar-btn" title="Archive" onClick={onBulkArchive}>
-            <IconArchiveBulk />
-          </button>
-
-          <div className="bulk-toolbar-divider" />
-          <button className="bulk-toolbar-btn bulk-toolbar-btn--close" title="Clear selection" onClick={() => { onClearSelection(); setShowCategoryPicker(false); setShowFolderPicker(false) }}>
-            <IconClose />
-          </button>
-        </div>
-      )}
     </div>
   )
 }

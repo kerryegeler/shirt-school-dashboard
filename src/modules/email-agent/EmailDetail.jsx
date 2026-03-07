@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { generateReply, sendEmail } from '../../services/api.js'
+import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft } from '../../services/api.js'
 
 const CATEGORY_LABELS = {
   student_support: 'Student Support',
@@ -45,6 +45,13 @@ const IconRefresh = () => (
 const IconSend = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M14 2L1 7l5 3 2 5 2-5 4-8z" />
+  </svg>
+)
+const IconSave = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M13 13H3a1 1 0 01-1-1V2l3 3h7a1 1 0 011 1v6a1 1 0 01-1 1z" />
+    <rect x="5" y="1" width="6" height="4" rx="0.5" />
+    <rect x="4" y="9" width="8" height="3" rx="0.5" />
   </svg>
 )
 const IconEdit = () => (
@@ -201,7 +208,7 @@ function ThreadMessage({ message, defaultExpanded = true }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, viewMode }) {
+export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, viewMode, onDraftSaved, onDraftDeleted }) {
   const [draft, setDraft] = useState('')
   const [manualMode, setManualMode] = useState(false)
   const [personaUsed, setPersonaUsed] = useState('')
@@ -213,6 +220,17 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   const [sending, setSending] = useState(false)
   const [sent, setSent] = useState(false)
   const [sendError, setSendError] = useState('')
+  const [savingDraft, setSavingDraft] = useState(false)
+  const [draftSavedAt, setDraftSavedAt] = useState(null)
+
+  // Load saved draft on mount
+  useEffect(() => {
+    if (email.hasDraft) {
+      fetchDraft(email.id).then((content) => {
+        if (content) { setDraft(content); setManualMode(true) }
+      }).catch(() => {})
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const persona = PERSONA_INFO[email.category]
 
@@ -259,6 +277,17 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
     setTimeout(() => setCopied(false), 2500)
   }
 
+  async function handleSaveDraft() {
+    if (!draft.trim()) return
+    setSavingDraft(true)
+    try {
+      await saveDraft(email.id, draft)
+      setDraftSavedAt(new Date())
+      onDraftSaved?.(email.id)
+    } catch {}
+    finally { setSavingDraft(false) }
+  }
+
   async function handleSend() {
     setSending(true)
     setSendError('')
@@ -266,6 +295,8 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       await sendEmail(email, draft, effectiveFrom)
       setSent(true)
       setConfirmSend(false)
+      // Delete saved draft on successful send
+      deleteDraft(email.id).then(() => onDraftDeleted?.(email.id)).catch(() => {})
     } catch (err) {
       setSendError(err.message)
       setConfirmSend(false)
@@ -470,9 +501,20 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
                 <span className="draft-hint">
                   {sent
                     ? `Sent from ${effectiveFrom}.`
-                    : 'Edit above — nothing sends without your approval.'}
+                    : draftSavedAt
+                      ? `Draft saved ${draftSavedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`
+                      : 'Edit above — nothing sends without your approval.'}
                 </span>
                 <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={handleSaveDraft}
+                    disabled={sent || savingDraft || !draft.trim()}
+                    title="Save draft to resume later"
+                  >
+                    <IconSave />
+                    {savingDraft ? 'Saving…' : 'Save Draft'}
+                  </button>
                   <button
                     className={`btn ${copied ? 'btn-success' : 'btn-secondary'}`}
                     onClick={handleCopy}

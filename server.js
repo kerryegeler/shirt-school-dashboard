@@ -117,6 +117,8 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
 // These let buildThreadObject stay synchronous while Supabase is the source of truth.
 let categoryOverridesCache = {}   // { [threadId]: category }
 let folderDataCache = { folders: [], assignments: {} }  // { folders: [], assignments: { [threadId]: folderId } }
+let savedDraftsCache = new Set()  // Set of threadIds that have a saved draft
+const DRAFTS_PATH = path.resolve('.drafts.json')
 
 // ─── Category override storage ────────────────────────────────────────────────
 const CATEGORIES_PATH = path.resolve('.categories.json')
@@ -443,6 +445,7 @@ function buildThreadObject(thread, account) {
     accounts: [account],
     category,
     folderId,
+    hasDraft: savedDraftsCache.has(thread.id),
     defaultFrom: defaultFromAccount(category, subject, firstMsg.bodyText),
     status,
     read: !hasUnread,
@@ -619,15 +622,45 @@ app.post('/api/auth/logout', (req, res) => {
 
 // ─── Gmail routes ─────────────────────────────────────────────────────────────
 
+// Shared dedup helper
+function deduplicateThreads(threadsByAccount) {
+  const threadMap = new Map()
+  for (const thread of threadsByAccount.flat()) {
+    if (threadMap.has(thread.id)) {
+      const existing = threadMap.get(thread.id)
+      const existingMsgIds = new Set(existing.messages.map((m) => m.messageId || m.id))
+      const newMsgs = thread.messages.filter((m) => !existingMsgIds.has(m.messageId || m.id))
+      existing.messages = [...existing.messages, ...newMsgs]
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+      if (!existing.accounts.includes(thread.account)) existing.accounts.push(thread.account)
+      const latest = existing.messages[existing.messages.length - 1]
+      existing.timestamp = latest.timestamp
+      existing.preview = latest.preview
+    } else {
+      threadMap.set(thread.id, thread)
+    }
+  }
+  return [...threadMap.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+}
+
 app.get('/api/emails', requireAuth, async (req, res) => {
-  const { archived } = req.query
+  const { archived, pageTokens: pageTokensParam } = req.query
+  let pageTokens = {}
+  try { if (pageTokensParam) pageTokens = JSON.parse(pageTokensParam) } catch {}
   const connected = connectedAccounts()
   try {
+    let totalEstimate = 0
+    const nextPageTokens = {}
     const threadsByAccount = await Promise.all(
       connected.map(async (account) => {
         const gmail = google.gmail({ version: 'v1', auth: clients[account] })
         const q = archived === 'true' ? '-in:inbox -in:trash -in:spam -in:draft' : 'in:inbox'
-        const listRes = await gmail.users.threads.list({ userId: 'me', maxResults: 25, q })
+        const listRes = await gmail.users.threads.list({
+          userId: 'me', maxResults: 25, q,
+          ...(pageTokens[account] ? { pageToken: pageTokens[account] } : {}),
+        })
+        totalEstimate += listRes.data.resultSizeEstimate || 0
+        if (listRes.data.nextPageToken) nextPageTokens[account] = listRes.data.nextPageToken
         if (!listRes.data.threads?.length) return []
         const threads = await Promise.all(
           listRes.data.threads.map((t) =>
@@ -637,29 +670,43 @@ app.get('/api/emails', requireAuth, async (req, res) => {
         return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
       })
     )
-    // Deduplicate threads that appear in both accounts (same thread ID = same conversation)
-    // and merge their messages chronologically
-    const threadMap = new Map()
-    for (const thread of threadsByAccount.flat()) {
-      if (threadMap.has(thread.id)) {
-        const existing = threadMap.get(thread.id)
-        const existingMsgIds = new Set(existing.messages.map((m) => m.messageId || m.id))
-        const newMsgs = thread.messages.filter((m) => !existingMsgIds.has(m.messageId || m.id))
-        existing.messages = [...existing.messages, ...newMsgs]
-          .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-        if (!existing.accounts.includes(thread.account)) existing.accounts.push(thread.account)
-        const latest = existing.messages[existing.messages.length - 1]
-        existing.timestamp = latest.timestamp
-        existing.preview = latest.preview
-      } else {
-        threadMap.set(thread.id, thread)
-      }
-    }
-    const emails = [...threadMap.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-    res.json({ emails })
+    const emails = deduplicateThreads(threadsByAccount)
+    res.json({
+      emails,
+      nextPageTokens: Object.keys(nextPageTokens).length ? nextPageTokens : null,
+      totalEstimate,
+    })
   } catch (error) {
     console.error('Gmail fetch error:', error.message)
     res.status(error.code === 401 ? 401 : 500).json({ error: 'Failed to fetch emails from Gmail.' })
+  }
+})
+
+// ─── Gmail search ──────────────────────────────────────────────────────────────
+
+app.get('/api/emails/search', requireAuth, async (req, res) => {
+  const { q } = req.query
+  if (!q?.trim()) return res.json({ emails: [] })
+  const connected = connectedAccounts()
+  try {
+    const threadsByAccount = await Promise.all(
+      connected.map(async (account) => {
+        const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+        const listRes = await gmail.users.threads.list({ userId: 'me', maxResults: 50, q: q.trim() })
+        if (!listRes.data.threads?.length) return []
+        const threads = await Promise.all(
+          listRes.data.threads.map((t) =>
+            gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' }).then((r) => r.data)
+          )
+        )
+        return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
+      })
+    )
+    const emails = deduplicateThreads(threadsByAccount)
+    res.json({ emails })
+  } catch (error) {
+    console.error('Gmail search error:', error.message)
+    res.status(500).json({ error: 'Search failed. Try again.' })
   }
 })
 
@@ -864,6 +911,59 @@ app.patch('/api/emails/:id/folder', requireAuth, async (req, res) => {
   res.json({ success: true, folderId: folderId || null })
 })
 
+// ─── Draft routes ─────────────────────────────────────────────────────────────
+
+app.get('/api/drafts/:threadId', requireAuth, async (req, res) => {
+  const { threadId } = req.params
+  if (supabase) {
+    const { data } = await supabase.from('saved_drafts').select('content').eq('thread_id', threadId).single()
+    return res.json({ content: data?.content || null })
+  }
+  try {
+    if (fs.existsSync(DRAFTS_PATH)) {
+      const drafts = JSON.parse(fs.readFileSync(DRAFTS_PATH, 'utf8'))
+      return res.json({ content: drafts[threadId] || null })
+    }
+  } catch {}
+  res.json({ content: null })
+})
+
+app.put('/api/drafts/:threadId', requireAuth, async (req, res) => {
+  const { threadId } = req.params
+  const { content } = req.body
+  if (!content?.trim()) return res.status(400).json({ error: 'Draft content required' })
+  savedDraftsCache.add(threadId)
+  if (supabase) {
+    const { error } = await supabase.from('saved_drafts')
+      .upsert({ thread_id: threadId, content, updated_at: new Date().toISOString() })
+    if (error) return res.status(500).json({ error: 'Failed to save draft' })
+  } else {
+    try {
+      const drafts = fs.existsSync(DRAFTS_PATH) ? JSON.parse(fs.readFileSync(DRAFTS_PATH, 'utf8')) : {}
+      drafts[threadId] = content
+      fs.writeFileSync(DRAFTS_PATH, JSON.stringify(drafts, null, 2))
+    } catch {}
+  }
+  res.json({ success: true })
+})
+
+app.delete('/api/drafts/:threadId', requireAuth, async (req, res) => {
+  const { threadId } = req.params
+  savedDraftsCache.delete(threadId)
+  if (supabase) {
+    await supabase.from('saved_drafts').delete().eq('thread_id', threadId)
+  } else {
+    try {
+      if (fs.existsSync(DRAFTS_PATH)) {
+        const drafts = JSON.parse(fs.readFileSync(DRAFTS_PATH, 'utf8'))
+        delete drafts[threadId]
+        fs.writeFileSync(DRAFTS_PATH, JSON.stringify(drafts, null, 2))
+      }
+    } catch {}
+  }
+  res.json({ success: true })
+})
+
 // ─── AI routes ────────────────────────────────────────────────────────────────
 
 const KERRY_BRAIN_PATH = path.resolve('kerry-brain.md')
@@ -975,6 +1075,13 @@ async function init() {
       for (const row of assignRows) folderDataCache.assignments[row.thread_id] = row.folder_id
     }
     console.log(`  Loaded ${folderDataCache.folders.length} folder(s), ${Object.keys(folderDataCache.assignments).length} assignment(s)`)
+
+    // Load saved drafts into cache
+    const { data: draftRows } = await supabase.from('saved_drafts').select('thread_id')
+    if (draftRows) {
+      savedDraftsCache = new Set(draftRows.map((r) => r.thread_id))
+      console.log(`  Loaded ${draftRows.length} saved draft(s)`)
+    }
   } else {
     console.log('  Supabase: not configured — using local filesystem')
 
@@ -998,6 +1105,14 @@ async function init() {
     try {
       if (fs.existsSync(FOLDERS_PATH)) {
         folderDataCache = JSON.parse(fs.readFileSync(FOLDERS_PATH, 'utf8'))
+      }
+    } catch {}
+
+    // Load saved drafts from filesystem
+    try {
+      if (fs.existsSync(DRAFTS_PATH)) {
+        const drafts = JSON.parse(fs.readFileSync(DRAFTS_PATH, 'utf8'))
+        savedDraftsCache = new Set(Object.keys(drafts))
       }
     } catch {}
   }

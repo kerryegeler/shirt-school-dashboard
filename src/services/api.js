@@ -71,6 +71,36 @@ export async function generateReply(email, category) {
   return data
 }
 
+export async function searchEmails(q) {
+  const response = await fetch(`/api/emails/search?q=${encodeURIComponent(q)}`)
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Search failed')
+  return data
+}
+
+export async function fetchDraft(threadId) {
+  const response = await fetch(`/api/drafts/${threadId}`)
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to fetch draft')
+  return data.content
+}
+
+export async function saveDraft(threadId, content) {
+  const response = await fetch(`/api/drafts/${threadId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+  if (!response.ok) {
+    const data = await response.json()
+    throw new Error(data.error || 'Failed to save draft')
+  }
+}
+
+export async function deleteDraft(threadId) {
+  await fetch(`/api/drafts/${threadId}`, { method: 'DELETE' })
+}
+
 export async function fetchFolders() {
   const response = await fetch('/api/folders')
   const data = await response.json()
