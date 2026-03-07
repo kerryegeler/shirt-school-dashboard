@@ -780,3 +780,56 @@
   line-height: 1.4;
 }
 .ca-pool-idea:active { cursor: grabbing; }
+
+/* ─── Competitor Channels ─────────────────────────────────────────────────── */
+
+.ca-competitor-section {
+  max-width: 560px;
+}
+
+.ca-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary, #8e8e93);
+  margin-bottom: 8px;
+}
+
+/* ─── Source attribution badges ───────────────────────────────────────────── */
+
+.ca-idea-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.ca-source-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--bg-elevated, #2c2c2e);
+  color: var(--text-secondary, #8e8e93);
+  white-space: nowrap;
+}
+
+.ca-source-note {
+  font-size: 11px;
+  color: var(--text-tertiary, #636366);
+  font-style: italic;
+}
+
+.ca-source-mini {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-elevated, #2c2c2e);
+  color: var(--text-secondary, #8e8e93);
+  margin-left: 6px;
+  vertical-align: middle;
+}

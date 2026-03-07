@@ -294,6 +294,34 @@ export async function refreshChannelStats() {
   return d
 }
 
+export async function fetchCompetitors() {
+  const r = await fetch('/api/content/competitors')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch competitors')
+  return d.competitors
+}
+
+export async function addCompetitor(competitor) {
+  const r = await fetch('/api/content/competitors', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(competitor),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to add competitor')
+  return d.competitor
+}
+
+export async function updateCompetitor(id, updates) {
+  const r = await fetch(`/api/content/competitors/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update competitor') }
+}
+
+export async function deleteCompetitor(id) {
+  const r = await fetch(`/api/content/competitors/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete competitor') }
+}
+
 export async function sendEmail(email, draft, fromAccount, toEmail) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',

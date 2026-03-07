@@ -4,6 +4,7 @@ import {
   fetchContentBriefs, fetchContentBrief, runContentBrief,
   fetchContentTopics, createContentTopic, updateContentTopic, deleteContentTopic,
   fetchChannelStats, fetchYouTubeChannels, lookupChannel, selectChannel, refreshChannelStats,
+  fetchCompetitors, addCompetitor, updateCompetitor, deleteCompetitor,
 } from '../../services/api.js'
 import './ContentAgent.css'
 
@@ -210,6 +211,15 @@ function IdeasBank({ onSchedule }) {
 
               <div className="ca-idea-title">{idea.title}</div>
 
+              {idea.source && (
+                <div className="ca-idea-source">
+                  <span className="ca-source-badge ca-source-badge--{idea.source}">
+                    {idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}
+                  </span>
+                  {idea.source_note && <span className="ca-source-note"> — {idea.source_note}</span>}
+                </div>
+              )}
+
               {idea.hook && (
                 <div className="ca-idea-detail">
                   <span className="ca-detail-label">Hook:</span> {idea.hook}
@@ -404,6 +414,22 @@ function BriefDetail({ brief }) {
           ))}
         </div>
       )}
+      {brief.competitors?.length > 0 && (
+        <div className="ca-brief-section">
+          <div className="ca-brief-section-title">🎯 Competitor Activity</div>
+          {brief.competitors.map((v, i) => (
+            <div key={i} className="ca-brief-item">
+              <a href={v.url} target="_blank" rel="noreferrer" className="ca-link">
+                {v.isBreakout && '🔥 '}{v.title}
+              </a>
+              <span className="ca-brief-item-meta">
+                {v.channel} · {formatNum(v.views)} views
+                {v.isBreakout && ` · ${Math.round(v.views / v.channelAvgViews)}x avg`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       {(brief.ideas?.short_form?.length > 0 || brief.ideas?.long_form?.length > 0) && (
         <div className="ca-brief-section">
           <div className="ca-brief-section-title">💡 Content Ideas</div>
@@ -411,6 +437,7 @@ function BriefDetail({ brief }) {
             <div key={i} className="ca-brief-idea">
               <span className="ca-format-badge ca-format-short">📱 Short</span>
               <strong>{idea.title}</strong>
+              {idea.source && <span className="ca-source-mini">{idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}</span>}
               {idea.hook && <div className="ca-brief-snippet">Hook: {idea.hook}</div>}
               {idea.why_timely && <div className="ca-brief-snippet ca-timely-text">{idea.why_timely}</div>}
             </div>
@@ -419,6 +446,7 @@ function BriefDetail({ brief }) {
             <div key={i} className="ca-brief-idea">
               <span className="ca-format-badge ca-format-long">🎬 Long</span>
               <strong>{idea.title}</strong>
+              {idea.source && <span className="ca-source-mini">{idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}</span>}
               {idea.outline && <div className="ca-brief-snippet">{idea.outline}</div>}
               {idea.why_timely && <div className="ca-brief-snippet ca-timely-text">{idea.why_timely}</div>}
             </div>
@@ -644,6 +672,136 @@ function ChannelStats() {
 
 // ─── Topics Settings tab ──────────────────────────────────────────────────────
 
+function CompetitorChannels() {
+  const [competitors, setCompetitors] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [lookupQuery, setLookupQuery] = useState('')
+  const [lookupResult, setLookupResult] = useState(null)
+  const [lookupError, setLookupError] = useState('')
+  const [lookingUp, setLookingUp] = useState(false)
+  const [adding, setAdding] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { setCompetitors(await fetchCompetitors()) } catch {}
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function handleLookup(e) {
+    e.preventDefault()
+    if (!lookupQuery.trim()) return
+    setLookingUp(true)
+    setLookupResult(null)
+    setLookupError('')
+    try {
+      const channels = await lookupChannel(lookupQuery.trim())
+      setLookupResult(channels[0] || null)
+      if (!channels.length) setLookupError('Channel not found')
+    } catch (err) {
+      setLookupError(err.message)
+    }
+    setLookingUp(false)
+  }
+
+  async function handleAdd() {
+    if (!lookupResult) return
+    setAdding(true)
+    try {
+      const competitor = await addCompetitor({
+        channelId: lookupResult.id,
+        channelName: lookupResult.name,
+        thumbnail: lookupResult.thumbnail,
+      })
+      setCompetitors((prev) => [...prev, competitor])
+      setLookupResult(null)
+      setLookupQuery('')
+    } catch (err) {
+      setLookupError(err.message)
+    }
+    setAdding(false)
+  }
+
+  async function handleToggle(c) {
+    setCompetitors((prev) => prev.map((x) => x.id === c.id ? { ...x, active: !x.active } : x))
+    await updateCompetitor(c.id, { active: !c.active })
+  }
+
+  async function handleDelete(id) {
+    setCompetitors((prev) => prev.filter((x) => x.id !== id))
+    await deleteCompetitor(id)
+  }
+
+  const alreadyAdded = new Set(competitors.map((c) => c.channel_id))
+
+  return (
+    <div className="ca-competitor-section">
+      <div className="ca-section-label">Competitor Channels</div>
+      <div className="ca-topics-intro" style={{ marginBottom: 12 }}>
+        Track specific YouTube channels. Each morning their last 5 videos are fetched and videos with 2x+ their average views are flagged as breakouts.
+      </div>
+
+      {loading ? (
+        <div className="ca-loading"><div className="ca-spinner" /></div>
+      ) : (
+        <div className="ca-topics-list">
+          {competitors.length === 0 && (
+            <div className="ca-empty-state" style={{ padding: '8px 0', fontSize: 13, color: 'var(--text-muted)' }}>No competitor channels added yet.</div>
+          )}
+          {competitors.map((c) => (
+            <div key={c.id} className={`ca-topic-row ${!c.active ? 'topic-inactive' : ''}`}>
+              <button
+                className={`ca-topic-toggle ${c.active ? 'toggle-on' : 'toggle-off'}`}
+                onClick={() => handleToggle(c)}
+                title={c.active ? 'Disable' : 'Enable'}
+              />
+              {c.thumbnail && <img src={c.thumbnail} alt="" className="ca-ch-thumb" style={{ width: 22, height: 22, borderRadius: '50%', marginRight: 6 }} />}
+              <span className="ca-topic-keyword">{c.channel_name}</span>
+              <span className="ca-ch-id">{c.channel_id}</span>
+              <div className="ca-topic-actions">
+                <button className="btn btn-ghost btn-xs ca-delete-btn" onClick={() => handleDelete(c.id)} title="Remove">
+                  <IconTrash />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <form className="ca-lookup-channel" onSubmit={handleLookup} style={{ marginTop: 12 }}>
+        <input
+          className="ca-topic-input"
+          value={lookupQuery}
+          onChange={(e) => setLookupQuery(e.target.value)}
+          placeholder="Add channel: @handle or UC… channel ID"
+        />
+        <button className="btn btn-ghost" type="submit" disabled={lookingUp || !lookupQuery.trim()}>
+          {lookingUp ? 'Looking up…' : 'Find'}
+        </button>
+      </form>
+
+      {lookupError && <div className="ca-error" style={{ marginTop: 6, fontSize: 12 }}>{lookupError}</div>}
+
+      {lookupResult && !alreadyAdded.has(lookupResult.id) && (
+        <div className="ca-channel-result" style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 6 }}>
+          {lookupResult.thumbnail && <img src={lookupResult.thumbnail} alt="" className="ca-ch-thumb" style={{ width: 32, height: 32, borderRadius: '50%' }} />}
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>{lookupResult.name}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{lookupResult.id} • {formatNum(lookupResult.subscribers)} subscribers</div>
+          </div>
+          <button className="btn btn-primary btn-sm" onClick={handleAdd} disabled={adding}>
+            {adding ? 'Adding…' : '+ Add'}
+          </button>
+        </div>
+      )}
+      {lookupResult && alreadyAdded.has(lookupResult.id) && (
+        <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>Already tracking {lookupResult.name}.</div>
+      )}
+    </div>
+  )
+}
+
 function TopicsSettings() {
   const [topics, setTopics] = useState([])
   const [loading, setLoading] = useState(true)
@@ -695,7 +853,7 @@ function TopicsSettings() {
   return (
     <div className="ca-panel">
       <div className="ca-topics-intro">
-        These keywords are used for YouTube and news research in every daily brief. Active topics are included in each run.
+        These keywords are used for news research in every daily brief. Active topics are included in each run.
       </div>
 
       {loading ? (
@@ -754,6 +912,10 @@ function TopicsSettings() {
           {adding ? 'Adding…' : 'Add'}
         </button>
       </form>
+
+      <div style={{ borderTop: '1px solid var(--border)', marginTop: 24, paddingTop: 24 }}>
+        <CompetitorChannels />
+      </div>
     </div>
   )
 }

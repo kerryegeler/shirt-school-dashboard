@@ -1693,6 +1693,37 @@ async function fetchYouTubeVideos(keyword) {
   }
 }
 
+async function fetchCompetitorVideos() {
+  if (!process.env.YOUTUBE_API_KEY || !supabase) return []
+  const { data: competitors } = await supabase.from('content_competitors').select('*').eq('active', true)
+  if (!competitors?.length) return []
+  const yt = google.youtube({ version: 'v3', auth: process.env.YOUTUBE_API_KEY })
+  const results = []
+  for (const competitor of competitors) {
+    try {
+      const channelRes = await yt.channels.list({ part: ['contentDetails', 'statistics'], id: [competitor.channel_id] })
+      const channel = channelRes.data.items?.[0]
+      if (!channel) continue
+      const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
+      if (!uploadsPlaylistId) continue
+      const playlistRes = await yt.playlistItems.list({ part: ['contentDetails', 'snippet'], playlistId: uploadsPlaylistId, maxResults: 5 })
+      const videoIds = (playlistRes.data.items || []).map((i) => i.contentDetails.videoId).filter(Boolean)
+      if (!videoIds.length) continue
+      const statsRes = await yt.videos.list({ part: ['statistics', 'snippet'], id: [videoIds.join(',')] })
+      const videos = (statsRes.data.items || []).map((v) => ({
+        id: v.id, title: v.snippet.title, publishedAt: v.snippet.publishedAt,
+        url: `https://youtu.be/${v.id}`, views: parseInt(v.statistics.viewCount || 0),
+        channel: competitor.channel_name, channelId: competitor.channel_id,
+      }))
+      const avgViews = videos.length ? Math.round(videos.reduce((s, v) => s + v.views, 0) / videos.length) : 0
+      results.push(...videos.map((v) => ({ ...v, isBreakout: avgViews > 0 && v.views >= avgViews * 2, channelAvgViews: avgViews })))
+    } catch (err) {
+      console.error(`[Content] Competitor fetch error for ${competitor.channel_name}:`, err.message)
+    }
+  }
+  return results.sort((a, b) => b.views - a.views)
+}
+
 async function fetchSerperNews(query) {
   if (!process.env.SERPER_API_KEY) return []
   try {
@@ -1819,35 +1850,63 @@ async function fetchKerryChannelStats(channelIdOverride) {
 }
 
 async function generateContentIdeas(research, preferences, channelStats) {
-  const { topVideos, topNews, topReddit, toolUpdates } = research
+  const { topVideos, topNews, topReddit, toolUpdates, competitorVideos = [] } = research
   let prefContext = ''
   if (preferences?.save_count >= 10) {
     prefContext = `Kerry's content preferences (from her saved ideas):\n- Preferred topics: ${preferences.topic_keywords?.slice(0, 8).join(', ') || 'varies'}\n- Preferred format: ${preferences.preferred_format || 'both'}\nWeight ideas toward these preferences.\n\n`
   }
-  let channelCtx = ''
+
+  // Source A (30%): Kerry's top-performing channel videos
+  let sourceACtx = ''
   if (channelStats?.topVideos?.length) {
     const top5 = channelStats.topVideos.slice(0, 5).map((v) => `"${v.title}" (${formatNum(v.views)} views)`).join('\n')
-    channelCtx = `Kerry's top-performing videos for context:\n${top5}\nChannel avg views: ${formatNum(channelStats.avgViews)}\n\n`
+    sourceACtx = `SOURCE A — MY CHANNEL PERFORMANCE (30% of ideas should draw from this):
+Top-performing videos:
+${top5}
+Channel avg views: ${formatNum(channelStats.avgViews)}
+→ Ideas from this source: identify topics/formats/angles that outperformed, then suggest similar or follow-up videos.\n\n`
   }
 
-  const prompt = `You are a content strategist for "Shirt School" — Kerry's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce.
-${channelCtx}${prefContext}Based on today's industry intelligence, generate fresh content ideas for Kerry.
+  // Source B (35%): Competitor activity and breakout videos
+  const breakouts = competitorVideos.filter((v) => v.isBreakout)
+  const nonBreakouts = competitorVideos.filter((v) => !v.isBreakout)
+  let sourceBCtx = ''
+  if (competitorVideos.length) {
+    const breakoutLines = breakouts.slice(0, 3).map((v) =>
+      `🔥 "${v.title}" by ${v.channel} (${formatNum(v.views)} views — ${Math.round(v.views / v.channelAvgViews)}x their avg)`
+    ).join('\n')
+    const normalLines = nonBreakouts.slice(0, 4).map((v) =>
+      `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`
+    ).join('\n')
+    sourceBCtx = `SOURCE B — COMPETITOR ACTIVITY (35% of ideas should draw from this):
+${breakoutLines ? `BREAKOUT VIDEOS (outperforming 2x+ their channel average):\n${breakoutLines}\n` : ''}${normalLines ? `Recent uploads:\n${normalLines}` : ''}
+→ Ideas from this source: create your own angle on topics that competitors' breakout videos prove people want right now.\n\n`
+  } else {
+    sourceBCtx = `SOURCE B — COMPETITOR ACTIVITY (35% of ideas):
+No competitor channels configured yet. Use general YouTube trends below instead.\n\n`
+  }
 
-TRENDING YOUTUBE (last 2 weeks):
-${topVideos.slice(0, 5).map((v) => `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`).join('\n') || 'N/A'}
-
+  // Source C (35%): Reddit + news trending
+  const sourceCCtx = `SOURCE C — TRENDING TOPICS (35% of ideas should draw from this):
 TOP NEWS:
-${topNews.slice(0, 5).map((n) => `- ${n.title} (${n.source}): ${n.snippet?.slice(0, 120)}`).join('\n') || 'N/A'}
+${topNews.slice(0, 4).map((n) => `- ${n.title} (${n.source}): ${n.snippet?.slice(0, 100)}`).join('\n') || 'N/A'}
 
 REDDIT BUZZ:
 ${topReddit.slice(0, 3).map((r) => `- [${r.subreddit}] ${r.title}`).join('\n') || 'N/A'}
 
 TOOL UPDATES:
-${toolUpdates.slice(0, 3).map((t) => `- ${t.title}: ${t.snippet?.slice(0, 100)}`).join('\n') || 'N/A'}
+${toolUpdates.slice(0, 3).map((t) => `- ${t.title}: ${t.snippet?.slice(0, 80)}`).join('\n') || 'N/A'}
+→ Ideas from this source: translate news/Reddit conversations into YouTube topics Kerry's audience needs.\n\n`
+
+  const prompt = `You are a content strategist for "Shirt School" — Kerry's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce.
+${prefContext}Generate fresh content ideas for Kerry using THREE weighted sources below. For each idea, include which source inspired it.
+
+${sourceACtx}${sourceBCtx}${sourceCCtx}GENERAL TRENDING YOUTUBE (supplementary context):
+${topVideos.slice(0, 4).map((v) => `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`).join('\n') || 'N/A'}
 
 Return ONLY valid JSON (no markdown fences) in this exact format:
-{"short_form":[{"title":"...","hook":"opening hook line for the video","why_timely":"why now based on trends above"},...],"long_form":[{"title":"...","outline":"1-paragraph video outline","why_timely":"why now based on trends above"},...]}
-Generate exactly 5 short_form and 3 long_form ideas.`
+{"short_form":[{"title":"...","hook":"opening hook line for the video","why_timely":"why now based on trends above","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...],"long_form":[{"title":"...","outline":"1-paragraph video outline","why_timely":"why now based on trends above","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...]}
+Generate exactly 5 short_form ideas and 3 long_form ideas. Aim for ~2 from Source A, ~2 from Source B, ~2 from Source C for short_form; ~1 each for long_form.`
 
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6', max_tokens: 2000,
@@ -1920,14 +1979,34 @@ async function sendBriefToSlack(brief) {
     blocks.push({ type: 'divider' })
   }
 
+  // Competitor Activity section
+  if (brief.competitors?.length) {
+    const breakouts = brief.competitors.filter((v) => v.isBreakout)
+    const others = brief.competitors.filter((v) => !v.isBreakout)
+    const lines = []
+    for (const v of breakouts.slice(0, 3)) {
+      lines.push(`🔥 <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views _(${Math.round(v.views / v.channelAvgViews)}x their avg — breakout!)_`)
+    }
+    for (const v of others.slice(0, 4 - Math.min(breakouts.length, 3))) {
+      lines.push(`• <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`)
+    }
+    if (lines.length) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎯 Competitor Activity*\n${lines.join('\n')}` } })
+      blocks.push({ type: 'divider' })
+    }
+  }
+
+  const sourceLabel = (s) => s === 'A' ? '📊 My Channel' : s === 'B' ? '🎯 Competitor' : '📰 Trending'
+
   blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*💡 Content Ideas for Kerry*\n_Click ⭐ Save to add an idea to your Ideas Bank_' } })
 
   if (brief.ideas?.short_form?.length) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*📱 Short Form (Reels / Shorts)*' } })
     for (const idea of brief.ideas.short_form) {
+      const src = idea.source ? ` • _Source: ${sourceLabel(idea.source)}_` : ''
       blocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*\nHook: _${idea.hook}_\n${idea.why_timely}` },
+        text: { type: 'mrkdwn', text: `*${idea.title}*${src}\nHook: _${idea.hook}_\n${idea.why_timely}` },
         accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
       })
     }
@@ -1936,9 +2015,10 @@ async function sendBriefToSlack(brief) {
   if (brief.ideas?.long_form?.length) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*🎬 Long Form (YouTube)*' } })
     for (const idea of brief.ideas.long_form) {
+      const src = idea.source ? ` • _Source: ${sourceLabel(idea.source)}_` : ''
       blocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*\n${idea.outline}\n_${idea.why_timely}_` },
+        text: { type: 'mrkdwn', text: `*${idea.title}*${src}\n${idea.outline}\n_${idea.why_timely}_` },
         accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
       })
     }
@@ -1958,12 +2038,13 @@ async function runContentBrief({ manual = false } = {}) {
   console.log(`[Content] Running brief (${manual ? 'manual' : 'scheduled'})...`)
   const topics = await getContentTopics()
 
-  const [ytResults, newsResults, redditResults, toolResults, channelStats] = await Promise.all([
+  const [ytResults, newsResults, redditResults, toolResults, channelStats, competitorVideos] = await Promise.all([
     Promise.all(topics.map((t) => fetchYouTubeVideos(t))).then((r) => r.flat()),
     Promise.all(topics.map((t) => fetchSerperNews(t))).then((r) => r.flat()),
     Promise.all(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur'].map((s) => fetchSerperReddit(s))).then((r) => r.flat()),
     fetchToolUpdates(topics),
     fetchKerryChannelStats(),
+    fetchCompetitorVideos(),
   ])
 
   const dedupeByUrl = (arr) => {
@@ -1982,7 +2063,10 @@ async function runContentBrief({ manual = false } = {}) {
 
   let ideas = { short_form: [], long_form: [] }
   try {
-    ideas = await generateContentIdeas({ topVideos, topNews, topReddit, toolUpdates: toolResults }, preferences, channelStats)
+    ideas = await generateContentIdeas(
+      { topVideos, topNews, topReddit, toolUpdates: toolResults, competitorVideos },
+      preferences, channelStats
+    )
   } catch (err) {
     console.error('[Content] Idea generation error:', err.message)
   }
@@ -1997,6 +2081,7 @@ async function runContentBrief({ manual = false } = {}) {
     id: briefId, run_at: new Date().toISOString(),
     youtube: topVideos, news: topNews, reddit: topReddit,
     tools: toolResults, ideas: ideasWithIds, channel_stats: channelStats,
+    competitors: competitorVideos,
   }
 
   if (supabase) {
@@ -2240,6 +2325,41 @@ app.post('/api/content/channel-stats/refresh', requireAuth, async (req, res) => 
   } catch (err) {
     console.error('[Content] Channel stats refresh error:', err.message)
   }
+})
+
+// ─── Competitor Channels API ──────────────────────────────────────────────────
+
+app.get('/api/content/competitors', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ competitors: [] })
+  const { data, error } = await supabase.from('content_competitors').select('*').order('created_at')
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ competitors: data || [] })
+})
+
+app.post('/api/content/competitors', requireAuth, async (req, res) => {
+  const { channelId, channelName, handle, thumbnail } = req.body
+  if (!channelId?.trim() || !channelName?.trim()) return res.status(400).json({ error: 'channelId and channelName required' })
+  if (!supabase) return res.json({ competitor: { id: crypto.randomUUID(), channel_id: channelId.trim(), channel_name: channelName.trim(), handle: handle || null, thumbnail: thumbnail || null, active: true } })
+  const { data, error } = await supabase.from('content_competitors')
+    .insert({ channel_id: channelId.trim(), channel_name: channelName.trim(), handle: handle || null, thumbnail: thumbnail || null, active: true })
+    .select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ competitor: data })
+})
+
+app.patch('/api/content/competitors/:id', requireAuth, async (req, res) => {
+  const { active } = req.body
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('content_competitors').update({ active }).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.delete('/api/content/competitors/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('content_competitors').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

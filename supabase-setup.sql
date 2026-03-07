@@ -154,3 +154,15 @@ create table if not exists content_config (
   updated_at timestamptz not null default now()
 );
 alter table content_config disable row level security;
+
+-- Competitor YouTube channels to track
+create table if not exists content_competitors (
+  id           uuid primary key default gen_random_uuid(),
+  channel_id   text not null unique,   -- YouTube channel ID (UC...)
+  channel_name text not null,
+  handle       text,                   -- @handle (optional)
+  thumbnail    text,                   -- thumbnail URL
+  active       boolean not null default true,
+  created_at   timestamptz not null default now()
+);
+alter table content_competitors disable row level security;
