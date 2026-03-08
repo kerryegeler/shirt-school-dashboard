@@ -828,7 +828,7 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
     const raw = buildReplyRaw({
       from: `${userInfo.name || sendFrom} <${sendFrom}>`,
       to: toField,
-      subject: email.subject,
+      subject: email.subject || '(no subject)',
       inReplyTo: email.messageId,
       references: email.messageId,
       body: draft,
@@ -836,8 +836,15 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
     await gmail.users.messages.send({ userId: 'me', requestBody: { raw, threadId: email.threadId } })
     res.json({ success: true, sentFrom: sendFrom })
   } catch (error) {
-    console.error('Gmail send error:', error.message)
-    res.status(500).json({ error: 'Failed to send email via Gmail.' })
+    console.error('Gmail send error:', error.message, error.response?.data)
+    const isAuthError = error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials') || error.response?.status === 401
+    if (isAuthError) {
+      // Clear stale tokens so UI prompts reconnect
+      await clearTokens(sendFrom)
+      clients[sendFrom].setCredentials({})
+      return res.status(401).json({ error: `Gmail token expired for ${sendFrom}. Please reconnect the account.` })
+    }
+    res.status(500).json({ error: `Failed to send: ${error.message}` })
   }
 })
 
