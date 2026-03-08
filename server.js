@@ -1492,19 +1492,20 @@ app.post('/api/slack/actions', async (req, res) => {
         }
       }
 
-    } else if (actionId === 'skip_email' || actionId === 'edit_email') {
+    } else if (actionId === 'skip_email') {
       if (supabase) {
         await supabase.from('slack_notifications')
           .update({ status: 'skipped' })
           .eq('thread_id', threadId)
       }
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped')
-      // For edit: also reply in thread with dashboard link
-      if (actionId === 'edit_email' && slackClient && channelId && slackTs) {
+    } else if (actionId === 'edit_email') {
+      // "Edit in Dashboard" — no status change so thread replies still work
+      if (slackClient && channelId && slackTs) {
         const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
         await slackClient.chat.postMessage({
           channel: channelId, thread_ts: slackTs,
-          text: `Open the dashboard to edit this reply: ${dashUrl}`,
+          text: `Open the dashboard to edit this reply: ${dashUrl}\n\nOr reply here in this thread with your edit instruction.`,
         })
       }
     }
