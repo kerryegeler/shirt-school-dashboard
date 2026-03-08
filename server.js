@@ -834,7 +834,11 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
       references: email.messageId,
       body: draft,
     })
-    await gmail.users.messages.send({ userId: 'me', requestBody: { raw, threadId: email.threadId } })
+    // Only attach threadId when sending from the same account that received it —
+    // cross-account sends don't share threadIds and Gmail returns 404 if you pass one.
+    const requestBody = { raw }
+    if (sendFrom === email.account) requestBody.threadId = email.threadId
+    await gmail.users.messages.send({ userId: 'me', requestBody })
     res.json({ success: true, sentFrom: sendFrom })
   } catch (error) {
     console.error('Gmail send error:', error.message, error.response?.data)
