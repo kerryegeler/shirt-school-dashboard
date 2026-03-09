@@ -1084,8 +1084,27 @@ async function generateDraftForSlack(thread) {
   const category = thread.category
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
+  // Inject last 20 feedback entries so the AI learns from patterns
+  let feedbackContext = ''
+  if (supabase) {
+    const { data: feedbackRows } = await supabase.from('ai_feedback')
+      .select('original_draft, final_version, diff_summary, action, category')
+      .in('action', ['edited', 'approved'])
+      .order('created_at', { ascending: false })
+      .limit(20)
+    if (feedbackRows?.length) {
+      const examples = feedbackRows.map((f, i) => {
+        if (f.action === 'approved') {
+          return `Example ${i + 1} [${f.category}, approved as-is]: "${f.original_draft.slice(0, 200)}"`
+        }
+        return `Example ${i + 1} [${f.category}, edited]:\nOriginal: "${f.original_draft.slice(0, 200)}"\nKerry changed to: "${f.final_version.slice(0, 200)}"${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
+      }).join('\n\n---\n\n')
+      feedbackContext = `\n\nKerry's recent feedback on AI drafts (learn from these patterns):\n${examples}\n`
+    }
+  }
+
   const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}
+${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}${feedbackContext}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
 
@@ -1272,8 +1291,9 @@ async function postEmailToSlack(thread) {
 }
 
 async function sendApprovedEmail(threadId) {
+  let notif = null
   try {
-    const notif = await getSlackNotification(threadId)
+    notif = await getSlackNotification(threadId)
     if (!notif || notif.status !== 'approved') return
 
     const meta = notif.thread_meta || {}
@@ -1281,6 +1301,12 @@ async function sendApprovedEmail(threadId) {
 
     if (!hasTokens(sendFrom)) {
       console.error(`[Slack] Cannot send from ${sendFrom}: not connected`)
+      if (slackClient && notif.channel_id && notif.slack_ts) {
+        await slackClient.chat.postMessage({
+          channel: notif.channel_id, thread_ts: notif.slack_ts,
+          text: `⚠️ Could not send: *${sendFrom}* is not connected. Please reconnect the account and send manually from the dashboard.`,
+        }).catch(() => {})
+      }
       return
     }
 
@@ -1291,16 +1317,17 @@ async function sendApprovedEmail(threadId) {
     const raw = buildReplyRaw({
       from: `${userInfo.name || sendFrom} <${sendFrom}>`,
       to: `${meta.fromName} <${meta.from}>`,
-      subject: meta.subject,
+      subject: meta.subject || '(no subject)',
       inReplyTo: meta.messageId,
       references: meta.messageId,
       body: notif.draft,
     })
 
-    await gmail.users.messages.send({
-      userId: 'me',
-      requestBody: { raw, threadId: meta.threadId },
-    })
+    // Only attach threadId when sending from the same account that received the email;
+    // cross-account sends don't share threadIds and Gmail returns 404 if you pass one.
+    const requestBody = { raw }
+    if (sendFrom === notif.account) requestBody.threadId = meta.threadId
+    await gmail.users.messages.send({ userId: 'me', requestBody })
 
     approvalTimers.delete(threadId)
 
@@ -1311,9 +1338,25 @@ async function sendApprovedEmail(threadId) {
     }
 
     await updateSlackMessage({ ...notif, status: 'sent' }, 'sent')
+
+    // Post success confirmation in the Slack thread
+    if (slackClient && notif.channel_id && notif.slack_ts) {
+      const recipient = meta.from ? `${meta.fromName || ''} <${meta.from}>`.trim() : 'recipient'
+      await slackClient.chat.postMessage({
+        channel: notif.channel_id, thread_ts: notif.slack_ts,
+        text: `✅ Email sent successfully to ${recipient} from ${sendFrom}`,
+      }).catch(() => {})
+    }
+
     console.log(`[Slack] Auto-sent reply for thread ${threadId}`)
   } catch (err) {
-    console.error(`[Slack] sendApprovedEmail error for ${threadId}:`, err.message)
+    console.error(`[Slack] sendApprovedEmail error for ${threadId}:`, err.message, err.response?.data)
+    if (slackClient && notif?.channel_id && notif?.slack_ts) {
+      await slackClient.chat.postMessage({
+        channel: notif.channel_id, thread_ts: notif.slack_ts,
+        text: `⚠️ Failed to send email: ${err.message}\nPlease send manually from the dashboard.`,
+      }).catch(() => {})
+    }
   }
 }
 
@@ -1464,6 +1507,15 @@ app.post('/api/slack/actions', async (req, res) => {
         await supabase.from('slack_notifications')
           .update({ status: 'approved', approved_at: new Date().toISOString() })
           .eq('thread_id', threadId)
+        // Log feedback: draft approved without changes
+        if (notif?.draft) {
+          await supabase.from('ai_feedback').insert({
+            thread_id: threadId, category: notif.category || 'general',
+            original_draft: notif.draft, final_version: notif.draft,
+            diff_summary: 'Approved without changes', action: 'approved',
+            created_at: new Date().toISOString(),
+          }).catch(() => {})
+        }
       }
       scheduleApprovalSend(threadId, 5 * 60 * 1000)
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'approved')
@@ -1509,6 +1561,15 @@ app.post('/api/slack/actions', async (req, res) => {
         await supabase.from('slack_notifications')
           .update({ status: 'skipped' })
           .eq('thread_id', threadId)
+        // Log feedback: skipped
+        if (notif?.draft) {
+          await supabase.from('ai_feedback').insert({
+            thread_id: threadId, category: notif.category || 'general',
+            original_draft: notif.draft, final_version: notif.draft,
+            diff_summary: 'Skipped — no reply sent', action: 'skipped',
+            created_at: new Date().toISOString(),
+          }).catch(() => {})
+        }
       }
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped')
     } else if (actionId === 'edit_email') {
@@ -1591,6 +1652,14 @@ app.post('/api/slack/events', async (req, res) => {
     })
     savedDraftsCache.add(notif.thread_id)
 
+    // Log feedback: draft was edited via Slack thread
+    await supabase.from('ai_feedback').insert({
+      thread_id: notif.thread_id, category: notif.category || 'general',
+      original_draft: currentDraft, final_version: revisedDraft,
+      diff_summary: computeDiffSummary(currentDraft, revisedDraft), action: 'edited',
+      created_at: new Date().toISOString(),
+    }).catch(() => {})
+
     // Post revised draft back to the Slack thread as confirmation
     if (slackClient && notif.channel_id) {
       const truncRevised = revisedDraft.length > 2800 ? revisedDraft.slice(0, 2800) + '…' : revisedDraft
@@ -1630,7 +1699,7 @@ app.get('/api/feedback', requireAuth, async (req, res) => {
 })
 
 app.post('/api/feedback', requireAuth, async (req, res) => {
-  const { threadId, category, originalDraft, finalVersion } = req.body
+  const { threadId, category, originalDraft, finalVersion, action } = req.body
   if (!originalDraft || !finalVersion || !category) {
     return res.status(400).json({ error: 'Missing required fields' })
   }
@@ -1639,7 +1708,8 @@ app.post('/api/feedback', requireAuth, async (req, res) => {
     const { error } = await supabase.from('ai_feedback').insert({
       thread_id: threadId || null, category,
       original_draft: originalDraft, final_version: finalVersion,
-      diff_summary: diffSummary, created_at: new Date().toISOString(),
+      diff_summary: diffSummary, action: action || 'edited',
+      created_at: new Date().toISOString(),
     })
     if (error) return res.status(500).json({ error: error.message })
   }
@@ -1960,14 +2030,6 @@ async function sendBriefToSlack(brief) {
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `📊 Daily Industry Brief — ${date}` } })
   blocks.push({ type: 'divider' })
 
-  if (brief.youtube?.length) {
-    const lines = brief.youtube.slice(0, 5).map((v, i) =>
-      `${i + 1}. <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`
-    ).join('\n')
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎥 Trending YouTube Videos*\n${lines}` } })
-    blocks.push({ type: 'divider' })
-  }
-
   if (brief.news?.length) {
     const lines = brief.news.slice(0, 5).map((n, i) =>
       `${i + 1}. <${n.url}|${n.title}>\n   _${n.source}_ — ${(n.snippet || '').slice(0, 100)}`
@@ -2047,26 +2109,54 @@ async function sendBriefToSlack(brief) {
   }
 }
 
+// Returns a Set of URLs + normalized headlines seen in the last 14 briefs
+async function getSeenUrls() {
+  if (!supabase) return new Set()
+  const { data } = await supabase.from('content_briefs')
+    .select('news, reddit, tools')
+    .order('run_at', { ascending: false })
+    .limit(14)
+  const seen = new Set()
+  for (const brief of (data || [])) {
+    for (const item of [...(brief.news || []), ...(brief.reddit || []), ...(brief.tools || [])]) {
+      if (item.url) seen.add(item.url)
+      if (item.title) seen.add(item.title.toLowerCase().replace(/[^\w\s]/g, '').trim().slice(0, 60))
+    }
+  }
+  return seen
+}
+
 async function runContentBrief({ manual = false } = {}) {
   console.log(`[Content] Running brief (${manual ? 'manual' : 'scheduled'})...`)
   const topics = await getContentTopics()
 
-  const [ytResults, newsResults, redditResults, toolResults, channelStats, competitorVideos] = await Promise.all([
+  const [ytResults, newsResults, redditResults, toolResults, channelStats, competitorVideos, seenUrls] = await Promise.all([
     Promise.all(topics.map((t) => fetchYouTubeVideos(t))).then((r) => r.flat()),
     Promise.all(topics.map((t) => fetchSerperNews(t))).then((r) => r.flat()),
     Promise.all(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur'].map((s) => fetchSerperReddit(s))).then((r) => r.flat()),
     fetchToolUpdates(topics),
     fetchKerryChannelStats(),
     fetchCompetitorVideos(),
+    getSeenUrls(),
   ])
 
   const dedupeByUrl = (arr) => {
     const seen = new Set()
     return arr.filter((item) => { if (!item.url || seen.has(item.url)) return false; seen.add(item.url); return true })
   }
+  const isFresh = (item) => {
+    if (item.url && seenUrls.has(item.url)) return false
+    if (item.title) {
+      const norm = item.title.toLowerCase().replace(/[^\w\s]/g, '').trim().slice(0, 60)
+      if (seenUrls.has(norm)) return false
+    }
+    return true
+  }
+
   const topVideos = dedupeByUrl(ytResults).sort((a, b) => b.views - a.views).slice(0, 5)
-  const topNews = dedupeByUrl(newsResults).slice(0, 5)
-  const topReddit = dedupeByUrl(redditResults).slice(0, 3)
+  const topNews = dedupeByUrl(newsResults).filter(isFresh).slice(0, 5)
+  const topReddit = dedupeByUrl(redditResults).filter(isFresh).slice(0, 3)
+  const freshTools = toolResults.filter(isFresh)
 
   let preferences = null
   if (supabase) {
@@ -2077,7 +2167,7 @@ async function runContentBrief({ manual = false } = {}) {
   let ideas = { short_form: [], long_form: [] }
   try {
     ideas = await generateContentIdeas(
-      { topVideos, topNews, topReddit, toolUpdates: toolResults, competitorVideos },
+      { topVideos, topNews, topReddit, toolUpdates: freshTools, competitorVideos },
       preferences, channelStats
     )
   } catch (err) {
@@ -2093,7 +2183,7 @@ async function runContentBrief({ manual = false } = {}) {
   const briefData = {
     id: briefId, run_at: new Date().toISOString(),
     youtube: topVideos, news: topNews, reddit: topReddit,
-    tools: toolResults, ideas: ideasWithIds, channel_stats: channelStats,
+    tools: freshTools, ideas: ideasWithIds, channel_stats: channelStats,
     competitors: competitorVideos,
   }
 
@@ -2101,7 +2191,7 @@ async function runContentBrief({ manual = false } = {}) {
     await supabase.from('content_briefs').insert({
       id: briefId, run_at: briefData.run_at,
       youtube: topVideos, news: topNews, reddit: topReddit,
-      tools: toolResults, ideas: ideasWithIds, channel_stats: channelStats,
+      tools: freshTools, ideas: ideasWithIds, channel_stats: channelStats,
     })
     // Store all generated ideas as individual rows for easy lookup
     const allIdeas = [...ideasWithIds.short_form, ...ideasWithIds.long_form]

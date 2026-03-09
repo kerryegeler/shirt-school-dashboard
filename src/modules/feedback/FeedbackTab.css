@@ -111,6 +111,23 @@
 .fb-badge--sponsorship { background: rgba(139,92,246,0.18); color: #c4b5fd; }
 .fb-badge--general    { background: rgba(107,114,128,0.18); color: #9ca3af; }
 
+/* ── Action badges ── */
+.fb-action {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.fb-action--approved { background: rgba(34,197,94,0.18);  color: #86efac; }
+.fb-action--edited   { background: rgba(249,115,22,0.18); color: #fdba74; }
+.fb-action--skipped  { background: rgba(107,114,128,0.18); color: #9ca3af; }
+
+/* Single-panel diff (for approved / skipped) */
+.fb-diff-single { display: flex; }
+.fb-diff-single .fb-diff-panel { width: 100%; max-width: 400px; }
+
 /* ── Diff expand ── */
 .fb-diff-wrap { min-width: 120px; }
 

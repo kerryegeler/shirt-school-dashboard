@@ -73,11 +73,14 @@ create table if not exists ai_feedback (
   original_draft  text not null,
   final_version   text not null,
   diff_summary    text,
+  action          text not null default 'edited',  -- 'approved' | 'edited' | 'skipped'
   notes           text,
   created_at      timestamptz not null default now()
 );
 
 alter table ai_feedback disable row level security;
+-- Run this if the table already exists:
+-- alter table ai_feedback add column if not exists action text not null default 'edited';
 
 -- ─── Content Agent ────────────────────────────────────────────────────────────
 

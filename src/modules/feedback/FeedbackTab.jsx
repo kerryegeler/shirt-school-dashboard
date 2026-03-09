@@ -14,6 +14,9 @@ const CATEGORY_CLASS = {
   general: 'fb-badge fb-badge--general',
 }
 
+const ACTION_LABELS = { approved: '✅ Approved', edited: '✏️ Edited', skipped: '⏭️ Skipped' }
+const ACTION_CLASS  = { approved: 'fb-action fb-action--approved', edited: 'fb-action fb-action--edited', skipped: 'fb-action fb-action--skipped' }
+
 function formatDate(iso) {
   return new Date(iso).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -29,23 +32,26 @@ const IconRefresh = () => (
   </svg>
 )
 
-function DraftDiff({ original, final }) {
+function DraftDiff({ original, final, action }) {
   const [show, setShow] = useState(false)
+  const isEdited = action === 'edited'
   return (
     <div className="fb-diff-wrap">
       <button className="fb-diff-toggle" onClick={() => setShow((v) => !v)}>
-        {show ? 'Hide drafts ▲' : 'View drafts ▼'}
+        {show ? 'Hide draft ▲' : 'View draft ▼'}
       </button>
       {show && (
-        <div className="fb-diff-panels">
+        <div className={isEdited ? 'fb-diff-panels' : 'fb-diff-single'}>
           <div className="fb-diff-panel fb-diff-panel--original">
             <div className="fb-diff-label">AI draft</div>
             <pre className="fb-diff-text">{original}</pre>
           </div>
-          <div className="fb-diff-panel fb-diff-panel--final">
-            <div className="fb-diff-label">Kerry's version</div>
-            <pre className="fb-diff-text">{final}</pre>
-          </div>
+          {isEdited && (
+            <div className="fb-diff-panel fb-diff-panel--final">
+              <div className="fb-diff-label">Kerry's version</div>
+              <pre className="fb-diff-text">{final}</pre>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -101,6 +107,7 @@ export default function FeedbackTab() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('all')
+  const [actionFilter, setActionFilter] = useState('all')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -122,7 +129,9 @@ export default function FeedbackTab() {
     setEntries((prev) => prev.map((e) => e.id === id ? { ...e, notes } : e))
   }
 
-  const filtered = filter === 'all' ? entries : entries.filter((e) => e.category === filter)
+  const filtered = entries
+    .filter((e) => filter === 'all' || e.category === filter)
+    .filter((e) => actionFilter === 'all' || (e.action || 'edited') === actionFilter)
 
   return (
     <div className="feedback-tab">
@@ -137,11 +146,13 @@ export default function FeedbackTab() {
           <div className="page-header-subtitle">Draft edits logged for AI improvement</div>
         </div>
         <div className="page-header-right">
-          <select
-            className="fb-filter-select"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          >
+          <select className="fb-filter-select" value={actionFilter} onChange={(e) => setActionFilter(e.target.value)}>
+            <option value="all">All actions</option>
+            <option value="approved">✅ Approved</option>
+            <option value="edited">✏️ Edited</option>
+            <option value="skipped">⏭️ Skipped</option>
+          </select>
+          <select className="fb-filter-select" value={filter} onChange={(e) => setFilter(e.target.value)}>
             <option value="all">All categories</option>
             <option value="student_support">Student Support</option>
             <option value="sponsorship">Sponsorship</option>
@@ -182,30 +193,41 @@ export default function FeedbackTab() {
               <thead>
                 <tr>
                   <th>Date</th>
+                  <th>Action</th>
                   <th>Category</th>
                   <th>Changes</th>
-                  <th>Drafts</th>
-                  <th>Notes / Corrections</th>
+                  <th>Draft</th>
+                  <th>Notes</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((entry) => (
-                  <tr key={entry.id}>
-                    <td className="fb-td-date">{formatDate(entry.created_at)}</td>
-                    <td>
-                      <span className={CATEGORY_CLASS[entry.category] || 'fb-badge'}>
-                        {CATEGORY_LABELS[entry.category] || entry.category}
-                      </span>
-                    </td>
-                    <td className="fb-td-diff">{entry.diff_summary || '—'}</td>
-                    <td>
-                      <DraftDiff original={entry.original_draft} final={entry.final_version} />
-                    </td>
-                    <td>
-                      <NotesCell entry={entry} onSave={handleSaveNotes} />
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((entry) => {
+                  const action = entry.action || 'edited'
+                  return (
+                    <tr key={entry.id}>
+                      <td className="fb-td-date">{formatDate(entry.created_at)}</td>
+                      <td>
+                        <span className={ACTION_CLASS[action] || 'fb-action'}>
+                          {ACTION_LABELS[action] || action}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={CATEGORY_CLASS[entry.category] || 'fb-badge'}>
+                          {CATEGORY_LABELS[entry.category] || entry.category}
+                        </span>
+                      </td>
+                      <td className="fb-td-diff">
+                        {action === 'edited' ? (entry.diff_summary || '—') : '—'}
+                      </td>
+                      <td>
+                        <DraftDiff original={entry.original_draft} final={entry.final_version} action={action} />
+                      </td>
+                      <td>
+                        <NotesCell entry={entry} onSave={handleSaveNotes} />
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
