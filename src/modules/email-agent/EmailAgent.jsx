@@ -703,7 +703,17 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
               searchQuery={searchQuery}
             />
 
-            <div className="email-detail-wrapper">
+            <div className={`email-detail-wrapper ${selectedEmail ? 'mobile-open' : ''}`}>
+              {/* ── Mobile back button ── */}
+              <div className="mobile-back-bar">
+                <button className="mobile-back-btn" onClick={() => setSelectedEmail(null)}>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M10 3L4 8l6 5" />
+                  </svg>
+                  Inbox
+                </button>
+              </div>
+
               {/* ── Bulk toolbar (top of right panel) ── */}
               {anySelected && (
                 <div className="bulk-toolbar-bar">

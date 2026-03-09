@@ -833,3 +833,56 @@
   margin-left: 6px;
   vertical-align: middle;
 }
+
+/* ─── Mobile responsive ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Scrollable tab bar instead of overflow hidden */
+  .ca-tab-bar {
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 0 12px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ca-tab-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Panel padding reduced */
+  .ca-panel {
+    padding: 14px 12px;
+  }
+
+  /* Toolbar: wraps on mobile */
+  .ca-panel-toolbar {
+    gap: 8px;
+  }
+
+  /* Brief cards: no fixed widths, full width */
+  .ca-brief-card {
+    width: 100%;
+  }
+
+  /* Ideas list: single column */
+  .ca-ideas-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Competitor list: touch-friendly rows */
+  .ca-competitor-row {
+    padding: 12px;
+    min-height: 44px;
+  }
+
+  /* Topics list: touch-friendly */
+  .ca-topic-item {
+    min-height: 44px;
+  }
+
+  /* Settings selects */
+  .ca-select {
+    font-size: 16px;
+    padding: 10px 12px;
+    min-height: 44px;
+  }
+}

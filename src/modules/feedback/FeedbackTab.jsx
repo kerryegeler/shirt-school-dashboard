@@ -205,24 +205,24 @@ export default function FeedbackTab() {
                   const action = entry.action || 'edited'
                   return (
                     <tr key={entry.id}>
-                      <td className="fb-td-date">{formatDate(entry.created_at)}</td>
-                      <td>
+                      <td className="fb-td-date" data-label="Date">{formatDate(entry.created_at)}</td>
+                      <td data-label="Action">
                         <span className={ACTION_CLASS[action] || 'fb-action'}>
                           {ACTION_LABELS[action] || action}
                         </span>
                       </td>
-                      <td>
+                      <td data-label="Category">
                         <span className={CATEGORY_CLASS[entry.category] || 'fb-badge'}>
                           {CATEGORY_LABELS[entry.category] || entry.category}
                         </span>
                       </td>
-                      <td className="fb-td-diff">
+                      <td className="fb-td-diff" data-label="Changes">
                         {action === 'edited' ? (entry.diff_summary || '—') : '—'}
                       </td>
-                      <td>
+                      <td data-label="Draft">
                         <DraftDiff original={entry.original_draft} final={entry.final_version} action={action} />
                       </td>
-                      <td>
+                      <td data-label="Notes">
                         <NotesCell entry={entry} onSave={handleSaveNotes} />
                       </td>
                     </tr>

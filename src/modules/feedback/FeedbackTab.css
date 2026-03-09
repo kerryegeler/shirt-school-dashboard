@@ -212,3 +212,75 @@
 }
 
 .fb-notes-edit-actions { display: flex; gap: 6px; }
+
+/* ─── Mobile responsive ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Page header: hide filter dropdowns, show only refresh */
+  .fb-filter-select {
+    font-size: 14px;
+    padding: 8px 10px;
+    min-height: 44px;
+  }
+
+  /* Card layout: hide thead, display rows as cards */
+  .fb-table-wrap {
+    overflow-x: visible;
+  }
+
+  .fb-table thead {
+    display: none;
+  }
+
+  .fb-table,
+  .fb-table tbody,
+  .fb-table tr,
+  .fb-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .fb-table tr {
+    border: 1px solid var(--border, #3a3a3c);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    padding: 12px;
+    background: var(--bg-card, #161616);
+  }
+
+  .fb-table tr:hover td {
+    background: none;
+  }
+
+  .fb-table td {
+    border: none;
+    padding: 4px 0;
+  }
+
+  /* Data labels above each cell value */
+  .fb-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary, #636366);
+    margin-bottom: 3px;
+  }
+
+  /* Side-by-side diff panels become single column */
+  .fb-diff-panels {
+    grid-template-columns: 1fr;
+    min-width: 0;
+  }
+
+  /* Notes textarea full width */
+  .fb-notes-textarea {
+    min-width: 0;
+  }
+
+  /* Feedback body padding */
+  .feedback-body {
+    padding: 14px 12px;
+  }
+}

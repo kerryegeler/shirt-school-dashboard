@@ -427,3 +427,112 @@ input, textarea, select {
   clip: rect(0,0,0,0);
   white-space: nowrap;
 }
+
+/* ─── Mobile bottom tab bar (hidden on desktop) ─────────────────── */
+.mobile-tab-bar {
+  display: none;
+}
+
+/* ─── Mobile responsive ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Layout: sidebar hidden, main takes full height minus bottom nav */
+  .sidebar {
+    display: none;
+  }
+
+  .app-layout {
+    height: calc(100vh - 56px);
+  }
+
+  /* Bottom tab bar */
+  .mobile-tab-bar {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    background: var(--sidebar-bg);
+    border-top: 1px solid var(--border);
+    z-index: 100;
+    align-items: stretch;
+  }
+
+  .mobile-tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    color: var(--sidebar-text);
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 6px 4px;
+    transition: color 0.12s;
+    min-height: 44px;
+    position: relative;
+  }
+
+  .mobile-tab-btn.active {
+    color: var(--orange);
+  }
+
+  .mobile-tab-btn svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .mobile-tab-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 16px);
+    min-width: 16px;
+    height: 16px;
+    background: var(--orange);
+    color: #000;
+    border-radius: 8px;
+    font-size: 9px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+  }
+
+  /* Page header adjustments */
+  .page-header {
+    padding: 0 12px;
+    height: 50px;
+    gap: 8px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  .page-header-subtitle {
+    display: none;
+  }
+
+  .page-header-icon {
+    display: none;
+  }
+
+  /* Inputs/selects: 16px prevents iOS zoom */
+  input, textarea, select {
+    font-size: 16px !important;
+  }
+
+  /* Buttons: minimum touch targets */
+  .btn {
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+
+  .btn-ghost {
+    min-height: 44px;
+    padding: 10px 10px;
+  }
+}

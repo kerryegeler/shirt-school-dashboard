@@ -1660,3 +1660,139 @@
   flex-shrink: 0;
 }
 
+/* ─── Mobile back button (hidden on desktop) ─────────────────────── */
+.mobile-back-bar {
+  display: none;
+}
+
+/* ─── Mobile responsive ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Hide the email nav sidebar — navigation is via bottom tab */
+  .email-nav {
+    display: none;
+  }
+
+  /* Email list takes full width */
+  .email-list-panel {
+    width: 100%;
+    border-right: none;
+    flex-shrink: 1;
+  }
+
+  /* Detail wrapper is an off-screen sliding overlay */
+  .email-detail-wrapper {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    background: var(--bg-app);
+  }
+
+  /* Slide in when email is selected */
+  .email-detail-wrapper.mobile-open {
+    transform: translateX(0);
+  }
+
+  /* email-agent-body needs relative positioning for the overlay */
+  .email-agent-body {
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Mobile back bar */
+  .mobile-back-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    height: 44px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--orange);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px 0;
+    min-height: 44px;
+  }
+
+  .mobile-back-btn svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  /* Header: hide search form on mobile (too cramped) */
+  .email-search-form {
+    display: none;
+  }
+
+  /* Header right: hide archive-all label, keep refresh icon only */
+  .btn-archive-all {
+    display: none;
+  }
+
+  /* Draft textarea font size (iOS zoom prevention handled globally) */
+  .draft-textarea {
+    min-height: 180px;
+  }
+
+  /* Draft footer: stack on narrow screens */
+  .draft-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Send confirm bar: wrap */
+  .send-confirm-bar {
+    flex-wrap: wrap;
+  }
+
+  /* Draft section: reduce side padding */
+  .draft-section {
+    padding: 0 14px 20px;
+  }
+
+  .detail-header {
+    padding: 16px 14px 14px;
+  }
+
+  .detail-body {
+    padding: 14px 14px;
+  }
+
+  /* Detail subject smaller on mobile */
+  .detail-subject {
+    font-size: 16px;
+  }
+
+  /* Thread message preview truncation */
+  .thread-msg-preview-collapsed {
+    max-width: 160px;
+  }
+
+  /* Bulk toolbar bar: ensure it fits */
+  .bulk-toolbar-bar {
+    padding: 0 8px;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  /* Email list item: slightly more touch-friendly */
+  .email-list-item {
+    padding: 14px 12px;
+  }
+}
+

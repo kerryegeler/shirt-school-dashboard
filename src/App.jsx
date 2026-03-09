@@ -88,24 +88,59 @@ export default function App() {
     .map(([k]) => k)
 
   return (
-    <div className="app-layout">
-      <Sidebar
-        activeModule={activeModule}
-        onSelectModule={setActiveModule}
-        unreadCount={unreadCount}
-        accountStatus={authState.accounts || {}}
-        onDisconnect={handleDisconnect}
-      />
-      <main className="app-main">
-        {activeModule === 'email-agent' && (
-          <EmailAgent
-            onUnreadChange={setUnreadCount}
-            connectedAccounts={connectedAccounts}
-          />
-        )}
-        {activeModule === 'ai-feedback' && <FeedbackTab />}
-        {activeModule === 'content-agent' && <ContentAgent />}
-      </main>
-    </div>
+    <>
+      <div className="app-layout">
+        <Sidebar
+          activeModule={activeModule}
+          onSelectModule={setActiveModule}
+          unreadCount={unreadCount}
+          accountStatus={authState.accounts || {}}
+          onDisconnect={handleDisconnect}
+        />
+        <main className="app-main">
+          {activeModule === 'email-agent' && (
+            <EmailAgent
+              onUnreadChange={setUnreadCount}
+              connectedAccounts={connectedAccounts}
+            />
+          )}
+          {activeModule === 'ai-feedback' && <FeedbackTab />}
+          {activeModule === 'content-agent' && <ContentAgent />}
+        </main>
+      </div>
+
+      {/* Mobile bottom tab bar */}
+      <nav className="mobile-tab-bar">
+        <button
+          className={`mobile-tab-btn ${activeModule === 'email-agent' ? 'active' : ''}`}
+          onClick={() => setActiveModule('email-agent')}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1" y="3" width="14" height="10" rx="1.5" />
+            <path d="M1 5l7 5 7-5" />
+          </svg>
+          Email
+          {unreadCount > 0 && <span className="mobile-tab-badge">{unreadCount}</span>}
+        </button>
+        <button
+          className={`mobile-tab-btn ${activeModule === 'content-agent' ? 'active' : ''}`}
+          onClick={() => setActiveModule('content-agent')}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M11 2l3 3-9 9H2v-3L11 2z" />
+          </svg>
+          Content
+        </button>
+        <button
+          className={`mobile-tab-btn ${activeModule === 'ai-feedback' ? 'active' : ''}`}
+          onClick={() => setActiveModule('ai-feedback')}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 1v14M1 8h14M4.5 4.5l7 7M11.5 4.5l-7 7" />
+          </svg>
+          Feedback
+        </button>
+      </nav>
+    </>
   )
 }
