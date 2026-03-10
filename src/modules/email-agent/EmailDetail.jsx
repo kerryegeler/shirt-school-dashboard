@@ -214,7 +214,7 @@ function ThreadMessage({ message, defaultExpanded = true }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, onUnarchive, viewMode, onDraftSaved, onDraftDeleted }) {
+export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, onUnarchive, viewMode, onDraftSaved, onDraftDeleted, onSent }) {
   const [draft, setDraft] = useState('')
   const [manualMode, setManualMode] = useState(false)
   const [personaUsed, setPersonaUsed] = useState('')
@@ -313,6 +313,8 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       }
       // Delete saved draft on successful send
       deleteDraft(email.id).then(() => onDraftDeleted?.(email.id)).catch(() => {})
+      // Notify parent to reload thread after a short delay (so Gmail has time to record the sent message)
+      setTimeout(() => onSent?.(), 1500)
     } catch (err) {
       setSendError(err.message)
       setConfirmSend(false)

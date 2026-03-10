@@ -457,7 +457,7 @@ function buildThreadObject(thread, account) {
     category,
     folderId,
     hasDraft: savedDraftsCache.has(thread.id),
-    defaultFrom: defaultFromAccount(category, subject, firstMsg.bodyText),
+    defaultFrom: account,
     status,
     read: !hasUnread,
     subject,
@@ -697,36 +697,48 @@ app.get('/api/emails', requireAuth, async (req, res) => {
 
 app.get('/api/emails/sent', requireAuth, async (req, res) => {
   const connected = connectedAccounts()
+  console.log('[Sent] Fetching sent emails for accounts:', connected)
   try {
     const sentByAccount = await Promise.all(
       connected.map(async (account) => {
-        const gmail = google.gmail({ version: 'v1', auth: clients[account] })
-        const listRes = await gmail.users.messages.list({
-          userId: 'me', maxResults: 30, labelIds: ['SENT'],
-        })
-        if (!listRes.data.messages?.length) return []
-        const messages = await Promise.all(
-          listRes.data.messages.map((m) =>
-            gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' }).then((r) => r.data)
+        try {
+          const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+          const listRes = await gmail.users.messages.list({
+            userId: 'me', maxResults: 20, q: 'in:sent',
+          })
+          console.log(`[Sent] ${account}: ${listRes.data.messages?.length ?? 0} messages found`)
+          if (!listRes.data.messages?.length) return []
+          const messages = await Promise.all(
+            listRes.data.messages.map((m) =>
+              gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' }).then((r) => r.data)
+            )
           )
-        )
-        return messages.map((m) => {
-          const obj = buildMessageObject(m, account)
-          if (!obj) return null
-          return {
-            id: m.id,
-            threadId: m.threadId,
-            account,
-            subject: obj.subject,
-            to: obj.to,
-            from: account,
-            bodyText: obj.bodyText,
-            bodyHtml: obj.bodyHtml,
-            preview: obj.preview,
-            timestamp: obj.timestamp,
-            isOutgoing: true,
-          }
-        }).filter(Boolean)
+          return messages.map((m) => {
+            const obj = buildMessageObject(m, account)
+            if (!obj) { console.log(`[Sent] ${account}: buildMessageObject returned null for ${m.id}`); return null }
+            // Derive recipient name from To header
+            const toHeader = obj.to || ''
+            const toMatch = toHeader.match(/^"?(.+?)"?\s*<(.+?)>$/)
+            const toName = toMatch ? toMatch[1].trim() : toHeader.split('@')[0]
+            return {
+              id: m.id,
+              threadId: m.threadId,
+              account,
+              subject: obj.subject,
+              to: obj.to,
+              name: toName,
+              from: account,
+              bodyText: obj.bodyText,
+              bodyHtml: obj.bodyHtml,
+              preview: obj.preview,
+              timestamp: obj.timestamp,
+              isOutgoing: true,
+            }
+          }).filter(Boolean)
+        } catch (accountErr) {
+          console.error(`[Sent] Error fetching for ${account}:`, accountErr.message)
+          return []
+        }
       })
     )
     const seen = new Set()
@@ -734,9 +746,10 @@ app.get('/api/emails/sent', requireAuth, async (req, res) => {
       .flat()
       .filter((m) => { if (seen.has(m.id)) return false; seen.add(m.id); return true })
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    console.log(`[Sent] Returning ${sent.length} total sent emails`)
     res.json({ sent })
   } catch (error) {
-    console.error('Sent fetch error:', error.message)
+    console.error('[Sent] Fatal error:', error.message)
     res.status(500).json({ error: 'Failed to fetch sent emails' })
   }
 })

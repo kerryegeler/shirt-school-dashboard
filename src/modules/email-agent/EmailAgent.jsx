@@ -418,7 +418,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     updateEmailFields(email.id, { category: newCategory })
     try {
       const result = await reclassifyEmail(email.id, newCategory)
-      updateEmailFields(email.id, { category: result.category, defaultFrom: result.defaultFrom })
+      updateEmailFields(email.id, { category: result.category })
     } catch {
       updateEmailFields(email.id, prev)
     }
@@ -537,6 +537,20 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   function handleDraftDeleted(threadId) {
     updateEmailFields(threadId, { hasDraft: false })
+  }
+
+  // ── Reload thread after send ─────────────────────────────────────────────────
+
+  function handleSent() {
+    if (!selectedEmail) return
+    const primaryAccount = (selectedEmail.accounts || [selectedEmail.account])[0]
+    fetchThread(selectedEmail.id, primaryAccount)
+      .then((fresh) => {
+        if (!fresh) return
+        setEmails((prev) => prev.map((e) => e.id === selectedEmail.id ? { ...e, ...fresh } : e))
+        setSelectedEmail((prev) => prev?.id === selectedEmail.id ? { ...prev, ...fresh } : prev)
+      })
+      .catch(() => {})
   }
 
   // ── Derived ─────────────────────────────────────────────────────────────────
@@ -803,6 +817,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
                   viewMode={viewMode}
                   onDraftSaved={handleDraftSaved}
                   onDraftDeleted={handleDraftDeleted}
+                  onSent={handleSent}
                 />
               ) : (
                 <div className="email-empty-state">
