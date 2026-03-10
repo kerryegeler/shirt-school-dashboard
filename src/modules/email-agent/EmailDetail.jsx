@@ -408,11 +408,11 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       <div className="detail-body">
         {messages ? (
           <div className="thread-messages">
-            {messages.map((msg, i) => (
+            {[...messages].reverse().map((msg, i) => (
               <ThreadMessage
                 key={msg.id || i}
                 message={msg}
-                defaultExpanded={i === messages.length - 1 || !msg.isOutgoing}
+                defaultExpanded={i === 0}
               />
             ))}
           </div>
@@ -428,8 +428,8 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
         )}
       </div>
 
-      {/* ── AI Draft Section ── */}
-      <div className="draft-section">
+      {/* ── AI Draft Section (hidden for sent emails) ── */}
+      {viewMode === 'sent' ? null : <div className="draft-section">
         <div className="draft-section-header">
           <div className="draft-section-title">
             <span className="draft-sparkle-icon"><IconSparkle /></span>
@@ -586,7 +586,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
             )}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   )
 }

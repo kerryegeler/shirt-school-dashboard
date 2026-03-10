@@ -693,6 +693,54 @@ app.get('/api/emails', requireAuth, async (req, res) => {
   }
 })
 
+// ─── Gmail sent ────────────────────────────────────────────────────────────────
+
+app.get('/api/emails/sent', requireAuth, async (req, res) => {
+  const connected = connectedAccounts()
+  try {
+    const sentByAccount = await Promise.all(
+      connected.map(async (account) => {
+        const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+        const listRes = await gmail.users.messages.list({
+          userId: 'me', maxResults: 30, labelIds: ['SENT'],
+        })
+        if (!listRes.data.messages?.length) return []
+        const messages = await Promise.all(
+          listRes.data.messages.map((m) =>
+            gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' }).then((r) => r.data)
+          )
+        )
+        return messages.map((m) => {
+          const obj = buildMessageObject(m, account)
+          if (!obj) return null
+          return {
+            id: m.id,
+            threadId: m.threadId,
+            account,
+            subject: obj.subject,
+            to: obj.to,
+            from: account,
+            bodyText: obj.bodyText,
+            bodyHtml: obj.bodyHtml,
+            preview: obj.preview,
+            timestamp: obj.timestamp,
+            isOutgoing: true,
+          }
+        }).filter(Boolean)
+      })
+    )
+    const seen = new Set()
+    const sent = sentByAccount
+      .flat()
+      .filter((m) => { if (seen.has(m.id)) return false; seen.add(m.id); return true })
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    res.json({ sent })
+  } catch (error) {
+    console.error('Sent fetch error:', error.message)
+    res.status(500).json({ error: 'Failed to fetch sent emails' })
+  }
+})
+
 // ─── Gmail search ──────────────────────────────────────────────────────────────
 
 app.get('/api/emails/search', requireAuth, async (req, res) => {
@@ -1183,7 +1231,7 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
       elements: [
         {
           type: 'button', style: 'primary',
-          text: { type: 'plain_text', text: '✅ Approve & Send' },
+          text: { type: 'plain_text', text: '✅ Approve' },
           action_id: 'approve_email', value: thread.id,
           confirm: {
             title: { type: 'plain_text', text: 'Approve this reply?' },
@@ -1194,13 +1242,18 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: '✏️ Edit in Dashboard' },
+          text: { type: 'plain_text', text: '🖥 Edit in Dashboard' },
           action_id: 'edit_email', value: thread.id, url: dashUrl,
         },
         {
+          type: 'button',
+          text: { type: 'plain_text', text: '✏️ Edit in Slack' },
+          action_id: 'edit_in_slack', value: thread.id,
+        },
+        {
           type: 'button', style: 'danger',
-          text: { type: 'plain_text', text: '⏭️ Skip' },
-          action_id: 'skip_email', value: thread.id,
+          text: { type: 'plain_text', text: '🗄 Archive' },
+          action_id: 'archive_email', value: thread.id,
         },
       ],
     })
@@ -1217,6 +1270,43 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
   }
 
   return blocks
+}
+
+// Build 4-button action block for regenerated drafts posted in thread
+function buildRegenActionBlock(threadId) {
+  const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
+  return {
+    type: 'actions',
+    block_id: `email_approval_regen_${Date.now()}`,
+    elements: [
+      {
+        type: 'button', style: 'primary',
+        text: { type: 'plain_text', text: '✅ Approve' },
+        action_id: 'approve_email', value: threadId,
+        confirm: {
+          title: { type: 'plain_text', text: 'Approve this reply?' },
+          text: { type: 'mrkdwn', text: 'The draft will be sent in 5 minutes.' },
+          confirm: { type: 'plain_text', text: 'Approve' },
+          deny: { type: 'plain_text', text: 'Cancel' },
+        },
+      },
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: '🖥 Edit in Dashboard' },
+        action_id: 'edit_email', value: threadId, url: dashUrl,
+      },
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: '✏️ Edit in Slack' },
+        action_id: 'edit_in_slack', value: threadId,
+      },
+      {
+        type: 'button', style: 'danger',
+        text: { type: 'plain_text', text: '🗄 Archive' },
+        action_id: 'archive_email', value: threadId,
+      },
+    ],
+  }
 }
 
 async function getSlackNotification(threadId) {
@@ -1573,13 +1663,48 @@ app.post('/api/slack/actions', async (req, res) => {
       }
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped')
     } else if (actionId === 'edit_email') {
-      // "Edit in Dashboard" — no status change so thread replies still work
+      // "Edit in Dashboard" — just post a link, no status change
       if (slackClient && channelId && slackTs) {
         const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
         await slackClient.chat.postMessage({
           channel: channelId, thread_ts: slackTs,
-          text: `Open the dashboard to edit this reply: ${dashUrl}\n\nOr reply here in this thread with your edit instruction.`,
+          text: `Open the dashboard to edit this reply: ${dashUrl}`,
         })
+      }
+
+    } else if (actionId === 'edit_in_slack') {
+      // "Edit in Slack" — prompt Kerry to reply with edit instructions
+      if (slackClient && channelId && slackTs) {
+        await slackClient.chat.postMessage({
+          channel: channelId, thread_ts: slackTs,
+          text: `Reply to this thread with your edit instructions and I will regenerate the draft.`,
+        })
+      }
+
+    } else if (actionId === 'archive_email') {
+      // Archive the email in Gmail and update status
+      if (notif) {
+        const accounts = notif.account ? [notif.account] : []
+        const allAccounts = (notif.thread_meta?.accounts || accounts).length ? (notif.thread_meta?.accounts || accounts) : connectedAccounts()
+        // Archive from all known accounts
+        await Promise.allSettled(allAccounts.map(async (acct) => {
+          if (!hasTokens(acct)) return
+          const gmail = google.gmail({ version: 'v1', auth: clients[acct] })
+          await gmail.users.threads.modify({ userId: 'me', id: notif.thread_id, requestBody: { removeLabelIds: ['INBOX'] } })
+        }))
+        if (supabase) {
+          await supabase.from('slack_notifications')
+            .update({ status: 'skipped' })
+            .eq('thread_id', notif.thread_id)
+        }
+        if (slackClient && channelId && slackTs) {
+          await slackClient.chat.postMessage({
+            channel: channelId, thread_ts: slackTs,
+            text: `🗄 Email archived.`,
+          })
+        }
+        // Update the original message to show skipped
+        await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped').catch(() => {})
       }
     }
   } catch (err) {
@@ -1629,17 +1754,18 @@ app.post('/api/slack/events', async (req, res) => {
   if (!currentDraft) return
 
   try {
-    // Ask Claude to apply the edit instruction to the draft
-    const editMsg = await anthropic.messages.create({
+    // Regenerate draft using original email context + edit instruction
+    const meta = notif.thread_meta || {}
+    const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1500,
-      system: 'You are editing an email draft. Apply the instruction and return ONLY the revised email body — no subject line, no labels, no explanation, just the reply text.',
+      system: 'You are regenerating an email draft based on edit instructions. Return ONLY the revised email body — no subject line, no labels, no explanation, just the reply text.',
       messages: [{
         role: 'user',
-        content: `Current draft:\n---\n${currentDraft}\n---\n\nEdit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`,
+        content: `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nEdit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`,
       }],
     })
-    const revisedDraft = editMsg.content[0].text.trim()
+    const revisedDraft = regenMsg.content[0].text.trim()
 
     // Update slack_notifications with new draft
     await supabase.from('slack_notifications')
@@ -1652,7 +1778,7 @@ app.post('/api/slack/events', async (req, res) => {
     })
     savedDraftsCache.add(notif.thread_id)
 
-    // Log feedback: draft was edited via Slack thread
+    // Log feedback
     await supabase.from('ai_feedback').insert({
       thread_id: notif.thread_id, category: notif.category || 'general',
       original_draft: currentDraft, final_version: revisedDraft,
@@ -1660,27 +1786,29 @@ app.post('/api/slack/events', async (req, res) => {
       created_at: new Date().toISOString(),
     }).catch(() => {})
 
-    // Post revised draft back to the Slack thread as confirmation
+    // Post revised draft back to Slack thread with all 4 action buttons
     if (slackClient && notif.channel_id) {
       const truncRevised = revisedDraft.length > 2800 ? revisedDraft.slice(0, 2800) + '…' : revisedDraft
       await slackClient.chat.postMessage({
         channel: notif.channel_id,
         thread_ts: notif.slack_ts,
-        text: `✏️ Draft updated. Here's the revised version:\n\`\`\`${truncRevised}\`\`\`\n\nReply again to make more edits, or use the buttons above to approve/skip.`,
+        text: `✏️ New draft ready:`,
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: `✏️ *New draft:*\n\`\`\`${truncRevised}\`\`\`` } },
+          { type: 'section', text: { type: 'mrkdwn', text: `_Reply again with more instructions, or use the buttons below._` } },
+          buildRegenActionBlock(notif.thread_id),
+        ],
       })
-
-      // Also update the original message with the new draft
-      await updateSlackMessage({ ...notif, draft: revisedDraft }, notif.status)
     }
 
-    console.log(`[Slack] Draft edited for thread ${notif.thread_id}: "${instruction.slice(0, 60)}"`)
+    console.log(`[Slack] Draft regenerated for thread ${notif.thread_id}: "${instruction.slice(0, 60)}"`)
   } catch (err) {
     console.error('[Slack] Edit handler error:', err.message)
     if (slackClient && notif.channel_id) {
       await slackClient.chat.postMessage({
         channel: notif.channel_id,
         thread_ts: notif.slack_ts,
-        text: `⚠️ Failed to apply edit: ${err.message}`,
+        text: `⚠️ Failed to regenerate draft: ${err.message}`,
       }).catch(() => {})
     }
   }
@@ -1780,8 +1908,17 @@ async function fetchCompetitorVideos() {
   if (!process.env.YOUTUBE_API_KEY || !supabase) return []
   const { data: competitors } = await supabase.from('content_competitors').select('*').eq('active', true)
   if (!competitors?.length) return []
+
+  // Find the last brief run time to only include videos published after it
+  let sinceDate = new Date(Date.now() - 25 * 60 * 60 * 1000) // default: last 25 hours
+  const { data: lastBrief } = await supabase.from('content_briefs')
+    .select('run_at').order('run_at', { ascending: false }).limit(1).single()
+  if (lastBrief?.run_at) sinceDate = new Date(lastBrief.run_at)
+
   const yt = google.youtube({ version: 'v3', auth: process.env.YOUTUBE_API_KEY })
-  const results = []
+  // Results keyed by channel for per-channel avg calculation, plus "no new videos" channels
+  const byChannel = []
+
   for (const competitor of competitors) {
     try {
       const channelRes = await yt.channels.list({ part: ['contentDetails', 'statistics'], id: [competitor.channel_id] })
@@ -1789,22 +1926,40 @@ async function fetchCompetitorVideos() {
       if (!channel) continue
       const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
       if (!uploadsPlaylistId) continue
-      const playlistRes = await yt.playlistItems.list({ part: ['contentDetails', 'snippet'], playlistId: uploadsPlaylistId, maxResults: 5 })
-      const videoIds = (playlistRes.data.items || []).map((i) => i.contentDetails.videoId).filter(Boolean)
-      if (!videoIds.length) continue
+
+      // Fetch up to 20 recent videos to find all new since last brief
+      const playlistRes = await yt.playlistItems.list({ part: ['contentDetails', 'snippet'], playlistId: uploadsPlaylistId, maxResults: 20 })
+      const allPlaylistItems = playlistRes.data.items || []
+      const videoIds = allPlaylistItems.map((i) => i.contentDetails.videoId).filter(Boolean)
+      if (!videoIds.length) {
+        byChannel.push({ channel: competitor.channel_name, newVideos: [], noNew: true })
+        continue
+      }
+
       const statsRes = await yt.videos.list({ part: ['statistics', 'snippet'], id: [videoIds.join(',')] })
-      const videos = (statsRes.data.items || []).map((v) => ({
+      const allVideos = (statsRes.data.items || []).map((v) => ({
         id: v.id, title: v.snippet.title, publishedAt: v.snippet.publishedAt,
         url: `https://youtu.be/${v.id}`, views: parseInt(v.statistics.viewCount || 0),
         channel: competitor.channel_name, channelId: competitor.channel_id,
       }))
-      const avgViews = videos.length ? Math.round(videos.reduce((s, v) => s + v.views, 0) / videos.length) : 0
-      results.push(...videos.map((v) => ({ ...v, isBreakout: avgViews > 0 && v.views >= avgViews * 2, channelAvgViews: avgViews })))
+
+      // Compute channel average from all fetched videos
+      const avgViews = allVideos.length ? Math.round(allVideos.reduce((s, v) => s + v.views, 0) / allVideos.length) : 0
+
+      // Filter to only videos published since the last brief
+      const newVideos = allVideos
+        .filter((v) => new Date(v.publishedAt) > sinceDate)
+        .map((v) => ({ ...v, isBreakout: avgViews > 0 && v.views >= avgViews * 2, channelAvgViews: avgViews }))
+        .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))
+
+      byChannel.push({ channel: competitor.channel_name, newVideos, noNew: newVideos.length === 0 })
     } catch (err) {
       console.error(`[Content] Competitor fetch error for ${competitor.channel_name}:`, err.message)
+      byChannel.push({ channel: competitor.channel_name, newVideos: [], noNew: true })
     }
   }
-  return results.sort((a, b) => b.views - a.views)
+
+  return byChannel
 }
 
 async function fetchSerperNews(query) {
@@ -1936,7 +2091,7 @@ async function generateContentIdeas(research, preferences, channelStats) {
   const { topVideos, topNews, topReddit, toolUpdates, competitorVideos = [] } = research
   let prefContext = ''
   if (preferences?.save_count >= 10) {
-    prefContext = `Kerry's content preferences (from her saved ideas):\n- Preferred topics: ${preferences.topic_keywords?.slice(0, 8).join(', ') || 'varies'}\n- Preferred format: ${preferences.preferred_format || 'both'}\nWeight ideas toward these preferences.\n\n`
+    prefContext = `Kerry's content preferences (from his saved ideas):\n- Preferred topics: ${preferences.topic_keywords?.slice(0, 8).join(', ') || 'varies'}\n- Preferred format: ${preferences.preferred_format || 'both'}\nWeight ideas toward these preferences.\n\n`
   }
 
   // Source A (30%): Kerry's top-performing channel videos
@@ -1950,20 +2105,21 @@ Channel avg views: ${formatNum(channelStats.avgViews)}
 → Ideas from this source: identify topics/formats/angles that outperformed, then suggest similar or follow-up videos.\n\n`
   }
 
-  // Source B (35%): Competitor activity and breakout videos
-  const breakouts = competitorVideos.filter((v) => v.isBreakout)
-  const nonBreakouts = competitorVideos.filter((v) => !v.isBreakout)
+  // Source B (35%): Competitor activity — flatten new videos from all channels
+  const allCompetitorVideos = competitorVideos.flatMap((ch) => ch.newVideos || [])
+  const breakouts = allCompetitorVideos.filter((v) => v.isBreakout)
+  const nonBreakouts = allCompetitorVideos.filter((v) => !v.isBreakout)
   let sourceBCtx = ''
   if (competitorVideos.length) {
-    const breakoutLines = breakouts.slice(0, 3).map((v) =>
+    const breakoutLines = breakouts.map((v) =>
       `🔥 "${v.title}" by ${v.channel} (${formatNum(v.views)} views — ${Math.round(v.views / v.channelAvgViews)}x their avg)`
     ).join('\n')
-    const normalLines = nonBreakouts.slice(0, 4).map((v) =>
+    const normalLines = nonBreakouts.map((v) =>
       `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`
     ).join('\n')
+    const noNewChannels = competitorVideos.filter((ch) => ch.noNew).map((ch) => ch.channel).join(', ')
     sourceBCtx = `SOURCE B — COMPETITOR ACTIVITY (35% of ideas should draw from this):
-${breakoutLines ? `BREAKOUT VIDEOS (outperforming 2x+ their channel average):\n${breakoutLines}\n` : ''}${normalLines ? `Recent uploads:\n${normalLines}` : ''}
-→ Ideas from this source: create your own angle on topics that competitors' breakout videos prove people want right now.\n\n`
+${breakoutLines ? `BREAKOUT VIDEOS (outperforming 2x+ their channel average):\n${breakoutLines}\n` : ''}${normalLines ? `Recent uploads:\n${normalLines}\n` : ''}${noNewChannels ? `No new videos: ${noNewChannels}\n` : ''}→ Ideas from this source: create your own angle on topics that competitors' breakout videos prove people want right now.\n\n`
   } else {
     sourceBCtx = `SOURCE B — COMPETITOR ACTIVITY (35% of ideas):
 No competitor channels configured yet. Use general YouTube trends below instead.\n\n`
@@ -1979,9 +2135,9 @@ ${topReddit.slice(0, 3).map((r) => `- [${r.subreddit}] ${r.title}`).join('\n') |
 
 TOOL UPDATES:
 ${toolUpdates.slice(0, 3).map((t) => `- ${t.title}: ${t.snippet?.slice(0, 80)}`).join('\n') || 'N/A'}
-→ Ideas from this source: translate news/Reddit conversations into YouTube topics Kerry's audience needs.\n\n`
+→ Ideas from this source: translate news/Reddit conversations into YouTube topics Kerry's audience wants.\n\n`
 
-  const prompt = `You are a content strategist for "Shirt School" — Kerry's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce.
+  const prompt = `You are a content strategist for "Shirt School" — Kerry Egeler's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce. Kerry is male (he/him pronouns).
 ${prefContext}Generate fresh content ideas for Kerry using THREE weighted sources below. For each idea, include which source inspired it.
 
 ${sourceACtx}${sourceBCtx}${sourceCCtx}GENERAL TRENDING YOUTUBE (supplementary context):
@@ -2054,16 +2210,21 @@ async function sendBriefToSlack(brief) {
     blocks.push({ type: 'divider' })
   }
 
-  // Competitor Activity section
+  // Competitor Activity section — show ALL videos since last brief, per channel
   if (brief.competitors?.length) {
-    const breakouts = brief.competitors.filter((v) => v.isBreakout)
-    const others = brief.competitors.filter((v) => !v.isBreakout)
     const lines = []
-    for (const v of breakouts.slice(0, 3)) {
-      lines.push(`🔥 <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views _(${Math.round(v.views / v.channelAvgViews)}x their avg — breakout!)_`)
-    }
-    for (const v of others.slice(0, 4 - Math.min(breakouts.length, 3))) {
-      lines.push(`• <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`)
+    for (const ch of brief.competitors) {
+      if (ch.noNew || !ch.newVideos?.length) {
+        lines.push(`• _${ch.channel}_ — no new videos`)
+      } else {
+        for (const v of ch.newVideos) {
+          if (v.isBreakout) {
+            lines.push(`🔥 <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views _(${Math.round(v.views / v.channelAvgViews)}x avg)_`)
+          } else {
+            lines.push(`• <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`)
+          }
+        }
+      }
     }
     if (lines.length) {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎯 Competitor Activity*\n${lines.join('\n')}` } })
@@ -2192,6 +2353,7 @@ async function runContentBrief({ manual = false } = {}) {
       id: briefId, run_at: briefData.run_at,
       youtube: topVideos, news: topNews, reddit: topReddit,
       tools: freshTools, ideas: ideasWithIds, channel_stats: channelStats,
+      competitors: competitorVideos,
     })
     // Store all generated ideas as individual rows for easy lookup
     const allIdeas = [...ideasWithIds.short_form, ...ideasWithIds.long_form]

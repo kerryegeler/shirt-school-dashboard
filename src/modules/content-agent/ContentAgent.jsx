@@ -369,15 +369,44 @@ function PastBriefs() {
 function BriefDetail({ brief }) {
   return (
     <div className="ca-brief-detail">
-      {brief.youtube?.length > 0 && (
+      {brief.competitors?.length > 0 && (
         <div className="ca-brief-section">
-          <div className="ca-brief-section-title">🎥 Trending YouTube</div>
-          {brief.youtube.map((v, i) => (
-            <div key={i} className="ca-brief-item">
-              <a href={v.url} target="_blank" rel="noreferrer" className="ca-link">{v.title}</a>
-              <span className="ca-brief-item-meta">{v.channel} · {formatNum(v.views)} views</span>
-            </div>
-          ))}
+          <div className="ca-brief-section-title">🎯 Competitor Activity</div>
+          {brief.competitors.map((ch, i) => {
+            // New format: {channel, newVideos, noNew}
+            if (ch.newVideos !== undefined) {
+              if (ch.noNew || !ch.newVideos?.length) {
+                return (
+                  <div key={i} className="ca-brief-item">
+                    <span className="ca-brief-item-meta">{ch.channel} — no new videos</span>
+                  </div>
+                )
+              }
+              return ch.newVideos.map((v, j) => (
+                <div key={`${i}-${j}`} className="ca-brief-item">
+                  <a href={v.url} target="_blank" rel="noreferrer" className="ca-link">
+                    {v.isBreakout && '🔥 '}{v.title}
+                  </a>
+                  <span className="ca-brief-item-meta">
+                    {v.channel} · {formatNum(v.views)} views
+                    {v.isBreakout && ` · ${Math.round(v.views / v.channelAvgViews)}x avg`}
+                  </span>
+                </div>
+              ))
+            }
+            // Legacy flat format
+            return (
+              <div key={i} className="ca-brief-item">
+                <a href={ch.url} target="_blank" rel="noreferrer" className="ca-link">
+                  {ch.isBreakout && '🔥 '}{ch.title}
+                </a>
+                <span className="ca-brief-item-meta">
+                  {ch.channel} · {formatNum(ch.views)} views
+                  {ch.isBreakout && ` · ${Math.round(ch.views / ch.channelAvgViews)}x avg`}
+                </span>
+              </div>
+            )
+          })}
         </div>
       )}
       {brief.news?.length > 0 && (
@@ -410,22 +439,6 @@ function BriefDetail({ brief }) {
             <div key={i} className="ca-brief-item">
               <a href={t.url} target="_blank" rel="noreferrer" className="ca-link">{t.title}</a>
               {t.snippet && <div className="ca-brief-snippet">{t.snippet}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-      {brief.competitors?.length > 0 && (
-        <div className="ca-brief-section">
-          <div className="ca-brief-section-title">🎯 Competitor Activity</div>
-          {brief.competitors.map((v, i) => (
-            <div key={i} className="ca-brief-item">
-              <a href={v.url} target="_blank" rel="noreferrer" className="ca-link">
-                {v.isBreakout && '🔥 '}{v.title}
-              </a>
-              <span className="ca-brief-item-meta">
-                {v.channel} · {formatNum(v.views)} views
-                {v.isBreakout && ` · ${Math.round(v.views / v.channelAvgViews)}x avg`}
-              </span>
             </div>
           ))}
         </div>

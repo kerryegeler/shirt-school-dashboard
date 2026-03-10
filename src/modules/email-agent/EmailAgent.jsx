@@ -3,7 +3,7 @@ import EmailList from './EmailList.jsx'
 import EmailDetail from './EmailDetail.jsx'
 import {
   markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, archiveAll, unarchiveEmail, fetchThread,
-  fetchFolders, createFolder, deleteFolder, assignFolder, searchEmails,
+  fetchFolders, createFolder, deleteFolder, assignFolder, searchEmails, fetchSentEmails,
 } from '../../services/api.js'
 import './EmailAgent.css'
 
@@ -105,6 +105,7 @@ const IconCheck = () => (
 const NAV_STATUS_VIEWS = [
   { id: 'inbox',    label: 'Inbox' },
   { id: 'archived', label: 'Archived' },
+  { id: 'sent',     label: 'Sent' },
 ]
 
 const NAV_CATEGORY_VIEWS = [
@@ -151,6 +152,10 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const [folders, setFolders] = useState([])
   const [addingFolder, setAddingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+
+  // Sent folder state
+  const [sentEmails, setSentEmails] = useState([])
+  const [loadingSent, setLoadingSent] = useState(false)
 
   // Bulk toolbar state (lives here now — toolbar rendered in right panel)
   const [showCategoryPicker, setShowCategoryPicker] = useState(false)
@@ -278,7 +283,15 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     setShowCategoryPicker(false)
     setShowFolderPicker(false)
 
-    if (viewId === 'archived') {
+    if (viewId === 'sent') {
+      if (viewMode !== 'sent') {
+        setViewMode('sent')
+        setSelectedEmail(null)
+        setSidebarView('sent')
+        setLoadingSent(true)
+        fetchSentEmails().then(setSentEmails).catch(() => setSentEmails([])).finally(() => setLoadingSent(false))
+      }
+    } else if (viewId === 'archived') {
       if (viewMode !== 'archived') {
         setViewMode('archived')
         setSelectedEmail(null)
@@ -288,7 +301,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         fetchEmails(true, 'archived')
       }
     } else {
-      if (viewMode === 'archived') {
+      if (viewMode === 'archived' || viewMode === 'sent') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setEmails([])
@@ -329,6 +342,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   // ── Filtered emails + counts ────────────────────────────────────────────────
 
   const filteredEmails = useMemo(() => {
+    if (viewMode === 'sent') return sentEmails
     if (viewMode === 'archived') return emails
     switch (sidebarView) {
       case 'student_support': return emails.filter((e) => e.category === 'student_support')
@@ -527,7 +541,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const activeNavId = viewMode === 'archived' ? 'archived' : sidebarView
+  const activeNavId = viewMode === 'sent' ? 'sent' : viewMode === 'archived' ? 'archived' : sidebarView
   const anySelected = selectedIds.size > 0
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -672,7 +686,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         </nav>
 
         {/* ── Main content area ── */}
-        {loading || searching || viewSwitching ? (
+        {loading || searching || viewSwitching || loadingSent ? (
           <div className="email-agent-spinner-area">
             <div className="email-spinner" />
           </div>

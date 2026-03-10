@@ -136,9 +136,16 @@ export default function EmailList({
 
               <div className="email-item-content">
                 <div className="email-item-top">
-                  <span className="sender-name">{email.name}</span>
+                  <span className="sender-name">
+                    {viewMode === 'sent'
+                      ? `To: ${email.to || email.name}`
+                      : email.name}
+                  </span>
                   <div className="email-item-top-right">
-                    {email.messages?.length > 1 && (
+                    {viewMode === 'sent' && email.account && (
+                      <span className="thread-count" title="Sent from">{email.account.split('@')[0]}</span>
+                    )}
+                    {viewMode !== 'sent' && email.messages?.length > 1 && (
                       <span className="thread-count">{email.messages.length}</span>
                     )}
                     <span className="email-item-time">{formatRelativeTime(email.timestamp)}</span>
@@ -146,9 +153,11 @@ export default function EmailList({
                 </div>
                 <div className="email-item-subject">{email.subject}</div>
                 <div className="email-item-bottom">
-                  <span className={CATEGORY_BADGE_CLASS[email.category]}>
-                    {CATEGORY_LABELS[email.category]}
-                  </span>
+                  {viewMode !== 'sent' && (
+                    <span className={CATEGORY_BADGE_CLASS[email.category]}>
+                      {CATEGORY_LABELS[email.category]}
+                    </span>
+                  )}
                   {email.hasDraft && (
                     <span className="draft-indicator">Draft</span>
                   )}

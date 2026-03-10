@@ -1,3 +1,10 @@
+export async function fetchSentEmails() {
+  const response = await fetch('/api/emails/sent')
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || 'Failed to fetch sent emails')
+  return data.sent
+}
+
 export async function fetchThread(id, account) {
   const url = account
     ? `/api/emails/${id}?account=${encodeURIComponent(account)}`

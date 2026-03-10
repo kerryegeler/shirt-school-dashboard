@@ -103,9 +103,12 @@ create table if not exists content_briefs (
   tools        jsonb,
   ideas        jsonb,
   channel_stats jsonb,
+  competitors  jsonb,
   slack_ts     text,
   created_at   timestamptz not null default now()
 );
+-- Run this if the table already exists:
+-- ALTER TABLE content_briefs ADD COLUMN IF NOT EXISTS competitors jsonb;
 alter table content_briefs disable row level security;
 
 -- Generated and saved content ideas
