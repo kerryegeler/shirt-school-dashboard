@@ -457,7 +457,16 @@ function buildThreadObject(thread, account) {
     category,
     folderId,
     hasDraft: savedDraftsCache.has(thread.id),
-    defaultFrom: account,
+    defaultFrom: (() => {
+      // Read the actual To: header of the first inbound email to determine which of our
+      // accounts received it — this is the correct default reply-from address.
+      const firstInbound = messages.find((m) => !m.isOutgoing) || firstMsg
+      const toHeader = firstInbound.to || ''
+      const matched = TARGET_ACCOUNTS.find((acct) => toHeader.toLowerCase().includes(acct.toLowerCase()))
+      const result = matched || account
+      console.log(`[Thread ${thread.id.slice(-8)}] Original recipient: ${result} (To: ${toHeader.slice(0, 80)})`)
+      return result
+    })(),
     status,
     read: !hasUnread,
     subject,
@@ -697,42 +706,59 @@ app.get('/api/emails', requireAuth, async (req, res) => {
 
 app.get('/api/emails/sent', requireAuth, async (req, res) => {
   const connected = connectedAccounts()
-  console.log('[Sent] Fetching sent emails for accounts:', connected)
+  console.log('[Sent] Fetching sent threads for accounts:', connected)
   try {
     const sentByAccount = await Promise.all(
       connected.map(async (account) => {
         try {
           const gmail = google.gmail({ version: 'v1', auth: clients[account] })
-          const listRes = await gmail.users.messages.list({
+
+          // Use threads API (same as inbox) — more reliable than messages API for sent
+          const listRes = await gmail.users.threads.list({
             userId: 'me', maxResults: 20, q: 'in:sent',
           })
-          console.log(`[Sent] ${account}: ${listRes.data.messages?.length ?? 0} messages found`)
-          if (!listRes.data.messages?.length) return []
-          const messages = await Promise.all(
-            listRes.data.messages.map((m) =>
-              gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' }).then((r) => r.data)
+          console.log(`[Sent] ${account}: ${listRes.data.threads?.length ?? 0} threads found`)
+          if (!listRes.data.threads?.length) return []
+
+          const threads = await Promise.all(
+            listRes.data.threads.map((t) =>
+              gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' }).then((r) => r.data)
             )
           )
-          return messages.map((m) => {
-            const obj = buildMessageObject(m, account)
-            if (!obj) { console.log(`[Sent] ${account}: buildMessageObject returned null for ${m.id}`); return null }
+
+          return threads.map((thread) => {
+            const messages = (thread.messages || [])
+              .map((msg) => buildMessageObject(msg, account))
+              .filter(Boolean)
+              .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+
+            if (!messages.length) return null
+
+            // For sent folder: find the last message we actually sent
+            const lastSent = [...messages].reverse().find((m) => m.isOutgoing)
+            if (!lastSent) return null // thread has no outgoing message from us
+
             // Derive recipient name from To header
-            const toHeader = obj.to || ''
+            const toHeader = lastSent.to || ''
             const toMatch = toHeader.match(/^"?(.+?)"?\s*<(.+?)>$/)
-            const toName = toMatch ? toMatch[1].trim() : toHeader.split('@')[0]
+            const toName = toMatch ? toMatch[1].trim() : (toHeader.split('@')[0] || toHeader)
+
             return {
-              id: m.id,
-              threadId: m.threadId,
+              id: thread.id,
+              threadId: thread.id,
               account,
-              subject: obj.subject,
-              to: obj.to,
-              name: toName,
-              from: account,
-              bodyText: obj.bodyText,
-              bodyHtml: obj.bodyHtml,
-              preview: obj.preview,
-              timestamp: obj.timestamp,
+              subject: lastSent.subject || messages[0]?.subject || '(no subject)',
+              to: lastSent.to,
+              name: toName || lastSent.to,
+              from: lastSent.from || account,
+              bodyText: lastSent.bodyText,
+              bodyHtml: lastSent.bodyHtml,
+              preview: lastSent.preview,
+              timestamp: lastSent.timestamp,
               isOutgoing: true,
+              read: true,
+              // Include all messages so the thread detail view works
+              messages,
             }
           }).filter(Boolean)
         } catch (accountErr) {
@@ -1195,7 +1221,7 @@ function confidenceEmoji(c) {
   return { high: '🟢', medium: '🟡', low: '🔴' }[c] || '🟡'
 }
 
-function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false) {
+function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false, emailBody = '') {
   const truncDraft = draft.length > 2800 ? draft.slice(0, 2800) + '…' : draft
   const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
   const capConf = (confidence || 'medium').charAt(0).toUpperCase() + (confidence || 'medium').slice(1)
@@ -1210,8 +1236,26 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
         { type: 'mrkdwn', text: `*Category:* ${thread.category}` },
       ],
     },
-    { type: 'section', text: { type: 'mrkdwn', text: `*Subject:* ${thread.subject}\n*Summary:* ${summary}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*Subject:* ${thread.subject}` } },
   ]
+
+  // Full email body — split into chunks if needed (Slack block limit: 3000 chars)
+  if (emailBody) {
+    const CHUNK = 2900
+    const chunks = []
+    let remaining = emailBody
+    while (remaining.length > 0) {
+      chunks.push(remaining.slice(0, CHUNK))
+      remaining = remaining.slice(CHUNK)
+    }
+    for (let i = 0; i < chunks.length; i++) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: i === 0 ? `*Email:*\n${chunks[i]}` : chunks[i] },
+      })
+    }
+    blocks.push({ type: 'divider' })
+  }
 
   if (checkIfNeeded) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `⚠️ _AI is uncertain whether this email needs a reply. Draft is ready if you approve._` } })
@@ -1336,8 +1380,10 @@ async function updateSlackMessage(notif, status) {
     to: meta.to, subject: meta.subject, category: notif.category,
   }
   const checkIfNeeded = notif.category === 'general' || notif.confidence === 'low'
+  // Only show email body in pending state (approved/sent/skipped just show status)
+  const emailBody = status === 'pending' ? (meta.emailBody || '') : ''
   const blocks = buildSlackBlocks(mockThread, notif.draft || '', notif.summary || '',
-    notif.confidence, notif.confidence_reason, status, checkIfNeeded)
+    notif.confidence, notif.confidence_reason, status, checkIfNeeded, emailBody)
   await slackClient.chat.update({
     channel: notif.channel_id,
     ts: notif.slack_ts,
@@ -1359,7 +1405,15 @@ async function postEmailToSlack(thread) {
 
   const { draft, summary, confidence, confidence_reason } = result
   const checkIfNeeded = thread.category === 'general' || confidence === 'low'
-  const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending', checkIfNeeded)
+
+  // Get the latest inbound email body — strip HTML if needed
+  const latestInbound = (thread.messages || []).filter((m) => !m.isOutgoing).at(-1)
+  const rawBody = latestInbound?.bodyText || latestInbound?.bodyHtml
+    ? (latestInbound.bodyText || stripHtml(latestInbound.bodyHtml || ''))
+    : (thread.bodyText || '')
+  const emailBody = rawBody.trim().slice(0, 12000) // cap at ~4 Slack blocks worth
+
+  const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending', checkIfNeeded, emailBody)
 
   const msg = await slackClient.chat.postMessage({
     channel: process.env.SLACK_CHANNEL_ID,
@@ -1371,6 +1425,7 @@ async function postEmailToSlack(thread) {
     from: thread.from, fromName: thread.name, to: thread.to,
     subject: thread.subject, messageId: thread.messageId,
     threadId: thread.id, defaultFrom: thread.defaultFrom,
+    emailBody, // stored so updateSlackMessage can rebuild blocks with the body
   }
 
   slackNotifiedCache.add(thread.id)
@@ -1394,16 +1449,30 @@ async function postEmailToSlack(thread) {
 }
 
 async function sendApprovedEmail(threadId) {
+  console.log(`[Slack Send] ▶ Starting sendApprovedEmail for thread ${threadId}`)
   let notif = null
   try {
     notif = await getSlackNotification(threadId)
-    if (!notif || notif.status !== 'approved') return
+    console.log(`[Slack Send] Notification: status=${notif?.status}, account=${notif?.account}, draft length=${notif?.draft?.length ?? 0}`)
+
+    if (!notif) {
+      console.error(`[Slack Send] ✗ No notification found for thread ${threadId}`)
+      return
+    }
+    if (notif.status !== 'approved') {
+      console.log(`[Slack Send] Skipping — status is "${notif.status}", not "approved"`)
+      return
+    }
 
     const meta = notif.thread_meta || {}
     const sendFrom = meta.defaultFrom || notif.account
+    console.log(`[Slack Send] Sending from=${sendFrom} to=${meta.from} (${meta.fromName})`)
+    console.log(`[Slack Send] Subject: "${meta.subject}", threadId in meta: ${meta.threadId}`)
+    console.log(`[Slack Send] hasTokens(${sendFrom}): ${hasTokens(sendFrom)}`)
+    console.log(`[Slack Send] Draft preview: "${(notif.draft || '').slice(0, 100)}"`)
 
     if (!hasTokens(sendFrom)) {
-      console.error(`[Slack] Cannot send from ${sendFrom}: not connected`)
+      console.error(`[Slack Send] ✗ No tokens for ${sendFrom}`)
       if (slackClient && notif.channel_id && notif.slack_ts) {
         await slackClient.chat.postMessage({
           channel: notif.channel_id, thread_ts: notif.slack_ts,
@@ -1413,13 +1482,30 @@ async function sendApprovedEmail(threadId) {
       return
     }
 
+    // Explicitly refresh the access token before sending to avoid expiry errors
+    try {
+      const { token } = await clients[sendFrom].getAccessToken()
+      console.log(`[Slack Send] Access token refreshed for ${sendFrom}: ${token ? '✓' : '✗'}`)
+    } catch (tokenErr) {
+      console.error(`[Slack Send] Token refresh error for ${sendFrom}:`, tokenErr.message)
+      // Continue anyway — the Gmail API call may still work with a cached token
+    }
+
     const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
     const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendFrom] })
     const { data: userInfo } = await oauth2.userinfo.get()
+    console.log(`[Slack Send] Sending as: ${userInfo.email} (${userInfo.name})`)
+
+    if (!meta.from) {
+      throw new Error('thread_meta.from (recipient email) is missing — cannot send')
+    }
+    if (!notif.draft) {
+      throw new Error('No draft content found in notification — cannot send')
+    }
 
     const raw = buildReplyRaw({
       from: `${userInfo.name || sendFrom} <${sendFrom}>`,
-      to: `${meta.fromName} <${meta.from}>`,
+      to: meta.fromName ? `${meta.fromName} <${meta.from}>` : meta.from,
       subject: meta.subject || '(no subject)',
       inReplyTo: meta.messageId,
       references: meta.messageId,
@@ -1429,8 +1515,16 @@ async function sendApprovedEmail(threadId) {
     // Only attach threadId when sending from the same account that received the email;
     // cross-account sends don't share threadIds and Gmail returns 404 if you pass one.
     const requestBody = { raw }
-    if (sendFrom === notif.account) requestBody.threadId = meta.threadId
+    if (sendFrom === notif.account) {
+      requestBody.threadId = meta.threadId
+      console.log(`[Slack Send] Attaching threadId: ${meta.threadId}`)
+    } else {
+      console.log(`[Slack Send] Cross-account send (${sendFrom} ≠ ${notif.account}) — omitting threadId`)
+    }
+
+    console.log(`[Slack Send] Calling gmail.users.messages.send...`)
     await gmail.users.messages.send({ userId: 'me', requestBody })
+    console.log(`[Slack Send] ✓ Gmail send successful!`)
 
     approvalTimers.delete(threadId)
 
@@ -1444,20 +1538,21 @@ async function sendApprovedEmail(threadId) {
 
     // Post success confirmation in the Slack thread
     if (slackClient && notif.channel_id && notif.slack_ts) {
-      const recipient = meta.from ? `${meta.fromName || ''} <${meta.from}>`.trim() : 'recipient'
+      const recipient = meta.from ? `${meta.fromName ? meta.fromName + ' ' : ''}<${meta.from}>` : 'recipient'
       await slackClient.chat.postMessage({
         channel: notif.channel_id, thread_ts: notif.slack_ts,
-        text: `✅ Email sent successfully to ${recipient} from ${sendFrom}`,
+        text: `✅ Email sent to ${recipient} from *${sendFrom}*`,
       }).catch(() => {})
     }
 
-    console.log(`[Slack] Auto-sent reply for thread ${threadId}`)
+    console.log(`[Slack Send] ✓ Done — reply sent for thread ${threadId}`)
   } catch (err) {
-    console.error(`[Slack] sendApprovedEmail error for ${threadId}:`, err.message, err.response?.data)
+    const errDetail = err.response?.data ? JSON.stringify(err.response.data) : ''
+    console.error(`[Slack Send] ✗ Error for thread ${threadId}: ${err.message} ${errDetail}`)
     if (slackClient && notif?.channel_id && notif?.slack_ts) {
       await slackClient.chat.postMessage({
         channel: notif.channel_id, thread_ts: notif.slack_ts,
-        text: `⚠️ Failed to send email: ${err.message}\nPlease send manually from the dashboard.`,
+        text: `⚠️ Send failed: \`${err.message}\`\n${errDetail ? `Details: \`${errDetail}\`` : ''}\nPlease send manually from the dashboard.`,
       }).catch(() => {})
     }
   }
@@ -1483,7 +1578,18 @@ async function runSlackPoll() {
       const threads = listRes.data.threads || []
 
       for (const t of threads) {
-        if (slackNotifiedCache.has(t.id)) continue
+        if (slackNotifiedCache.has(t.id)) {
+          // Thread was already notified. If it re-appears in inbox after being sent/skipped,
+          // Gmail moved it back due to a new inbound reply — we should re-notify.
+          try {
+            const notif = await getSlackNotification(t.id)
+            if (notif && ['sent', 'skipped'].includes(notif.status)) {
+              console.log(`[Slack] Thread ${t.id} re-appeared in inbox after being ${notif.status} — checking for new reply`)
+              slackNotifiedCache.delete(t.id) // allow re-processing below
+            }
+          } catch {}
+          if (slackNotifiedCache.has(t.id)) continue
+        }
 
         // Mark in cache immediately to prevent duplicate processing
         slackNotifiedCache.add(t.id)
@@ -1638,23 +1744,57 @@ app.post('/api/slack/actions', async (req, res) => {
     } else if (actionId === 'content_save_idea') {
       // Save a content idea from the daily brief to the Ideas Bank
       const ideaId = threadId // action value is the idea UUID
-      if (supabase) {
-        const { data: existing } = await supabase.from('content_ideas').select('id, status, title').eq('id', ideaId).single()
-        if (existing && existing.status !== 'saved') {
-          await supabase.from('content_ideas').update({ status: 'saved' }).eq('id', ideaId)
-          await updateContentPreferences({ format: 'short', title: existing.title }) // format updated below
-          // Post ephemeral confirmation
+      console.log(`[Slack Ideas] content_save_idea triggered for idea ID: ${ideaId}`)
+      if (!supabase) {
+        console.error('[Slack Ideas] Supabase not configured — cannot save idea')
+      } else {
+        const { data: existing, error: lookupErr } = await supabase
+          .from('content_ideas').select('id, status, title, format').eq('id', ideaId).single()
+        console.log(`[Slack Ideas] Lookup result: ${existing ? `found (status=${existing.status})` : 'not found'} ${lookupErr ? `error=${lookupErr.message}` : ''}`)
+
+        if (!existing) {
+          console.error(`[Slack Ideas] Idea ${ideaId} not found in content_ideas table`)
           if (slackClient && channelId && payload.user?.id) {
             await slackClient.chat.postEphemeral({
               channel: channelId, user: payload.user.id,
-              text: `⭐ Saved: *${existing.title}*`,
+              text: `⚠️ Could not find that idea in the database. It may need to be re-generated.`,
             }).catch(() => {})
           }
-        } else if (existing?.status === 'saved') {
+        } else if (existing.status === 'saved') {
+          console.log(`[Slack Ideas] Already saved: ${existing.title}`)
           if (slackClient && channelId && payload.user?.id) {
             await slackClient.chat.postEphemeral({
-              channel: channelId, user: payload.user.id, text: `Already saved!`,
+              channel: channelId, user: payload.user.id, text: `⭐ Already saved!`,
             }).catch(() => {})
+          }
+        } else {
+          const { error: updateErr } = await supabase.from('content_ideas').update({ status: 'saved' }).eq('id', ideaId)
+          if (updateErr) {
+            console.error(`[Slack Ideas] Update error for ${ideaId}:`, updateErr.message)
+          } else {
+            console.log(`[Slack Ideas] ✓ Saved idea: "${existing.title}"`)
+            await updateContentPreferences({ format: existing.format || 'short', title: existing.title })
+
+            // Update the Slack message to change the button to "✅ Saved"
+            if (slackClient && channelId && payload.message?.ts && payload.message?.blocks) {
+              const updatedBlocks = (payload.message.blocks || []).map((block) => {
+                if (block.accessory?.action_id === 'content_save_idea' && block.accessory?.value === ideaId) {
+                  return { ...block, accessory: { type: 'button', text: { type: 'plain_text', text: '✅ Saved' }, action_id: 'content_idea_saved', value: ideaId } }
+                }
+                return block
+              })
+              await slackClient.chat.update({
+                channel: channelId, ts: payload.message.ts,
+                blocks: updatedBlocks, text: payload.message.text || 'Daily Brief',
+              }).catch((err) => console.error('[Slack Ideas] Failed to update message button:', err.message))
+            }
+
+            if (slackClient && channelId && payload.user?.id) {
+              await slackClient.chat.postEphemeral({
+                channel: channelId, user: payload.user.id,
+                text: `⭐ Saved: *${existing.title}*`,
+              }).catch(() => {})
+            }
           }
         }
       }
@@ -1994,23 +2134,43 @@ async function fetchSerperNews(query) {
   }
 }
 
-async function fetchSerperReddit(subreddit) {
-  if (!process.env.SERPER_API_KEY) return []
-  try {
-    const res = await fetch('https://google.serper.dev/search', {
-      method: 'POST',
-      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: `site:reddit.com/r/${subreddit}`, num: 3, tbs: 'qdr:w' }),
-    })
-    const data = await res.json()
-    return (data.organic || []).slice(0, 3).map((r) => ({
-      title: r.title, subreddit: `r/${subreddit}`,
-      snippet: r.snippet, url: r.link,
-    }))
-  } catch (err) {
-    console.error(`[Content] Serper Reddit error for "${subreddit}":`, err.message)
-    return []
+// Subreddit relevance labels for Kerry's audience
+const SUBREDDIT_RELEVANCE = {
+  printondemand: '🎯 Core audience',
+  shopify: '🛒 Student platform',
+  ecommerce: '📦 Broader niche',
+  Entrepreneur: '💼 Business mindset',
+  ArtificialIntelligence: '🤖 AI tools & trends',
+}
+
+async function fetchRedditPosts(subreddits) {
+  const allPosts = []
+  for (const subreddit of subreddits) {
+    try {
+      const res = await fetch(`https://www.reddit.com/r/${subreddit}/hot.json?limit=10`, {
+        headers: { 'User-Agent': 'ShirtSchoolDashboard/1.0 (content research tool)' },
+      })
+      if (!res.ok) { console.error(`[Content] Reddit r/${subreddit}: HTTP ${res.status}`); continue }
+      const data = await res.json()
+      const posts = (data.data?.children || [])
+        .filter((c) => !c.data.stickied && c.data.num_comments > 0)
+        .map(({ data: p }) => ({
+          title: p.title,
+          subreddit: `r/${subreddit}`,
+          score: p.score,
+          numComments: p.num_comments,
+          url: `https://reddit.com${p.permalink}`,
+          snippet: p.selftext ? p.selftext.replace(/\n+/g, ' ').slice(0, 280) : '',
+          relevance: SUBREDDIT_RELEVANCE[subreddit] || '',
+        }))
+      allPosts.push(...posts)
+      await new Promise((r) => setTimeout(r, 300)) // Rate limit guard
+    } catch (err) {
+      console.error(`[Content] Reddit fetch error for r/${subreddit}:`, err.message)
+    }
   }
+  // Sort by comment count (conversation = content signal)
+  return allPosts.sort((a, b) => b.numComments - a.numComments).slice(0, 8)
 }
 
 async function fetchToolUpdates(topics) {
@@ -2039,25 +2199,56 @@ async function getStoredChannelId() {
   return data?.value || null
 }
 
+function formatDuration(isoDuration) {
+  if (!isoDuration) return ''
+  const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/)
+  if (!match) return ''
+  const h = parseInt(match[1] || 0), m = parseInt(match[2] || 0), s = parseInt(match[3] || 0)
+  if (h) return `${h}h${m}m`
+  if (m) return `${m}:${String(s).padStart(2, '0')}`
+  return `0:${String(s).padStart(2, '0')}`
+}
+
 async function fetchKerryChannelStats(channelIdOverride) {
-  if (!hasTokens('kerry@shirtschool.com')) return null
+  // Prefer YouTube API key (no OAuth dependency); fall back to Kerry's OAuth
+  const ytApiKey = process.env.YOUTUBE_API_KEY
+  const useOAuth = !ytApiKey && hasTokens('kerry@shirtschool.com')
+  if (!ytApiKey && !useOAuth) {
+    console.log('[Content] No YouTube API key or Kerry OAuth — skipping channel stats')
+    return null
+  }
+
   try {
-    const ytKerry = google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
-    const channelId = channelIdOverride || await getStoredChannelId()
+    const ytClient = ytApiKey
+      ? google.youtube({ version: 'v3', auth: ytApiKey })
+      : google.youtube({ version: 'v3', auth: clients['kerry@shirtschool.com'] })
 
-    // Build channel list params: use stored/provided ID, or fall back to mine:true
-    const channelParams = channelId
-      ? { part: ['statistics', 'snippet', 'contentDetails'], id: [channelId] }
-      : { part: ['statistics', 'snippet', 'contentDetails'], mine: true }
+    let channelParams
+    if (channelIdOverride) {
+      channelParams = { part: ['statistics', 'snippet', 'contentDetails'], id: [channelIdOverride] }
+    } else if (ytApiKey) {
+      // Look up @shirtschool handle directly
+      channelParams = { part: ['statistics', 'snippet', 'contentDetails'], forHandle: '@shirtschool' }
+    } else {
+      const storedId = await getStoredChannelId()
+      channelParams = storedId
+        ? { part: ['statistics', 'snippet', 'contentDetails'], id: [storedId] }
+        : { part: ['statistics', 'snippet', 'contentDetails'], mine: true }
+    }
 
-    const channelRes = await ytKerry.channels.list(channelParams)
+    const channelRes = await ytClient.channels.list(channelParams)
     const channel = channelRes.data.items?.[0]
-    if (!channel) return null
+    if (!channel) { console.log('[Content] Kerry channel not found'); return null }
+
+    // Cache channel ID for future use
+    if (supabase && channel.id) {
+      supabase.from('content_config').upsert({ key: 'youtube_channel_id', value: channel.id }).catch(() => {})
+    }
 
     const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
     if (!uploadsPlaylistId) return null
 
-    const playlistRes = await ytKerry.playlistItems.list({
+    const playlistRes = await ytClient.playlistItems.list({
       part: ['contentDetails'], playlistId: uploadsPlaylistId, maxResults: 50,
     })
     const videoIds = (playlistRes.data.items || []).map((i) => i.contentDetails.videoId)
@@ -2065,8 +2256,8 @@ async function fetchKerryChannelStats(channelIdOverride) {
 
     const videoStats = []
     for (let i = 0; i < videoIds.length; i += 50) {
-      const vRes = await ytKerry.videos.list({
-        part: ['statistics', 'snippet'], id: [videoIds.slice(i, i + 50).join(',')],
+      const vRes = await ytClient.videos.list({
+        part: ['statistics', 'snippet', 'contentDetails'], id: [videoIds.slice(i, i + 50).join(',')],
       })
       videoStats.push(...(vRes.data.items || []))
     }
@@ -2079,10 +2270,12 @@ async function fetchKerryChannelStats(channelIdOverride) {
       views: parseInt(v.statistics.viewCount || 0),
       likes: parseInt(v.statistics.likeCount || 0),
       comments: parseInt(v.statistics.commentCount || 0),
+      duration: formatDuration(v.contentDetails?.duration),
     }))
     const byViews = [...videos].sort((a, b) => b.views - a.views)
     const byDate = [...videos].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))
     const avgViews = videos.length ? Math.round(videos.reduce((s, v) => s + v.views, 0) / videos.length) : 0
+    console.log(`[Content] Kerry channel: ${channel.snippet.title}, ${videos.length} videos fetched, avg ${formatNum(avgViews)} views`)
 
     return {
       channelId: channel.id,
@@ -2090,8 +2283,8 @@ async function fetchKerryChannelStats(channelIdOverride) {
       subscriberCount: parseInt(channel.statistics.subscriberCount || 0),
       totalViews: parseInt(channel.statistics.viewCount || 0),
       videoCount: parseInt(channel.statistics.videoCount || 0),
-      topVideos: byViews.slice(0, 10),
-      recentVideos: byDate.slice(0, 10),
+      topVideos: byViews.slice(0, 15),
+      recentVideos: byDate.slice(0, 5),
       avgViews,
     }
   } catch (err) {
@@ -2100,22 +2293,42 @@ async function fetchKerryChannelStats(channelIdOverride) {
   }
 }
 
-async function generateContentIdeas(research, preferences, channelStats) {
+async function generateContentIdeas(research, preferences, channelStats, ideaHistory = []) {
   const { topVideos, topNews, topReddit, toolUpdates, competitorVideos = [] } = research
   let prefContext = ''
   if (preferences?.save_count >= 10) {
     prefContext = `Kerry's content preferences (from his saved ideas):\n- Preferred topics: ${preferences.topic_keywords?.slice(0, 8).join(', ') || 'varies'}\n- Preferred format: ${preferences.preferred_format || 'both'}\nWeight ideas toward these preferences.\n\n`
   }
 
+  // Build dedup context
+  const avoidCtx = ideaHistory.length > 0
+    ? `DO NOT REPEAT — these ideas or very similar ones were recently suggested. Avoid substantially similar topics, angles, or titles:\n${ideaHistory.map((t, i) => `${i + 1}. ${t}`).join('\n')}\n\n`
+    : ''
+
+  const varietyRules = `VARIETY RULES (enforce strictly for this brief):
+• Max 1 list/ranking idea total (e.g. "Top 5...", "Best X for...")
+• Max 1 beginner tutorial total
+• At least 1 idea must be contrarian or counterintuitive (challenge common advice)
+• At least 1 idea must tie to something that happened or trended THIS week specifically
+• Rotate formats — include a mix of: tutorial, case study, opinion/rant, news commentary, tool review, behind-the-scenes, reaction/breakdown
+• Each idea must add a "freshness_score" field: "Evergreen" (works anytime), "Timely" (relevant this month), or "Trending" (happening right now)\n\n`
+
   // Source A (30%): Kerry's top-performing channel videos
   let sourceACtx = ''
   if (channelStats?.topVideos?.length) {
-    const top5 = channelStats.topVideos.slice(0, 5).map((v) => `"${v.title}" (${formatNum(v.views)} views)`).join('\n')
+    const top15 = channelStats.topVideos.slice(0, 15).map((v) =>
+      `"${v.title}" — ${formatNum(v.views)} views${v.duration ? ` (${v.duration})` : ''}`
+    ).join('\n')
+    const recent5 = (channelStats.recentVideos || []).slice(0, 5).map((v) =>
+      `"${v.title}" (${new Date(v.publishedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`
+    ).join('\n')
     sourceACtx = `SOURCE A — MY CHANNEL PERFORMANCE (30% of ideas should draw from this):
-Top-performing videos:
-${top5}
+Top 15 videos by views:
+${top15}
 Channel avg views: ${formatNum(channelStats.avgViews)}
-→ Ideas from this source: identify topics/formats/angles that outperformed, then suggest similar or follow-up videos.\n\n`
+5 most recent uploads (avoid repeating these topics):
+${recent5}
+→ Ideas: identify formats/angles that outperformed avg, suggest follow-ups or unexplored related angles. Do NOT suggest topics already in the recent uploads above.\n\n`
   }
 
   // Source B (35%): Competitor activity — flatten new videos from all channels
@@ -2143,22 +2356,22 @@ No competitor channels configured yet. Use general YouTube trends below instead.
 TOP NEWS:
 ${topNews.slice(0, 4).map((n) => `- ${n.title} (${n.source}): ${n.snippet?.slice(0, 100)}`).join('\n') || 'N/A'}
 
-REDDIT BUZZ:
-${topReddit.slice(0, 3).map((r) => `- [${r.subreddit}] ${r.title}`).join('\n') || 'N/A'}
+REDDIT BUZZ (sorted by comment count — more comments = more engagement):
+${topReddit.slice(0, 5).map((r) => `- [${r.subreddit}] "${r.title}" (${formatNum(r.numComments || 0)} comments)${r.snippet ? `\n  What people are saying: ${r.snippet.slice(0, 150)}` : ''}`).join('\n') || 'N/A'}
 
 TOOL UPDATES:
 ${toolUpdates.slice(0, 3).map((t) => `- ${t.title}: ${t.snippet?.slice(0, 80)}`).join('\n') || 'N/A'}
 → Ideas from this source: translate news/Reddit conversations into YouTube topics Kerry's audience wants.\n\n`
 
   const prompt = `You are a content strategist for "Shirt School" — Kerry Egeler's YouTube channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce. Kerry is male (he/him pronouns).
-${prefContext}Generate fresh content ideas for Kerry using THREE weighted sources below. For each idea, include which source inspired it.
+${prefContext}${avoidCtx}${varietyRules}Generate fresh content ideas for Kerry using THREE weighted sources below. For each idea, include which source inspired it.
 
 ${sourceACtx}${sourceBCtx}${sourceCCtx}GENERAL TRENDING YOUTUBE (supplementary context):
 ${topVideos.slice(0, 4).map((v) => `- "${v.title}" by ${v.channel} (${formatNum(v.views)} views)`).join('\n') || 'N/A'}
 
 Return ONLY valid JSON (no markdown fences) in this exact format:
-{"short_form":[{"title":"...","hook":"opening hook line for the video","why_timely":"why now based on trends above","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...],"long_form":[{"title":"...","outline":"1-paragraph video outline","why_timely":"why now based on trends above","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...]}
-Generate exactly 5 short_form ideas and 3 long_form ideas. Aim for ~2 from Source A, ~2 from Source B, ~2 from Source C for short_form; ~1 each for long_form.`
+{"short_form":[{"title":"...","hook":"opening hook line for the video","why_timely":"why now based on trends above","freshness_score":"Evergreen|Timely|Trending","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...],"long_form":[{"title":"...","outline":"1-paragraph video outline","why_timely":"why now based on trends above","freshness_score":"Evergreen|Timely|Trending","source":"A|B|C","source_note":"brief explanation of which specific data point inspired this"},...]}
+Generate exactly 5 short_form ideas and 3 long_form ideas. Aim for ~2 from Source A, ~2 from Source B, ~2 from Source C for short_form; ~1 each for long_form. Strictly follow all VARIETY RULES above.`
 
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6', max_tokens: 2000,
@@ -2208,9 +2421,16 @@ async function sendBriefToSlack(brief) {
   }
 
   if (brief.reddit?.length) {
-    const lines = brief.reddit.slice(0, 3).map((r, i) =>
-      `${i + 1}. <${r.url}|${r.title}>\n   _${r.subreddit}_`
-    ).join('\n')
+    const lines = brief.reddit.slice(0, 5).map((r, i) => {
+      const meta = [
+        r.subreddit,
+        r.score != null ? `↑${formatNum(r.score)}` : null,
+        r.numComments != null ? `💬 ${formatNum(r.numComments)}` : null,
+        r.relevance || null,
+      ].filter(Boolean).join(' • ')
+      const snippet = r.snippet ? `\n   >${r.snippet.slice(0, 180)}` : ''
+      return `${i + 1}. <${r.url}|${r.title}>\n   _${meta}_${snippet}`
+    }).join('\n\n')
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 Reddit Buzz*\n${lines}` } })
     blocks.push({ type: 'divider' })
   }
@@ -2249,13 +2469,16 @@ async function sendBriefToSlack(brief) {
 
   blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*💡 Content Ideas for Kerry*\n_Click ⭐ Save to add an idea to your Ideas Bank_' } })
 
+  const freshnessEmoji = (s) => ({ Evergreen: '🌿', Timely: '⏰', Trending: '🔥' }[s] || '')
+
   if (brief.ideas?.short_form?.length) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*📱 Short Form (Reels / Shorts)*' } })
     for (const idea of brief.ideas.short_form) {
-      const src = idea.source ? ` • _Source: ${sourceLabel(idea.source)}_` : ''
+      const src = idea.source ? ` • _${sourceLabel(idea.source)}_` : ''
+      const fresh = idea.freshness_score ? ` • ${freshnessEmoji(idea.freshness_score)} ${idea.freshness_score}` : ''
       blocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*${src}\nHook: _${idea.hook}_\n${idea.why_timely}` },
+        text: { type: 'mrkdwn', text: `*${idea.title}*${src}${fresh}\nHook: _${idea.hook}_\n${idea.why_timely}` },
         accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
       })
     }
@@ -2264,10 +2487,11 @@ async function sendBriefToSlack(brief) {
   if (brief.ideas?.long_form?.length) {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*🎬 Long Form (YouTube)*' } })
     for (const idea of brief.ideas.long_form) {
-      const src = idea.source ? ` • _Source: ${sourceLabel(idea.source)}_` : ''
+      const src = idea.source ? ` • _${sourceLabel(idea.source)}_` : ''
+      const fresh = idea.freshness_score ? ` • ${freshnessEmoji(idea.freshness_score)} ${idea.freshness_score}` : ''
       blocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*${src}\n${idea.outline}\n_${idea.why_timely}_` },
+        text: { type: 'mrkdwn', text: `*${idea.title}*${src}${fresh}\n${idea.outline}\n_${idea.why_timely}_` },
         accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
       })
     }
@@ -2307,7 +2531,7 @@ async function runContentBrief({ manual = false } = {}) {
   const [ytResults, newsResults, redditResults, toolResults, channelStats, competitorVideos, seenUrls] = await Promise.all([
     Promise.all(topics.map((t) => fetchYouTubeVideos(t))).then((r) => r.flat()),
     Promise.all(topics.map((t) => fetchSerperNews(t))).then((r) => r.flat()),
-    Promise.all(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur'].map((s) => fetchSerperReddit(s))).then((r) => r.flat()),
+    fetchRedditPosts(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur', 'ArtificialIntelligence']),
     fetchToolUpdates(topics),
     fetchKerryChannelStats(),
     fetchCompetitorVideos(),
@@ -2329,20 +2553,36 @@ async function runContentBrief({ manual = false } = {}) {
 
   const topVideos = dedupeByUrl(ytResults).sort((a, b) => b.views - a.views).slice(0, 5)
   const topNews = dedupeByUrl(newsResults).filter(isFresh).slice(0, 5)
-  const topReddit = dedupeByUrl(redditResults).filter(isFresh).slice(0, 3)
+  const topReddit = dedupeByUrl(redditResults).filter(isFresh).slice(0, 6)
   const freshTools = toolResults.filter(isFresh)
 
   let preferences = null
+  let ideaHistory = []
   if (supabase) {
     const { data } = await supabase.from('content_preferences').select('*').single()
     preferences = data
+
+    // Gather recent idea titles to avoid repetition
+    const [{ data: recentIdeas }, { data: recentBriefs }] = await Promise.all([
+      supabase.from('content_ideas').select('title').order('created_at', { ascending: false }).limit(30),
+      supabase.from('content_briefs').select('ideas').order('run_at', { ascending: false }).limit(14),
+    ])
+    const briefTitles = (recentBriefs || []).flatMap((b) => [
+      ...(b.ideas?.short_form || []).map((i) => i.title),
+      ...(b.ideas?.long_form || []).map((i) => i.title),
+    ])
+    ideaHistory = [...new Set([
+      ...(recentIdeas || []).map((i) => i.title),
+      ...briefTitles,
+    ].filter(Boolean))].slice(0, 50)
+    console.log(`[Content] Loaded ${ideaHistory.length} recent idea titles for dedup`)
   }
 
   let ideas = { short_form: [], long_form: [] }
   try {
     ideas = await generateContentIdeas(
       { topVideos, topNews, topReddit, toolUpdates: freshTools, competitorVideos },
-      preferences, channelStats
+      preferences, channelStats, ideaHistory
     )
   } catch (err) {
     console.error('[Content] Idea generation error:', err.message)
@@ -2368,14 +2608,20 @@ async function runContentBrief({ manual = false } = {}) {
       tools: freshTools, ideas: ideasWithIds, channel_stats: channelStats,
       competitors: competitorVideos,
     })
-    // Store all generated ideas as individual rows for easy lookup
+    // Store all generated ideas as individual rows for easy lookup (required for Slack save button)
     const allIdeas = [...ideasWithIds.short_form, ...ideasWithIds.long_form]
     if (allIdeas.length) {
-      await supabase.from('content_ideas').insert(allIdeas.map((idea) => ({
+      const { error: ideasInsertErr } = await supabase.from('content_ideas').insert(allIdeas.map((idea) => ({
         id: idea.id, brief_id: briefId, format: idea.format, title: idea.title,
         hook: idea.hook || null, outline: idea.outline || null, why_timely: idea.why_timely || null,
+        freshness_score: idea.freshness_score || null,
         status: 'generated', created_at: new Date().toISOString(),
       })))
+      if (ideasInsertErr) {
+        console.error('[Content] ✗ Failed to insert content_ideas:', ideasInsertErr.message)
+      } else {
+        console.log(`[Content] ✓ Inserted ${allIdeas.length} ideas into content_ideas`)
+      }
     }
     if (channelStats) {
       await supabase.from('youtube_channel_stats').insert({
