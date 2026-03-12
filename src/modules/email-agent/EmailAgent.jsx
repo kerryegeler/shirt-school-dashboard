@@ -356,7 +356,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         return emails.filter((e) => !e.folderId)
       }
     }
-  }, [emails, viewMode, sidebarView, folders])
+  }, [emails, sentEmails, viewMode, sidebarView, folders])
 
   const counts = useMemo(() => ({
     inbox:           inboxEmailCount,
