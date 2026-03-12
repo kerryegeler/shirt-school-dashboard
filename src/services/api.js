@@ -1,6 +1,7 @@
 export async function fetchSentEmails() {
   const response = await fetch('/api/emails/sent')
   const data = await response.json()
+  console.log('[Sent] HTTP', response.status, '→', data)
   if (!response.ok) throw new Error(data.error || 'Failed to fetch sent emails')
   return data.sent
 }

@@ -289,7 +289,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setSelectedEmail(null)
         setSidebarView('sent')
         setLoadingSent(true)
-        fetchSentEmails().then(setSentEmails).catch(() => setSentEmails([])).finally(() => setLoadingSent(false))
+        fetchSentEmails().then(setSentEmails).catch((err) => { console.error('[Sent] fetch failed:', err); setSentEmails([]) }).finally(() => setLoadingSent(false))
       }
     } else if (viewId === 'archived') {
       if (viewMode !== 'archived') {
