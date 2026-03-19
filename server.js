@@ -3117,6 +3117,158 @@ app.delete('/api/content/competitors/:id', requireAuth, async (req, res) => {
   res.json({ success: true })
 })
 
+// ─── Content Board API ────────────────────────────────────────────────────────
+
+const CTA_PATH = path.resolve('ctas.md')
+function loadCTAs() {
+  try { return fs.existsSync(CTA_PATH) ? fs.readFileSync(CTA_PATH, 'utf8') : '' } catch { return '' }
+}
+
+const LONG_FORM_COLUMNS = ['idea', 'scripting', 'ready_to_record', 'recorded', 'editing', 'published']
+const SHORT_FORM_COLUMNS = ['idea', 'hook_written', 'ready_to_film', 'published']
+
+async function generateCardSections(title, boardType) {
+  const kerryBrain = loadKerryBrain()
+  const learnedBehaviors = loadLearnedBehaviors()
+  const ctas = loadCTAs()
+
+  const isLong = boardType === 'long_form'
+
+  const systemPrompt = `You are a YouTube content strategist for "Shirt School" — Kerry Egeler's channel about print-on-demand, t-shirt businesses, Shopify, and ecommerce. Kerry is male (he/him pronouns).
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What Kerry Has Learned ---\n${learnedBehaviors}\n---\n` : ''}${ctas ? `--- Kerry's CTA Guidelines ---\n${ctas}\n---\n` : ''}`
+
+  const userPrompt = isLong
+    ? `Generate a full video content plan for this long-form YouTube video: "${title}"
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "hook": "Opening hook line — first 15 seconds of video, must grab attention",
+  "angle": "The unique angle or perspective that makes this video worth watching vs. others",
+  "outline": "Full video outline with timestamps (e.g. 0:00 - Intro, 1:30 - Point 1, etc.). 6-10 sections.",
+  "script_notes": "Key talking points, stats, or examples Kerry should include. Conversational, not formal.",
+  "b_roll": "Suggested B-roll shots or screen recordings to show",
+  "thumbnail_idea": "Thumbnail concept: what text overlay, what Kerry is doing/expressing, color palette",
+  "cta": "Specific end-of-video CTA based on Kerry's CTA guidelines above",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
+}`
+    : `Generate a full content plan for this short-form YouTube video (Shorts): "${title}"
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "hook": "Opening hook — first 3 seconds. Must be a question, bold statement, or pattern interrupt.",
+  "angle": "The unique spin or insight that makes this Short worth watching all the way through",
+  "script": "Full word-for-word short script (15-60 seconds). Punchy, no fluff.",
+  "visual_notes": "How to film this: what Kerry is doing on screen, text overlays, pacing",
+  "cta": "Specific CTA at end of Short based on Kerry's guidelines",
+  "tags": ["tag1", "tag2", "tag3"]
+}`
+
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2000,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  })
+
+  const text = msg.content[0].text.trim()
+  const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+  return JSON.parse(clean)
+}
+
+app.get('/api/content/cards', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ cards: [] })
+  const { data, error } = await supabase.from('content_cards')
+    .select('*').order('position').order('created_at', { ascending: false })
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ cards: data || [] })
+})
+
+app.post('/api/content/cards', requireAuth, async (req, res) => {
+  const { title, boardType, generateAI, ideaData } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title required' })
+  if (!['long_form', 'short_form'].includes(boardType)) return res.status(400).json({ error: 'Invalid boardType' })
+
+  let sections = {}
+  if (generateAI) {
+    try {
+      sections = await generateCardSections(title.trim(), boardType)
+    } catch (err) {
+      console.error('[ContentBoard] AI generation error:', err.message)
+      // Continue without AI sections rather than failing
+    }
+  }
+
+  // Merge any pre-populated fields from ideaData (e.g. hook, angle from content brief)
+  if (ideaData) {
+    if (ideaData.hook && !sections.hook) sections.hook = ideaData.hook
+    if (ideaData.angle && !sections.angle) sections.angle = ideaData.angle
+    if (ideaData.outline && !sections.outline) sections.outline = ideaData.outline
+    if (ideaData.why_timely && !sections.angle) sections.angle = ideaData.why_timely
+  }
+
+  const card = {
+    title: title.trim(),
+    board_type: boardType,
+    board_column: 'idea',
+    sections,
+    notes: '',
+    position: 0,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  if (!supabase) return res.json({ card: { id: crypto.randomUUID(), ...card } })
+
+  const { data, error } = await supabase.from('content_cards').insert(card).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ card: data })
+})
+
+app.patch('/api/content/cards/:id', requireAuth, async (req, res) => {
+  const { column, title, sections, notes, position, published_date } = req.body
+  if (!supabase) return res.json({ success: true })
+  const updates = { updated_at: new Date().toISOString() }
+  if (column !== undefined) updates.board_column = column
+  if (title !== undefined) updates.title = title
+  if (sections !== undefined) updates.sections = sections
+  if (notes !== undefined) updates.notes = notes
+  if (position !== undefined) updates.position = position
+  if (published_date !== undefined) updates.published_date = published_date
+  const { error } = await supabase.from('content_cards').update(updates).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.post('/api/content/cards/:id/regenerate', requireAuth, async (req, res) => {
+  const { field } = req.body // optional: regenerate just one field
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const { data: card, error: fetchErr } = await supabase.from('content_cards').select('*').eq('id', req.params.id).single()
+  if (fetchErr || !card) return res.status(404).json({ error: 'Card not found' })
+
+  try {
+    const newSections = await generateCardSections(card.title, card.board_type)
+    const mergedSections = field
+      ? { ...card.sections, [field]: newSections[field] }
+      : newSections
+
+    const { error } = await supabase.from('content_cards')
+      .update({ sections: mergedSections, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+    if (error) return res.status(500).json({ error: error.message })
+    res.json({ sections: mergedSections })
+  } catch (err) {
+    console.error('[ContentBoard] Regenerate error:', err.message)
+    res.status(500).json({ error: 'AI generation failed' })
+  }
+})
+
+app.delete('/api/content/cards/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('content_cards').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({

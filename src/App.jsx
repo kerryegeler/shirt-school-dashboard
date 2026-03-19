@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar.jsx'
 import EmailAgent from './modules/email-agent/EmailAgent.jsx'
 import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
 import ContentAgent from './modules/content-agent/ContentAgent.jsx'
+import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 
@@ -106,6 +107,7 @@ export default function App() {
           )}
           {activeModule === 'ai-feedback' && <FeedbackTab />}
           {activeModule === 'content-agent' && <ContentAgent />}
+          {activeModule === 'content-board' && <ContentBoard />}
         </main>
       </div>
 

@@ -346,6 +346,51 @@ export async function deleteCompetitor(id) {
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete competitor') }
 }
 
+// ─── Content Board ──────────────────────────────────────────────────────────────
+
+export async function fetchContentCards() {
+  const r = await fetch('/api/content/cards')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch cards')
+  return d.cards
+}
+
+export async function createContentCard({ title, boardType, generateAI, ideaData }) {
+  const r = await fetch('/api/content/cards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, boardType, generateAI, ideaData }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create card')
+  return d.card
+}
+
+export async function updateContentCard(id, updates) {
+  const r = await fetch(`/api/content/cards/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update card') }
+}
+
+export async function deleteContentCard(id) {
+  const r = await fetch(`/api/content/cards/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete card') }
+}
+
+export async function regenerateCardSections(id, field) {
+  const r = await fetch(`/api/content/cards/${id}/regenerate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to regenerate')
+  return d.sections
+}
+
 export async function sendEmail(email, draft, fromAccount, toEmail, isManual = false) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',

@@ -26,10 +26,19 @@ const IconChart = () => (
   </svg>
 )
 
+const IconBoard = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="2" width="4" height="12" rx="1" />
+    <rect x="6" y="2" width="4" height="8" rx="1" />
+    <rect x="11" y="2" width="4" height="10" rx="1" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
   { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: false },
+  { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'sponsorship-tracker', label: 'Sponsorship Tracker', icon: IconChart, comingSoon: true },
 ]
 
