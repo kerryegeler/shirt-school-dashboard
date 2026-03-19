@@ -302,7 +302,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
     setSending(true)
     setSendError('')
     try {
-      await sendEmail(email, draft, effectiveFrom, toEmail)
+      await sendEmail(email, draft, effectiveFrom, toEmail, manualMode)
       setSent(true)
       setConfirmSend(false)
       // Log feedback if user edited the AI draft (not in manual mode)

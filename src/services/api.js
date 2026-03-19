@@ -165,6 +165,22 @@ export async function assignFolder(threadId, folderId) {
   return data
 }
 
+export async function fetchLearnedBehaviors() {
+  const r = await fetch('/api/learned-behaviors')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch learned behaviors')
+  return d // { content, lastUpdated }
+}
+
+export async function saveLearnedBehaviors(content) {
+  const r = await fetch('/api/learned-behaviors', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to save') }
+}
+
 export async function fetchFeedback() {
   const response = await fetch('/api/feedback')
   const data = await response.json()
@@ -330,11 +346,11 @@ export async function deleteCompetitor(id) {
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete competitor') }
 }
 
-export async function sendEmail(email, draft, fromAccount, toEmail) {
+export async function sendEmail(email, draft, fromAccount, toEmail, isManual = false) {
   const response = await fetch('/api/emails/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, draft, fromAccount, toEmail }),
+    body: JSON.stringify({ email, draft, fromAccount, toEmail, isManual }),
   })
 
   const data = await response.json()

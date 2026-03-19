@@ -891,7 +891,7 @@ app.get('/api/emails/:messageId/attachment/:attachmentId', requireAuth, async (r
 })
 
 app.post('/api/emails/send', requireAuth, async (req, res) => {
-  const { email, draft, fromAccount, toEmail } = req.body
+  const { email, draft, fromAccount, toEmail, isManual } = req.body
   if (!email || !draft) return res.status(400).json({ error: 'Missing email or draft' })
 
   const sendFrom =
@@ -927,6 +927,22 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
     if (sendFrom === email.account) requestBody.threadId = email.threadId
     await gmail.users.messages.send({ userId: 'me', requestBody })
     res.json({ success: true, sentFrom: sendFrom })
+
+    // Save manual replies to learned-behaviors.md
+    if (isManual) {
+      const manualReplyData = {
+        subject: email.subject, body: draft, category: email.category,
+        from_account: sendFrom, recipient: recipientAddress,
+      }
+      if (supabase) {
+        supabase.from('manual_replies').insert({
+          thread_id: email.id, subject: email.subject, body: draft,
+          category: email.category, from_account: sendFrom,
+          recipient: recipientAddress, created_at: new Date().toISOString(),
+        }).catch((err) => console.error('[Learning] manual_replies insert error:', err.message))
+      }
+      processManualReply(manualReplyData)
+    }
   } catch (error) {
     console.error('Gmail send error:', error.message, error.response?.data)
     const isAuthError = error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials') || error.response?.status === 401
@@ -1138,12 +1154,145 @@ app.delete('/api/drafts/:threadId', requireAuth, async (req, res) => {
 // ─── AI routes ────────────────────────────────────────────────────────────────
 
 const KERRY_BRAIN_PATH = path.resolve('kerry-brain.md')
+const LEARNED_BEHAVIORS_PATH = path.resolve('learned-behaviors.md')
 
 function loadKerryBrain() {
   try {
     if (fs.existsSync(KERRY_BRAIN_PATH)) return fs.readFileSync(KERRY_BRAIN_PATH, 'utf8')
   } catch {}
   return ''
+}
+
+function loadLearnedBehaviors() {
+  try {
+    if (fs.existsSync(LEARNED_BEHAVIORS_PATH)) return fs.readFileSync(LEARNED_BEHAVIORS_PATH, 'utf8')
+  } catch {}
+  return ''
+}
+
+function saveLearnedBehaviors(content) {
+  try {
+    fs.writeFileSync(LEARNED_BEHAVIORS_PATH, content, 'utf8')
+  } catch (err) {
+    console.error('[Learning] Failed to write learned-behaviors.md:', err.message)
+  }
+}
+
+// Insert a new line at the top of a section's content (right after the header)
+function insertUnderSection(content, sectionHeader, newLine) {
+  const lines = content.split('\n')
+  const headerIdx = lines.findIndex((l) => l.trim() === sectionHeader.trim())
+  if (headerIdx === -1) return content
+  let insertAt = headerIdx + 1
+  // Skip one blank line immediately after the header
+  if (insertAt < lines.length && lines[insertAt].trim() === '') insertAt++
+  lines.splice(insertAt, 0, newLine)
+  return lines.join('\n')
+}
+
+// Use Claude Haiku to extract a learning insight from a feedback entry and write it to learned-behaviors.md
+async function processLearningEntry(entry) {
+  if (!process.env.ANTHROPIC_API_KEY || !entry?.action) return
+  if (entry.action === 'skipped') return // nothing useful to learn from skips
+
+  try {
+    let insight = null
+
+    if (entry.action === 'edited') {
+      const resp = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{
+          role: 'user',
+          content: `Kerry edited an AI email draft. Extract brief actionable insights about what Kerry prefers.
+
+Category: ${entry.category}
+Original AI draft: "${(entry.original_draft || '').slice(0, 400)}"
+Kerry's final version: "${(entry.final_version || '').slice(0, 400)}"
+Diff: ${entry.diff_summary || 'unknown'}
+
+Return ONLY valid JSON (no markdown fences):
+{"correction": "one bullet (- ...) describing what Kerry changed", "phrase_added": "a distinctive phrase Kerry added or null", "phrase_removed": "a distinctive phrase Kerry removed or null", "category_note": "a category-specific preference if evident or null"}`,
+        }],
+      })
+      const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+      insight = JSON.parse(clean)
+
+    } else if (entry.action === 'approved') {
+      const resp = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: `Kerry approved this AI email draft without any edits. Extract a tone/style pattern.
+
+Category: ${entry.category}
+Approved draft: "${(entry.original_draft || '').slice(0, 400)}"
+
+Return ONLY valid JSON: {"tone_note": "one bullet (- ...) about the approved style or tone"}`,
+        }],
+      })
+      const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+      insight = JSON.parse(clean)
+    }
+
+    if (!insight) return
+
+    let content = loadLearnedBehaviors()
+    const now = new Date().toISOString()
+    content = content.replace(/^Last updated: .*/m, `Last updated: ${now}`)
+
+    const CATEGORY_SECTION = { student_support: '### Student Support', sponsorship: '### Sponsorship', general: '### General' }
+
+    if (entry.action === 'edited') {
+      if (insight.correction) content = insertUnderSection(content, '## Common Corrections Kerry Makes', insight.correction)
+      if (insight.phrase_added) content = insertUnderSection(content, '## Phrases Kerry Uses', `- "${insight.phrase_added}"`)
+      if (insight.phrase_removed) content = insertUnderSection(content, '## Phrases to Avoid', `- "${insight.phrase_removed}"`)
+      const catSection = CATEGORY_SECTION[entry.category]
+      if (insight.category_note && catSection) content = insertUnderSection(content, catSection, insight.category_note)
+    } else if (entry.action === 'approved' && insight.tone_note) {
+      content = insertUnderSection(content, '## Tone and Voice Patterns', insight.tone_note)
+    }
+
+    saveLearnedBehaviors(content)
+    console.log(`[Learning] ✓ Processed ${entry.action} entry (${entry.category}) → learned-behaviors.md updated`)
+  } catch (err) {
+    console.error('[Learning] Failed to process entry:', err.message)
+  }
+}
+
+// Append a manual reply to the Recent Manual Reply Examples section (keep last 10)
+function processManualReply({ subject, body, category, from_account, recipient }) {
+  try {
+    let content = loadLearnedBehaviors()
+    const now = new Date().toISOString()
+    content = content.replace(/^Last updated: .*/m, `Last updated: ${now}`)
+
+    const block = `---\n*${now.split('T')[0]} · ${category || 'general'} · from: ${from_account}*\nSubject: ${subject || '(no subject)'}\nTo: ${recipient || 'unknown'}\n\n${(body || '').slice(0, 500)}`
+
+    content = insertUnderSection(content, '## Recent Manual Reply Examples', block)
+
+    // Trim to 10 examples: count '---' separators in the section and remove oldest
+    const lines = content.split('\n')
+    const secIdx = lines.findIndex((l) => l.trim() === '## Recent Manual Reply Examples')
+    if (secIdx !== -1) {
+      const nextSec = lines.findIndex((l, i) => i > secIdx && /^## /.test(l))
+      const secEnd = nextSec === -1 ? lines.length : nextSec
+      const secLines = lines.slice(secIdx + 1, secEnd)
+      const separators = secLines.reduce((acc, l, i) => (l.trim() === '---' ? [...acc, i] : acc), [])
+      if (separators.length > 10) {
+        // Remove lines from the 11th separator to the end of section
+        const removeFrom = secIdx + 1 + separators[10]
+        lines.splice(removeFrom, secEnd - removeFrom)
+        content = lines.join('\n')
+      }
+    }
+
+    saveLearnedBehaviors(content)
+    console.log(`[Learning] ✓ Manual reply saved → learned-behaviors.md updated`)
+  } catch (err) {
+    console.error('[Learning] Failed to process manual reply:', err.message)
+  }
 }
 
 const PERSONA_NAMES = {
@@ -1168,6 +1317,7 @@ function computeDiffSummary(original, final) {
 
 async function generateDraftForSlack(thread) {
   const kerryBrain = loadKerryBrain()
+  const learnedBehaviors = loadLearnedBehaviors()
   const category = thread.category
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
@@ -1191,7 +1341,7 @@ async function generateDraftForSlack(thread) {
   }
 
   const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}${feedbackContext}
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
 
@@ -1219,6 +1369,30 @@ Return JSON only.`
 
 function confidenceEmoji(c) {
   return { high: '🟢', medium: '🟡', low: '🔴' }[c] || '🟡'
+}
+
+// Strip quoted reply history from an email body — return only what the sender actually wrote
+function stripEmailQuotes(text) {
+  if (!text) return ''
+  const lines = text.split('\n')
+  const result = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // Stop at common quoted-text markers
+    if (
+      /^>/.test(trimmed) ||                         // > quoted line
+      /^On .{10,} wrote:/.test(trimmed) ||          // "On [date] ... wrote:"
+      /^-{5,}/.test(trimmed) ||                     // ----- separator
+      /^_{5,}/.test(trimmed) ||                     // _____ separator
+      /^From:\s+\S+/.test(trimmed) ||               // Forwarded "From:" block
+      /^Sent:\s+\S+/.test(trimmed) ||               // Forwarded "Sent:" block
+      /^(写道|schrieb|écrit):/.test(trimmed)        // Non-English quoted headers
+    ) break
+    result.push(line)
+  }
+  // Trim trailing blank lines
+  while (result.length && !result[result.length - 1].trim()) result.pop()
+  return result.join('\n').trim()
 }
 
 function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false, emailBody = '') {
@@ -1406,12 +1580,12 @@ async function postEmailToSlack(thread) {
   const { draft, summary, confidence, confidence_reason } = result
   const checkIfNeeded = thread.category === 'general' || confidence === 'low'
 
-  // Get the latest inbound email body — strip HTML if needed
+  // Get ONLY the latest inbound message body — strip HTML and quoted history
   const latestInbound = (thread.messages || []).filter((m) => !m.isOutgoing).at(-1)
-  const rawBody = latestInbound?.bodyText || latestInbound?.bodyHtml
+  const rawBody = latestInbound
     ? (latestInbound.bodyText || stripHtml(latestInbound.bodyHtml || ''))
     : (thread.bodyText || '')
-  const emailBody = rawBody.trim().slice(0, 12000) // cap at ~4 Slack blocks worth
+  const emailBody = stripEmailQuotes(rawBody).slice(0, 12000)
 
   const blocks = buildSlackBlocks(thread, draft, summary, confidence, confidence_reason, 'pending', checkIfNeeded, emailBody)
 
@@ -1634,6 +1808,7 @@ app.post('/api/generate-reply', async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured' })
 
   const kerryBrain = loadKerryBrain()
+  const learnedBehaviors = loadLearnedBehaviors()
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
   // Fetch last 10 feedback examples for this category to improve drafts
@@ -1657,7 +1832,7 @@ app.post('/api/generate-reply', async (req, res) => {
 
   const systemPrompt = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
-${kerryBrain ? `--- BEGIN CONTEXT ---\n${kerryBrain}\n--- END CONTEXT ---\n` : ''}
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}
 The email you are replying to is categorized as: ${category}
 ${feedbackContext}
 
@@ -1709,13 +1884,27 @@ app.post('/api/slack/actions', async (req, res) => {
   if (!threadId) return
 
   try {
+    console.log(`[Slack Action] Received: action_id=${actionId}, threadId=${threadId}, slackTs=${slackTs}`)
+
     const notif = await getSlackNotification(threadId)
+    console.log(`[Slack Action] Notification lookup: ${notif ? `found (status=${notif.status}, account=${notif.account})` : 'NOT FOUND'}`)
 
     if (actionId === 'approve_email') {
+      console.log(`[Slack Action] ✅ Approve action — threadId=${threadId}`)
+      if (!notif) {
+        console.error(`[Slack Action] ✗ Cannot approve — notification not found for thread ${threadId}`)
+        if (slackClient && channelId && slackTs) {
+          await slackClient.chat.postMessage({ channel: channelId, thread_ts: slackTs,
+            text: `⚠️ Approve failed: could not find this email in the database. It may have expired. Please send manually from the dashboard.`,
+          }).catch(() => {})
+        }
+        return
+      }
       if (supabase) {
-        await supabase.from('slack_notifications')
+        const { error: updateErr } = await supabase.from('slack_notifications')
           .update({ status: 'approved', approved_at: new Date().toISOString() })
           .eq('thread_id', threadId)
+        console.log(`[Slack Action] Supabase status→approved: ${updateErr ? `ERROR: ${updateErr.message}` : '✓'}`)
         // Log feedback: draft approved without changes
         if (notif?.draft) {
           await supabase.from('ai_feedback').insert({
@@ -1726,8 +1915,14 @@ app.post('/api/slack/actions', async (req, res) => {
           }).catch(() => {})
         }
       }
+      console.log(`[Slack Action] Scheduling send in 5 minutes for thread ${threadId}`)
       scheduleApprovalSend(threadId, 5 * 60 * 1000)
-      if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'approved')
+      await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'approved')
+      if (slackClient && channelId && slackTs) {
+        await slackClient.chat.postMessage({ channel: channelId, thread_ts: slackTs,
+          text: `⏳ Approved! Reply will be sent in 5 minutes. Press *Cancel Send* to stop it.`,
+        }).catch(() => {})
+      }
 
     } else if (actionId === 'cancel_email') {
       if (approvalTimers.has(threadId)) {
@@ -1882,26 +2077,33 @@ app.post('/api/slack/events', async (req, res) => {
   const event = body.event
   if (!event) return
 
+  // Log ALL incoming events so we can verify the Events API is working
+  console.log(`[Slack Events] Incoming: type=${event.type}, subtype=${event.subtype || 'none'}, bot_id=${event.bot_id || 'none'}, thread_ts=${event.thread_ts || 'none'}, ts=${event.ts}, text="${(event.text || '').slice(0, 60)}"`)
+
   // Only handle plain messages that are replies in a thread (not bot messages, not edits)
-  if (event.type !== 'message') return
-  if (event.subtype) return          // ignore message_changed, message_deleted, bot_message subtypes
-  if (event.bot_id) return           // ignore bot messages
-  if (!event.thread_ts) return       // must be a thread reply
-  if (event.thread_ts === event.ts) return // top-level message, not a reply
+  if (event.type !== 'message') { console.log(`[Slack Events] Ignoring: not a message event`); return }
+  if (event.subtype) { console.log(`[Slack Events] Ignoring: has subtype=${event.subtype}`); return }
+  if (event.bot_id) { console.log(`[Slack Events] Ignoring: bot message`); return }
+  if (!event.thread_ts) { console.log(`[Slack Events] Ignoring: not a thread reply`); return }
+  if (event.thread_ts === event.ts) { console.log(`[Slack Events] Ignoring: top-level message`); return }
 
   const instruction = (event.text || '').trim()
   if (!instruction) return
 
+  console.log(`[Slack Events] Thread reply from user ${event.user}: "${instruction.slice(0, 80)}" — looking up thread_ts=${event.thread_ts}`)
+
   // Look up if this thread_ts matches a Slack notification
-  if (!supabase) return
-  const { data: notif } = await supabase
+  if (!supabase) { console.error('[Slack Events] Supabase not configured'); return }
+  const { data: notif, error: notifErr } = await supabase
     .from('slack_notifications')
     .select('*')
     .eq('slack_ts', event.thread_ts)
     .single()
 
+  console.log(`[Slack Events] Notification lookup: ${notif ? `found (thread_id=${notif.thread_id}, status=${notif.status})` : `NOT FOUND${notifErr ? ` — ${notifErr.message}` : ''}`}`)
+
   if (!notif) return
-  if (!['pending', 'approved'].includes(notif.status)) return // don't edit already-sent/skipped
+  if (!['pending', 'approved'].includes(notif.status)) { console.log(`[Slack Events] Ignoring: status=${notif.status}`); return }
 
   const currentDraft = notif.draft
   if (!currentDraft) return
@@ -1995,6 +2197,25 @@ app.post('/api/feedback', requireAuth, async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
   }
   res.json({ success: true, diffSummary })
+
+  // Async: process this entry into learned-behaviors.md (don't await — fire and forget)
+  processLearningEntry({ category, original_draft: originalDraft, final_version: finalVersion, diff_summary: diffSummary, action: action || 'edited' })
+    .catch((err) => console.error('[Learning] processLearningEntry error:', err.message))
+})
+
+// ─── Learned behaviors endpoints ──────────────────────────────────────────────
+
+app.get('/api/learned-behaviors', requireAuth, (req, res) => {
+  const content = loadLearnedBehaviors()
+  const lastUpdated = content.match(/^Last updated: (.+)$/m)?.[1] || null
+  res.json({ content, lastUpdated })
+})
+
+app.put('/api/learned-behaviors', requireAuth, (req, res) => {
+  const { content } = req.body
+  if (typeof content !== 'string') return res.status(400).json({ error: 'Content must be a string' })
+  saveLearnedBehaviors(content)
+  res.json({ success: true })
 })
 
 app.patch('/api/feedback/:id/notes', requireAuth, async (req, res) => {
@@ -2638,27 +2859,37 @@ async function runContentBrief({ manual = false } = {}) {
   return briefData
 }
 
-// Compute ms until next 8 AM America/Chicago
+// Compute ms until next brief time: Mon/Wed/Fri at 8 AM America/Chicago
 function msUntilNextBriefTime() {
+  const BRIEF_DAYS = new Set([1, 3, 5]) // Mon=1, Wed=3, Fri=5
   const now = new Date()
-  const checkCentralHour = (d) => parseInt(
-    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false })
-      .formatToParts(d).find((p) => p.type === 'hour')?.value || '0'
-  )
-  // Try UTC 13 and 14 (covers both CDT=UTC-5 and CST=UTC-6) for today + tomorrow
-  for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
-    for (const utcHour of [13, 14]) {
+
+  const getCTparts = (d) => {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', hour: 'numeric', weekday: 'short', hour12: false,
+      }).formatToParts(d).map(({ type, value }) => [type, value])
+    )
+    return {
+      hour: parseInt(parts.hour || '0'),
+      dayNum: ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 })[parts.weekday] ?? -1,
+    }
+  }
+
+  // Search the next 8 days for the next Mon/Wed/Fri at 8 AM CT
+  for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
+    for (const utcHour of [13, 14]) { // 8 AM CT = UTC-5 (CDT) or UTC-6 (CST)
       const candidate = new Date(now)
       candidate.setUTCDate(candidate.getUTCDate() + dayOffset)
       candidate.setUTCHours(utcHour, 0, 0, 0)
-      if (checkCentralHour(candidate) === 8 && candidate > now) return candidate.getTime() - now.getTime()
+      if (candidate <= now) continue
+      const { hour, dayNum } = getCTparts(candidate)
+      if (hour === 8 && BRIEF_DAYS.has(dayNum)) return candidate.getTime() - now.getTime()
     }
   }
-  // Fallback: 14:00 UTC tomorrow
-  const fallback = new Date(now)
-  fallback.setUTCDate(fallback.getUTCDate() + 1)
-  fallback.setUTCHours(14, 0, 0, 0)
-  return fallback.getTime() - now.getTime()
+
+  // Fallback: 24 hours
+  return 24 * 60 * 60 * 1000
 }
 
 function startContentBriefScheduler() {

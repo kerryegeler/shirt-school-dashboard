@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchFeedback, updateFeedbackNotes } from '../../services/api.js'
+import { fetchFeedback, updateFeedbackNotes, fetchLearnedBehaviors, saveLearnedBehaviors } from '../../services/api.js'
 import './FeedbackTab.css'
 
 const CATEGORY_LABELS = {
@@ -109,6 +109,15 @@ export default function FeedbackTab() {
   const [filter, setFilter] = useState('all')
   const [actionFilter, setActionFilter] = useState('all')
 
+  // Learned behaviors state
+  const [learnedContent, setLearnedContent] = useState('')
+  const [learnedLastUpdated, setLearnedLastUpdated] = useState(null)
+  const [loadingLearned, setLoadingLearned] = useState(true)
+  const [editingLearned, setEditingLearned] = useState(false)
+  const [learnedDraft, setLearnedDraft] = useState('')
+  const [savingLearned, setSavingLearned] = useState(false)
+  const [learnedError, setLearnedError] = useState('')
+
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -122,7 +131,31 @@ export default function FeedbackTab() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  const loadLearned = useCallback(async () => {
+    setLoadingLearned(true)
+    try {
+      const d = await fetchLearnedBehaviors()
+      setLearnedContent(d.content || '')
+      setLearnedLastUpdated(d.lastUpdated)
+      setLearnedDraft(d.content || '')
+    } catch {}
+    setLoadingLearned(false)
+  }, [])
+
+  useEffect(() => { load(); loadLearned() }, [load, loadLearned])
+
+  async function handleSaveLearned() {
+    setSavingLearned(true)
+    setLearnedError('')
+    try {
+      await saveLearnedBehaviors(learnedDraft)
+      setLearnedContent(learnedDraft)
+      setEditingLearned(false)
+    } catch (err) {
+      setLearnedError(err.message)
+    }
+    setSavingLearned(false)
+  }
 
   async function handleSaveNotes(id, notes) {
     await updateFeedbackNotes(id, notes)
@@ -231,6 +264,55 @@ export default function FeedbackTab() {
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+
+      {/* ─── What the Agent Has Learned ─── */}
+      <div className="fb-learned-wrap">
+        <div className="fb-learned-header">
+          <div className="fb-learned-title-row">
+            <h3 className="fb-learned-title">What the Agent Has Learned</h3>
+            {learnedLastUpdated && (
+              <span className="fb-learned-timestamp">
+                Last learned: {new Date(learnedLastUpdated).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-ghost" onClick={loadLearned} disabled={loadingLearned} title="Refresh">
+              <IconRefresh />
+            </button>
+            {!editingLearned && (
+              <button className="btn btn-secondary" onClick={() => { setEditingLearned(true); setLearnedDraft(learnedContent) }}>
+                Edit
+              </button>
+            )}
+          </div>
+        </div>
+
+        {loadingLearned ? (
+          <div className="fb-spinner" style={{ margin: '24px auto' }} />
+        ) : editingLearned ? (
+          <div className="fb-learned-edit">
+            <textarea
+              className="fb-learned-textarea"
+              value={learnedDraft}
+              onChange={(e) => setLearnedDraft(e.target.value)}
+              rows={24}
+              spellCheck={false}
+            />
+            {learnedError && <div className="fb-error" style={{ marginTop: 8 }}>{learnedError}</div>}
+            <div className="fb-learned-edit-actions">
+              <button className="btn btn-primary" onClick={handleSaveLearned} disabled={savingLearned}>
+                {savingLearned ? 'Saving…' : 'Save'}
+              </button>
+              <button className="btn btn-ghost" onClick={() => { setEditingLearned(false); setLearnedDraft(learnedContent) }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <pre className="fb-learned-content">{learnedContent || 'No learned behaviors yet. Edit and send emails to start building the learning file.'}</pre>
         )}
       </div>
     </div>
