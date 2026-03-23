@@ -1197,75 +1197,155 @@ function insertUnderSection(content, sectionHeader, newLine) {
   return lines.join('\n')
 }
 
-// Use Claude Haiku to extract a learning insight from a feedback entry and write it to learned-behaviors.md
-async function processLearningEntry(entry) {
-  if (!process.env.ANTHROPIC_API_KEY || !entry?.action) return
-  if (entry.action === 'skipped') return // nothing useful to learn from skips
+// ─── Batch learning: query ALL ai_feedback and rewrite learned-behaviors.md ───
+let learningRunning = false
+async function processAIFeedbackIntoLearning() {
+  if (!supabase || !process.env.ANTHROPIC_API_KEY) {
+    console.log('[Learning] Skipped — supabase or ANTHROPIC_API_KEY not configured')
+    return
+  }
+  if (learningRunning) {
+    console.log('[Learning] Already running, skipping duplicate call')
+    return
+  }
+  learningRunning = true
+  console.log('[Learning] Starting batch processing of all ai_feedback entries...')
 
   try {
-    let insight = null
-
-    if (entry.action === 'edited') {
-      const resp = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
-        messages: [{
-          role: 'user',
-          content: `Kerry edited an AI email draft. Extract brief actionable insights about what Kerry prefers.
-
-Category: ${entry.category}
-Original AI draft: "${(entry.original_draft || '').slice(0, 400)}"
-Kerry's final version: "${(entry.final_version || '').slice(0, 400)}"
-Diff: ${entry.diff_summary || 'unknown'}
-
-Return ONLY valid JSON (no markdown fences):
-{"correction": "one bullet (- ...) describing what Kerry changed", "phrase_added": "a distinctive phrase Kerry added or null", "phrase_removed": "a distinctive phrase Kerry removed or null", "category_note": "a category-specific preference if evident or null"}`,
-        }],
-      })
-      const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-      insight = JSON.parse(clean)
-
-    } else if (entry.action === 'approved') {
-      const resp = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 200,
-        messages: [{
-          role: 'user',
-          content: `Kerry approved this AI email draft without any edits. Extract a tone/style pattern.
-
-Category: ${entry.category}
-Approved draft: "${(entry.original_draft || '').slice(0, 400)}"
-
-Return ONLY valid JSON: {"tone_note": "one bullet (- ...) about the approved style or tone"}`,
-        }],
-      })
-      const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-      insight = JSON.parse(clean)
+    const { data: rows, error } = await supabase.from('ai_feedback')
+      .select('*')
+      .order('created_at', { ascending: true })
+    if (error) throw new Error(`Supabase query failed: ${error.message}`)
+    if (!rows?.length) {
+      console.log('[Learning] No ai_feedback entries found — nothing to learn from')
+      learningRunning = false
+      return
     }
 
-    if (!insight) return
+    const edited = rows.filter((r) => r.action === 'edited')
+    const approved = rows.filter((r) => r.action === 'approved')
+    const skipped = rows.filter((r) => r.action === 'skipped')
 
-    let content = loadLearnedBehaviors()
+    console.log(`[Learning] Found ${rows.length} entries: ${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped`)
+
+    // Build a digest of all entries for Claude to analyze in one shot
+    const editedSamples = edited.slice(-30).map((e, i) => {
+      return `Entry ${i + 1} [${e.category}]:\nAI draft: "${(e.original_draft || '').slice(0, 300)}"\nKerry's version: "${(e.final_version || '').slice(0, 300)}"\nDiff: ${e.diff_summary || 'unknown'}`
+    }).join('\n\n---\n\n')
+
+    const approvedSamples = approved.slice(-15).map((e, i) => {
+      return `Approved ${i + 1} [${e.category}]: "${(e.original_draft || '').slice(0, 300)}"`
+    }).join('\n\n')
+
+    const skippedSamples = skipped.slice(-10).map((e, i) => {
+      return `Skipped ${i + 1} [${e.category}]: "${(e.original_draft || '').slice(0, 200)}"`
+    }).join('\n\n')
+
+    const prompt = `You are analyzing Kerry Egeler's email feedback history to extract concrete writing preferences.
+
+EDITED DRAFTS (Kerry changed these before sending):
+${editedSamples || '(none)'}
+
+APPROVED DRAFTS (Kerry sent these as-is — these are good examples):
+${approvedSamples || '(none)'}
+
+SKIPPED DRAFTS (Kerry rejected these entirely):
+${skippedSamples || '(none)'}
+
+Analyze ALL entries above and produce a learning document. Be SPECIFIC — use real examples from the data. Do not be vague.
+
+Return ONLY valid JSON (no markdown fences) with these fields:
+{
+  "tone_patterns": ["list of specific tone/voice observations, e.g. 'Kerry uses casual greetings like Hey [Name] instead of Dear or Hello'"],
+  "common_corrections": ["list of specific changes Kerry consistently makes, e.g. 'Kerry removes I hope this helps at the end of emails'"],
+  "phrases_kerry_uses": ["exact phrases Kerry adds or prefers"],
+  "phrases_to_avoid": ["exact phrases Kerry consistently removes or changes"],
+  "student_support_prefs": ["preferences specific to student support emails"],
+  "sponsorship_prefs": ["preferences specific to sponsorship emails"],
+  "general_prefs": ["preferences specific to general emails"],
+  "skipped_patterns": ["patterns in drafts Kerry rejected entirely"],
+  "word_count_note": "observation about Kerry's preferred email length vs AI draft length",
+  "overall_style": "2-3 sentence summary of Kerry's email style"
+}`
+
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+    const analysis = JSON.parse(clean)
+
+    // Build the learned-behaviors.md content
     const now = new Date().toISOString()
-    content = content.replace(/^Last updated: .*/m, `Last updated: ${now}`)
+    const fmt = (arr) => (arr || []).filter(Boolean).map((s) => `- ${s}`).join('\n') || '*(no data yet)*'
 
-    const CATEGORY_SECTION = { student_support: '### Student Support', sponsorship: '### Sponsorship', general: '### General' }
+    const content = `# Learned Behaviors - Kerry Egeler Email Agent
+Last updated: ${now}
+Total feedback entries analyzed: ${rows.length} (${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped)
 
-    if (entry.action === 'edited') {
-      if (insight.correction) content = insertUnderSection(content, '## Common Corrections Kerry Makes', insight.correction)
-      if (insight.phrase_added) content = insertUnderSection(content, '## Phrases Kerry Uses', `- "${insight.phrase_added}"`)
-      if (insight.phrase_removed) content = insertUnderSection(content, '## Phrases to Avoid', `- "${insight.phrase_removed}"`)
-      const catSection = CATEGORY_SECTION[entry.category]
-      if (insight.category_note && catSection) content = insertUnderSection(content, catSection, insight.category_note)
-    } else if (entry.action === 'approved' && insight.tone_note) {
-      content = insertUnderSection(content, '## Tone and Voice Patterns', insight.tone_note)
+${analysis.overall_style || ''}
+${analysis.word_count_note ? `\n${analysis.word_count_note}` : ''}
+
+## Tone and Voice Patterns
+${fmt(analysis.tone_patterns)}
+
+## Common Corrections Kerry Makes
+${fmt(analysis.common_corrections)}
+
+## Phrases Kerry Uses
+${fmt(analysis.phrases_kerry_uses)}
+
+## Phrases to Avoid
+${fmt(analysis.phrases_to_avoid)}
+
+## Per-Category Preferences
+
+### Student Support
+${fmt(analysis.student_support_prefs)}
+
+### Sponsorship
+${fmt(analysis.sponsorship_prefs)}
+
+### General
+${fmt(analysis.general_prefs)}
+
+## Patterns Kerry Rejects (Skipped Drafts)
+${fmt(analysis.skipped_patterns)}
+
+## Recent Manual Reply Examples
+*(Last 10 emails Kerry wrote manually — used as style examples)*
+`
+
+    // Preserve any manual reply examples from the old file
+    const oldContent = loadLearnedBehaviors()
+    const manualSection = oldContent.split('## Recent Manual Reply Examples')[1]
+    let finalContent = content
+    if (manualSection && manualSection.trim() !== '*(Last 10 emails Kerry wrote manually — used as style examples)*') {
+      finalContent = content.replace(
+        '## Recent Manual Reply Examples\n*(Last 10 emails Kerry wrote manually — used as style examples)*',
+        '## Recent Manual Reply Examples' + manualSection
+      )
     }
 
-    saveLearnedBehaviors(content)
-    console.log(`[Learning] ✓ Processed ${entry.action} entry (${entry.category}) → learned-behaviors.md updated`)
+    saveLearnedBehaviors(finalContent)
+    console.log(`[Learning] ✓ Batch processing complete — learned-behaviors.md rewritten (${finalContent.length} bytes) from ${rows.length} entries`)
+
   } catch (err) {
-    console.error('[Learning] Failed to process entry:', err.message)
+    console.error('[Learning] Batch processing failed:', err.message)
+  } finally {
+    learningRunning = false
   }
+}
+
+// Trigger batch learning after each new feedback entry (debounced)
+let learningDebounceTimer = null
+function triggerLearningUpdate() {
+  if (learningDebounceTimer) clearTimeout(learningDebounceTimer)
+  learningDebounceTimer = setTimeout(() => {
+    processAIFeedbackIntoLearning().catch((err) => console.error('[Learning] triggerLearningUpdate error:', err.message))
+  }, 5000) // Wait 5s in case multiple entries come in quick succession
 }
 
 // Append a manual reply to the Recent Manual Reply Examples section (keep last 10)
@@ -1325,6 +1405,7 @@ function computeDiffSummary(original, final) {
 async function generateDraftForSlack(thread) {
   const kerryBrain = loadKerryBrain()
   const learnedBehaviors = loadLearnedBehaviors()
+  console.log(`[Slack Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
   const category = thread.category
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
@@ -1817,6 +1898,7 @@ app.post('/api/generate-reply', async (req, res) => {
 
   const kerryBrain = loadKerryBrain()
   const learnedBehaviors = loadLearnedBehaviors()
+  console.log(`[Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
   const personaName = PERSONA_NAMES[category] || 'Kerry'
 
   // Fetch last 10 feedback examples for this category to improve drafts
@@ -2206,9 +2288,8 @@ app.post('/api/feedback', requireAuth, async (req, res) => {
   }
   res.json({ success: true, diffSummary })
 
-  // Async: process this entry into learned-behaviors.md (don't await — fire and forget)
-  processLearningEntry({ category, original_draft: originalDraft, final_version: finalVersion, diff_summary: diffSummary, action: action || 'edited' })
-    .catch((err) => console.error('[Learning] processLearningEntry error:', err.message))
+  // Trigger batch re-analysis of all feedback (debounced)
+  triggerLearningUpdate()
 })
 
 // ─── Learned behaviors endpoints ──────────────────────────────────────────────
@@ -3410,6 +3491,9 @@ async function init() {
   setInterval(() => {
     console.log('[Memory]', JSON.stringify(process.memoryUsage()))
   }, 10 * 60 * 1000)
+
+  // Run learning loop on startup — populate learned-behaviors.md from existing feedback
+  processAIFeedbackIntoLearning().catch((err) => console.error('[Learning] Startup batch error:', err.message))
 
   startSlackPolling()
   startContentBriefScheduler()

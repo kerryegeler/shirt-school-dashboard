@@ -272,7 +272,7 @@ export default function FeedbackTab() {
         <div className="fb-learned-header">
           <div className="fb-learned-title-row">
             <h3 className="fb-learned-title">What the Agent Has Learned</h3>
-            {learnedLastUpdated && (
+            {learnedLastUpdated && !isNaN(new Date(learnedLastUpdated).getTime()) && (
               <span className="fb-learned-timestamp">
                 Last learned: {new Date(learnedLastUpdated).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
               </span>
