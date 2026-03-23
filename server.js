@@ -9,6 +9,13 @@ import { WebClient as SlackWebClient } from '@slack/web-api'
 import fs from 'fs'
 import path from 'path'
 
+// ─── Global error guards — prevent a single failed call from crashing the server ─
+process.on('uncaughtException', (err) => {
+  console.error('[CRASH GUARD] Uncaught Exception:', err)
+})
+process.on('unhandledRejection', (err) => {
+  console.error('[CRASH GUARD] Unhandled Rejection:', err)
+})
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -1797,8 +1804,9 @@ function startSlackPolling() {
     return
   }
   console.log('  Slack: approval workflow enabled, polling every 15 min')
-  setTimeout(runSlackPoll, 15_000) // First run 15s after startup
-  setInterval(runSlackPoll, 15 * 60 * 1000)
+  const safeRunSlackPoll = () => runSlackPoll().catch((err) => console.error('[Slack] Poll uncaught error:', err.message))
+  setTimeout(safeRunSlackPoll, 15_000) // First run 15s after startup
+  setInterval(safeRunSlackPoll, 15 * 60 * 1000)
 }
 
 
@@ -2898,12 +2906,16 @@ function startContentBriefScheduler() {
     return
   }
   const scheduleNext = () => {
-    const delay = msUntilNextBriefTime()
+    let delay
+    try { delay = msUntilNextBriefTime() } catch (err) {
+      console.error('[Content] msUntilNextBriefTime error:', err.message)
+      delay = 24 * 60 * 60 * 1000
+    }
     const target = new Date(Date.now() + delay)
     console.log(`  Content Agent: next brief at ${target.toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT`)
-    setTimeout(() => {
-      runContentBrief().catch((err) => console.error('[Content] Scheduled brief error:', err.message))
-      scheduleNext()
+    setTimeout(async () => {
+      try { await runContentBrief() } catch (err) { console.error('[Content] Scheduled brief error:', err.message) }
+      try { scheduleNext() } catch (err) { console.error('[Content] scheduleNext error:', err.message) }
     }, delay)
   }
   scheduleNext()
@@ -3273,6 +3285,8 @@ app.delete('/api/content/cards/:id', requireAuth, async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
     apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
     gmailConfigured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     connectedAccounts: connectedAccounts(),
@@ -3391,6 +3405,11 @@ async function init() {
   console.log('  kerry-brain.md:', fs.existsSync(KERRY_BRAIN_PATH) ? 'loaded' : 'NOT FOUND — AI replies will have no context')
   const connected = connectedAccounts()
   console.log('  Connected:', connected.length ? connected.join(', ') : 'none')
+
+  // Memory usage monitor — logs every 10 minutes so Railway logs show any leaks
+  setInterval(() => {
+    console.log('[Memory]', JSON.stringify(process.memoryUsage()))
+  }, 10 * 60 * 1000)
 
   startSlackPolling()
   startContentBriefScheduler()
