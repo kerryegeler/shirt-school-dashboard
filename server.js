@@ -912,8 +912,11 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
 
   // Use override recipient if provided, otherwise fall back to the original sender
   const recipientAddress = toEmail?.trim() || email.from
+  if (!recipientAddress) return res.status(400).json({ error: 'No recipient address available' })
   const isOverride = toEmail?.trim() && toEmail.trim() !== email.from
-  const toField = isOverride ? recipientAddress : `${email.name} <${email.from}>`
+  // Quote the display name to handle commas, dots, and special chars (RFC 5322)
+  const safeName = email.name ? `"${email.name.replace(/["\\]/g, '')}"` : ''
+  const toField = isOverride ? recipientAddress : (safeName ? `${safeName} <${email.from}>` : recipientAddress)
 
   const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
   try {
