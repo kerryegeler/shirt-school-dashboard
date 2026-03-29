@@ -392,13 +392,32 @@ export async function regenerateCardSections(id, field) {
 }
 
 export async function sendEmail(email, draft, fromAccount, toEmail, isManual = false) {
+  // Only send the fields the server needs — avoid sending the full message history
+  const trimmedEmail = {
+    id: email.id,
+    threadId: email.threadId,
+    messageId: email.messageId,
+    from: email.from,
+    to: email.to,
+    name: email.name,
+    subject: email.subject,
+    account: email.account,
+    category: email.category,
+  }
   const response = await fetch('/api/emails/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, draft, fromAccount, toEmail, isManual }),
+    body: JSON.stringify({ email: trimmedEmail, draft, fromAccount, toEmail, isManual }),
   })
 
-  const data = await response.json()
+  let data
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    data = await response.json()
+  } else {
+    const text = await response.text()
+    data = { error: response.status === 413 ? 'Request too large. Try shortening your draft.' : `Server error (${response.status})` }
+  }
 
   if (!response.ok) {
     throw new Error(data.error || 'Failed to send email')

@@ -21,8 +21,8 @@ const app = express()
 const PORT = process.env.PORT || 3001
 
 app.use(cors())
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: '5mb' }))
+app.use(express.urlencoded({ extended: true, limit: '5mb' }))
 
 // ─── Dashboard session (signed HTTP-only cookie, no DB needed) ────────────────
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production'
