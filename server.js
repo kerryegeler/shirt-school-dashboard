@@ -1181,10 +1181,43 @@ function loadLearnedBehaviors() {
 }
 
 function saveLearnedBehaviors(content) {
+  // Write to local file (in-process cache)
   try {
     fs.writeFileSync(LEARNED_BEHAVIORS_PATH, content, 'utf8')
   } catch (err) {
     console.error('[Learning] Failed to write learned-behaviors.md:', err.message)
+  }
+  // Persist to Supabase so it survives deploys
+  if (supabase) {
+    supabase.from('app_settings')
+      .upsert({ key: 'learned_behaviors', value: content, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .then(({ error }) => {
+        if (error) console.error('[Learning] Failed to persist to Supabase:', error.message)
+      })
+  }
+}
+
+// On startup: load learned behaviors from Supabase into local file so deploy doesn't wipe it
+async function syncLearnedBehaviorsFromDB() {
+  if (!supabase) return
+  try {
+    const { data, error } = await supabase.from('app_settings')
+      .select('value').eq('key', 'learned_behaviors').single()
+    if (error || !data?.value) {
+      console.log('[Learning] No saved learned behaviors in Supabase — will build from feedback')
+      return
+    }
+    // Check if the DB version is newer than the committed placeholder
+    const dbContent = data.value
+    const isPlaceholder = dbContent.includes('(not yet updated)') || !dbContent.includes('Last updated:')
+    if (isPlaceholder) {
+      console.log('[Learning] Supabase has placeholder content — will rebuild from feedback')
+      return
+    }
+    fs.writeFileSync(LEARNED_BEHAVIORS_PATH, dbContent, 'utf8')
+    console.log(`[Learning] ✓ Restored learned-behaviors.md from Supabase (${dbContent.length} bytes)`)
+  } catch (err) {
+    console.error('[Learning] Failed to sync from Supabase:', err.message)
   }
 }
 
@@ -3495,7 +3528,8 @@ async function init() {
     console.log('[Memory]', JSON.stringify(process.memoryUsage()))
   }, 10 * 60 * 1000)
 
-  // Run learning loop on startup — populate learned-behaviors.md from existing feedback
+  // Restore learned behaviors from Supabase (survives Railway deploys), then rebuild if needed
+  await syncLearnedBehaviorsFromDB()
   processAIFeedbackIntoLearning().catch((err) => console.error('[Learning] Startup batch error:', err.message))
 
   startSlackPolling()
