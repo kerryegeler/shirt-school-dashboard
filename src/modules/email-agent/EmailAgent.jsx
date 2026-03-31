@@ -161,6 +161,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const [showCategoryPicker, setShowCategoryPicker] = useState(false)
   const [showFolderPicker, setShowFolderPicker] = useState(false)
 
+  // Mobile nav sheet
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
   // ── Fetch emails ────────────────────────────────────────────────────────────
 
   const fetchEmails = useCallback(async (isRefresh = false, mode = null, pageTokens = null) => {
@@ -275,6 +278,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   // ── View switching ──────────────────────────────────────────────────────────
 
   function handleNavClick(viewId) {
+    setMobileNavOpen(false)
     const wasSearchMode = isSearchMode
     if (isSearchMode) { setIsSearchMode(false); setSearchQuery('') }
     setNextPageTokens(null)
@@ -558,11 +562,28 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   const activeNavId = viewMode === 'sent' ? 'sent' : viewMode === 'archived' ? 'archived' : sidebarView
   const anySelected = selectedIds.size > 0
 
+  const activeNavLabel = useMemo(() => {
+    if (viewMode === 'sent') return 'Sent'
+    if (viewMode === 'archived') return 'Archived'
+    return NAV_CATEGORY_VIEWS.find((v) => v.id === sidebarView)?.label
+      || NAV_STATUS_VIEWS.find((v) => v.id === sidebarView)?.label
+      || folders.find((f) => f.id === sidebarView)?.name
+      || 'Inbox'
+  }, [viewMode, sidebarView, folders])
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="email-agent">
       <div className="page-header">
+        {/* Hamburger — mobile only */}
+        <button className="mobile-nav-toggle" onClick={() => setMobileNavOpen(true)} title="Navigate">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M2 4h12M2 8h12M2 12h12" />
+          </svg>
+        </button>
+        <span className="mobile-nav-active-label">{activeNavLabel}{activeNavId === 'inbox' && counts.inbox > 0 ? ` (${counts.inbox})` : ''}</span>
+
         <div className="page-header-icon"><IconEmail /></div>
         <div>
           <div className="page-header-title">Email Agent</div>
@@ -731,6 +752,67 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
               searchQuery={searchQuery}
             />
 
+            {/* ── Bulk toolbar — outside detail wrapper so it's visible on mobile list view ── */}
+            {anySelected && (
+              <div className="bulk-toolbar-bar">
+                {/* Category picker popover */}
+                {showCategoryPicker && (
+                  <div className="bulk-picker-popover">
+                    {CATEGORY_OPTIONS.map(({ value, label }) => (
+                      <button key={value} className="bulk-picker-option" onClick={() => { setShowCategoryPicker(false); handleBulkReclassify(value) }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Folder picker popover */}
+                {showFolderPicker && (
+                  <div className="bulk-picker-popover">
+                    {folders.length === 0 && <span className="bulk-picker-empty">No folders yet</span>}
+                    {folders.map((f) => (
+                      <button key={f.id} className="bulk-picker-option" onClick={() => { setShowFolderPicker(false); handleBulkAssignFolder(f.id) }}>
+                        {f.name}
+                      </button>
+                    ))}
+                    <button className="bulk-picker-option bulk-picker-remove" onClick={() => { setShowFolderPicker(false); handleBulkAssignFolder(null) }}>
+                      Remove from folder
+                    </button>
+                  </div>
+                )}
+
+                <span className="bulk-bar-count">{selectedIds.size} selected</span>
+                <div className="bulk-bar-divider" />
+                <button className="bulk-bar-btn" title="Mark as read" onClick={() => handleBulkMarkRead(true)}>
+                  <IconMarkRead />
+                </button>
+                <button className="bulk-bar-btn" title="Mark as unread" onClick={() => handleBulkMarkRead(false)}>
+                  <IconMarkUnread />
+                </button>
+                <button
+                  className={`bulk-bar-btn ${showCategoryPicker ? 'bulk-bar-btn--active' : ''}`}
+                  title="Reclassify"
+                  onClick={() => { setShowCategoryPicker((v) => !v); setShowFolderPicker(false) }}
+                >
+                  <IconTag />
+                </button>
+                <button
+                  className={`bulk-bar-btn ${showFolderPicker ? 'bulk-bar-btn--active' : ''}`}
+                  title="Move to folder"
+                  onClick={() => { setShowFolderPicker((v) => !v); setShowCategoryPicker(false) }}
+                >
+                  <IconFolderBulk />
+                </button>
+                <button className="bulk-bar-btn" title="Archive selected" onClick={handleBulkArchive}>
+                  <IconArchiveBulk />
+                </button>
+                <div className="bulk-bar-divider" />
+                <button className="bulk-bar-btn bulk-bar-btn--close" title="Clear selection" onClick={clearSelection}>
+                  <IconClose />
+                </button>
+              </div>
+            )}
+
             <div className={`email-detail-wrapper ${selectedEmail ? 'mobile-open' : ''}`}>
               {/* ── Mobile back button ── */}
               <div className="mobile-back-bar">
@@ -738,72 +820,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M10 3L4 8l6 5" />
                   </svg>
-                  Inbox
+                  Back
                 </button>
               </div>
-
-              {/* ── Bulk toolbar (top of right panel) ── */}
-              {anySelected && (
-                <div className="bulk-toolbar-bar">
-                  {/* Category picker popover */}
-                  {showCategoryPicker && (
-                    <div className="bulk-picker-popover">
-                      {CATEGORY_OPTIONS.map(({ value, label }) => (
-                        <button key={value} className="bulk-picker-option" onClick={() => { setShowCategoryPicker(false); handleBulkReclassify(value) }}>
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Folder picker popover */}
-                  {showFolderPicker && (
-                    <div className="bulk-picker-popover">
-                      {folders.length === 0 && <span className="bulk-picker-empty">No folders yet</span>}
-                      {folders.map((f) => (
-                        <button key={f.id} className="bulk-picker-option" onClick={() => { setShowFolderPicker(false); handleBulkAssignFolder(f.id) }}>
-                          {f.name}
-                        </button>
-                      ))}
-                      <button className="bulk-picker-option bulk-picker-remove" onClick={() => { setShowFolderPicker(false); handleBulkAssignFolder(null) }}>
-                        Remove from folder
-                      </button>
-                    </div>
-                  )}
-
-                  <span className="bulk-bar-count">{selectedIds.size} selected</span>
-                  <div className="bulk-bar-divider" />
-
-                  <button className="bulk-bar-btn" title="Mark as read" onClick={() => handleBulkMarkRead(true)}>
-                    <IconMarkRead />
-                  </button>
-                  <button className="bulk-bar-btn" title="Mark as unread" onClick={() => handleBulkMarkRead(false)}>
-                    <IconMarkUnread />
-                  </button>
-                  <button
-                    className={`bulk-bar-btn ${showCategoryPicker ? 'bulk-bar-btn--active' : ''}`}
-                    title="Reclassify"
-                    onClick={() => { setShowCategoryPicker((v) => !v); setShowFolderPicker(false) }}
-                  >
-                    <IconTag />
-                  </button>
-                  <button
-                    className={`bulk-bar-btn ${showFolderPicker ? 'bulk-bar-btn--active' : ''}`}
-                    title="Move to folder"
-                    onClick={() => { setShowFolderPicker((v) => !v); setShowCategoryPicker(false) }}
-                  >
-                    <IconFolderBulk />
-                  </button>
-                  <button className="bulk-bar-btn" title="Archive selected" onClick={handleBulkArchive}>
-                    <IconArchiveBulk />
-                  </button>
-
-                  <div className="bulk-bar-divider" />
-                  <button className="bulk-bar-btn bulk-bar-btn--close" title="Clear selection" onClick={clearSelection}>
-                    <IconClose />
-                  </button>
-                </div>
-              )}
 
               {selectedEmail ? (
                 <EmailDetail
@@ -830,6 +849,78 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
           </>
         )}
       </div>
+
+      {/* ── Mobile nav sheet ── */}
+      {mobileNavOpen && (
+        <div className="mobile-nav-overlay" onClick={() => setMobileNavOpen(false)}>
+          <div className="mobile-nav-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="mobile-nav-sheet-header">
+              <span className="mobile-nav-sheet-title">Go to</span>
+              <button className="mobile-nav-close-btn" onClick={() => setMobileNavOpen(false)}>
+                <IconClose />
+              </button>
+            </div>
+
+            <div className="mobile-nav-sheet-section">
+              <div className="email-nav-section-label">Status</div>
+              {NAV_STATUS_VIEWS.map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
+                  onClick={() => handleNavClick(id)}
+                >
+                  {label}
+                  {id === 'inbox' && counts.inbox > 0 && (
+                    <span className="email-nav-count">{counts.inbox}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            <div className="mobile-nav-sheet-section">
+              <div className="email-nav-section-label">Category</div>
+              {NAV_CATEGORY_VIEWS.map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`email-nav-item ${activeNavId === id ? 'active' : ''}`}
+                  onClick={() => handleNavClick(id)}
+                >
+                  {label}
+                  {counts[id] > 0 && (
+                    <span className="email-nav-count">{counts[id]}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            <div className="mobile-nav-sheet-section">
+              <div className="email-nav-section-label email-nav-section-label--folders">
+                <span>Folders</span>
+                <button
+                  className="folder-add-btn"
+                  title="New folder"
+                  onClick={() => { setAddingFolder(true); setNewFolderName(''); setMobileNavOpen(false) }}
+                >
+                  <IconPlus />
+                </button>
+              </div>
+              {folders.length === 0 && (
+                <div style={{ padding: '6px 14px 10px', fontSize: 12, color: 'var(--text-tertiary)' }}>No folders yet</div>
+              )}
+              {folders.map((folder) => (
+                <div
+                  key={folder.id}
+                  className={`email-nav-item folder-nav-item ${activeNavId === folder.id ? 'active' : ''}`}
+                  onClick={() => handleNavClick(folder.id)}
+                >
+                  <span className="folder-nav-icon"><IconFolder /></span>
+                  <span className="folder-nav-name">{folder.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

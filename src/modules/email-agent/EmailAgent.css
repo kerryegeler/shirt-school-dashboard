@@ -11,6 +11,7 @@
   flex: 1;
   display: flex;
   overflow: hidden;
+  position: relative; /* needed for absolutely-positioned bulk toolbar */
 }
 
 .email-detail-wrapper {
@@ -1492,9 +1493,14 @@
 .email-search-clear svg { width: 11px; height: 11px; }
 .email-search-clear:hover { color: var(--text-primary); }
 
-/* ─── Bulk toolbar bar (top of right panel) ──────────────────────── */
+/* ─── Bulk toolbar bar ───────────────────────────────────────────── */
+/* Desktop: overlays the top of the right panel area.                  */
+/* email-nav(200px) + email-list-panel(310px) = 510px                  */
 .bulk-toolbar-bar {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 510px;
+  right: 0;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1502,7 +1508,7 @@
   height: 46px;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
+  z-index: 20;
 }
 
 .bulk-bar-count {
@@ -1546,7 +1552,7 @@
 .bulk-picker-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 80px;
+  left: 120px;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
@@ -1660,6 +1666,19 @@
   flex-shrink: 0;
 }
 
+/* ─── Mobile hamburger toggle (hidden on desktop) ────────────────── */
+.mobile-nav-toggle {
+  display: none;
+}
+.mobile-nav-active-label {
+  display: none;
+}
+
+/* ─── Mobile nav bottom sheet ────────────────────────────────────── */
+.mobile-nav-overlay {
+  display: none;
+}
+
 /* ─── Mobile back button (hidden on desktop) ─────────────────────── */
 .mobile-back-bar {
   display: none;
@@ -1667,7 +1686,7 @@
 
 /* ─── Mobile responsive ──────────────────────────────────────────── */
 @media (max-width: 768px) {
-  /* Hide the email nav sidebar — navigation is via bottom tab */
+  /* Hide the desktop nav sidebar — replaced by hamburger sheet */
   .email-nav {
     display: none;
   }
@@ -1679,7 +1698,13 @@
     flex-shrink: 1;
   }
 
-  /* Detail wrapper is an off-screen sliding overlay */
+  /* email-agent-body: relative for overlays */
+  .email-agent-body {
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Detail wrapper: slides in from the right as a full-screen overlay */
   .email-detail-wrapper {
     position: absolute;
     top: 0;
@@ -1692,15 +1717,162 @@
     background: var(--bg-app);
   }
 
-  /* Slide in when email is selected */
   .email-detail-wrapper.mobile-open {
     transform: translateX(0);
   }
 
-  /* email-agent-body needs relative positioning for the overlay */
-  .email-agent-body {
-    position: relative;
+  /* Bulk toolbar: fixed above the bottom tab bar on mobile */
+  .bulk-toolbar-bar {
+    position: fixed;
+    bottom: 56px; /* height of mobile-tab-bar */
+    left: 0;
+    right: 0;
+    top: auto;
+    height: auto;
+    min-height: 52px;
+    padding: 0 12px;
+    z-index: 90;
+    border-top: 1px solid var(--border-strong);
+    border-bottom: none;
+    border-radius: 0;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  /* Bulk picker pops UP on mobile since toolbar is at bottom */
+  .bulk-picker-popover {
+    top: auto;
+    bottom: calc(100% + 6px);
+    left: 0;
+  }
+
+  /* Hamburger toggle: visible on mobile */
+  .mobile-nav-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    flex-shrink: 0;
+    border-radius: var(--radius-sm);
+    padding: 0;
+  }
+
+  .mobile-nav-toggle svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* Active view label next to hamburger */
+  .mobile-nav-active-label {
+    display: block;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+    flex-shrink: 0;
+  }
+
+  /* Hide desktop page header elements on mobile */
+  .page-header-icon {
+    display: none;
+  }
+
+  .email-search-form {
+    display: none;
+  }
+
+  .btn-archive-all {
+    display: none;
+  }
+
+  /* Mobile nav bottom sheet overlay */
+  .mobile-nav-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 200;
+    animation: fadeIn 0.15s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  .mobile-nav-sheet {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border-radius: 16px 16px 0 0;
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+    max-height: 80vh;
+    overflow-y: auto;
+    animation: slideUp 0.22s ease;
+  }
+
+  @keyframes slideUp {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
+  }
+
+  .mobile-nav-sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 16px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mobile-nav-sheet-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .mobile-nav-close-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--bg-elevated);
+    border: none;
+    border-radius: 50%;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .mobile-nav-close-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .mobile-nav-sheet-section {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mobile-nav-sheet-section:last-child {
+    border-bottom: none;
+  }
+
+  /* Make nav items in the sheet bigger for touch */
+  .mobile-nav-sheet .email-nav-item {
+    padding: 12px 16px;
+    font-size: 15px;
+    min-height: 48px;
   }
 
   /* Mobile back bar */
@@ -1709,7 +1881,7 @@
     align-items: center;
     gap: 8px;
     padding: 0 14px;
-    height: 44px;
+    height: 48px;
     background: var(--bg-card);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
@@ -1719,50 +1891,68 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 15px;
+    font-weight: 600;
     color: var(--orange);
     background: none;
     border: none;
     cursor: pointer;
-    padding: 6px 0;
+    padding: 8px 0;
     min-height: 44px;
   }
 
   .mobile-back-btn svg {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
   }
 
-  /* Header: hide search form on mobile (too cramped) */
-  .email-search-form {
-    display: none;
+  /* Email detail panel: extra bottom padding so buttons clear the tab bar */
+  .email-detail-panel {
+    padding-bottom: max(80px, calc(56px + env(safe-area-inset-bottom)));
   }
 
-  /* Header right: hide archive-all label, keep refresh icon only */
-  .btn-archive-all {
-    display: none;
+  /* Draft section: reduce side padding, add bottom breathing room */
+  .draft-section {
+    padding: 0 14px 24px;
   }
 
-  /* Draft textarea font size (iOS zoom prevention handled globally) */
-  .draft-textarea {
-    min-height: 180px;
+  /* Draft header buttons: bigger tap targets */
+  .draft-actions-top {
+    gap: 8px;
   }
 
-  /* Draft footer: stack on narrow screens */
+  .draft-actions-top .btn {
+    min-height: 44px;
+    padding: 0 16px;
+  }
+
+  /* Draft footer: stack into two rows so all buttons are reachable */
   .draft-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+
+  .draft-footer > div {
     flex-wrap: wrap;
     gap: 8px;
   }
 
-  /* Send confirm bar: wrap */
-  .send-confirm-bar {
-    flex-wrap: wrap;
+  .draft-footer .btn {
+    min-height: 44px;
+    flex: 1;
+    justify-content: center;
   }
 
-  /* Draft section: reduce side padding */
-  .draft-section {
-    padding: 0 14px 20px;
+  /* Send confirm bar: stack on mobile */
+  .send-confirm-bar {
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    gap: 8px;
+  }
+
+  .send-confirm-bar .btn {
+    min-height: 44px;
   }
 
   .detail-header {
@@ -1773,26 +1963,28 @@
     padding: 14px 14px;
   }
 
-  /* Detail subject smaller on mobile */
   .detail-subject {
     font-size: 16px;
   }
 
-  /* Thread message preview truncation */
   .thread-msg-preview-collapsed {
-    max-width: 160px;
+    max-width: 140px;
   }
 
-  /* Bulk toolbar bar: ensure it fits */
-  .bulk-toolbar-bar {
-    padding: 0 8px;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-  }
-
-  /* Email list item: slightly more touch-friendly */
+  /* Email list: touch-friendly rows */
   .email-list-item {
     padding: 14px 12px;
+    min-height: 72px;
+  }
+
+  /* Archive button always visible on mobile (no hover) */
+  .email-archive-btn {
+    opacity: 1;
+  }
+
+  /* Draft textarea */
+  .draft-textarea {
+    min-height: 160px;
   }
 }
 
