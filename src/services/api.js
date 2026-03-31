@@ -430,3 +430,110 @@ export async function triggerLearningRebuild() {
   const r = await fetch('/api/learning/run', { method: 'POST' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed') }
 }
+
+// ─── Challenge Launcher ───────────────────────────────────────────────────────
+
+export async function fetchChallenges() {
+  const r = await fetch('/api/challenges')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch challenges')
+  return d.challenges
+}
+
+export async function fetchChallenge(id) {
+  const r = await fetch(`/api/challenges/${id}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch challenge')
+  return d.challenge
+}
+
+export async function createChallenge({ name, startDate, mainSessionTime, vipSessionTime, timezone }) {
+  const r = await fetch('/api/challenges', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, startDate, mainSessionTime, vipSessionTime, timezone }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create challenge')
+  return d.challenge
+}
+
+export async function launchChallenge(id, testMode = false) {
+  const r = await fetch(`/api/challenges/${id}/launch`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ testMode }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to launch challenge')
+  return d
+}
+
+export async function deleteChallenge(id) {
+  const r = await fetch(`/api/challenges/${id}`, { method: 'DELETE' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to delete challenge')
+  return d
+}
+
+export async function fetchChallengeTemplates() {
+  const r = await fetch('/api/challenge-templates')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch templates')
+  return d.templates
+}
+
+export async function createChallengeTemplate(template) {
+  const r = await fetch('/api/challenge-templates', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(template),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create template')
+  return d.template
+}
+
+export async function updateChallengeTemplate(id, updates) {
+  const r = await fetch(`/api/challenge-templates/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to update template')
+  return d.template
+}
+
+export async function deleteChallengeTemplate(id) {
+  const r = await fetch(`/api/challenge-templates/${id}`, { method: 'DELETE' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to delete template')
+  return d
+}
+
+export async function reorderChallengeTemplates(order) {
+  const r = await fetch('/api/challenge-templates/reorder', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to reorder')
+  return d
+}
+
+export async function fetchKitBroadcastsForImport() {
+  const r = await fetch('/api/challenge-templates/import-from-kit', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ broadcastIds: [] }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch Kit broadcasts')
+  return d.broadcasts
+}
+
+export async function importChallengeTemplatesFromKit(broadcastIds) {
+  const r = await fetch('/api/challenge-templates/import-from-kit', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ broadcastIds }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to import templates')
+  return d
+}

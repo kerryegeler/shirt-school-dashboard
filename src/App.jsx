@@ -4,6 +4,7 @@ import EmailAgent from './modules/email-agent/EmailAgent.jsx'
 import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
 import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import ContentBoard from './modules/content-board/ContentBoard.jsx'
+import ChallengeLauncher from './modules/challenge-launcher/ChallengeLauncher.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 
@@ -108,6 +109,7 @@ export default function App() {
           {activeModule === 'ai-feedback' && <FeedbackTab />}
           {activeModule === 'content-agent' && <ContentAgent />}
           {activeModule === 'content-board' && <ContentBoard />}
+          {activeModule === 'challenge-launcher' && <ChallengeLauncher />}
         </main>
       </div>
 
@@ -141,6 +143,17 @@ export default function App() {
             <path d="M8 1v14M1 8h14M4.5 4.5l7 7M11.5 4.5l-7 7" />
           </svg>
           Feedback
+        </button>
+        <button
+          className={`mobile-tab-btn ${activeModule === 'challenge-launcher' ? 'active' : ''}`}
+          onClick={() => setActiveModule('challenge-launcher')}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 1c0 0 4 2 4 7H4C4 3 8 1 8 1z" />
+            <path d="M5 8v4l3 2 3-2V8" />
+            <circle cx="8" cy="5" r="1" fill="currentColor" stroke="none" />
+          </svg>
+          Launch
         </button>
       </nav>
     </>

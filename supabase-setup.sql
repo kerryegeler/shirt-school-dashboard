@@ -172,3 +172,39 @@ create table if not exists content_competitors (
   created_at   timestamptz not null default now()
 );
 alter table content_competitors disable row level security;
+
+-- ─── Challenge Launcher ───────────────────────────────────────────────────────
+
+create table if not exists challenges (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  start_date date not null,
+  main_session_time time not null,
+  vip_session_time time not null,
+  timezone text not null default 'America/Chicago',
+  kit_tag_id text,
+  kit_tag_name text,
+  zoom_webinar_id text,
+  zoom_webinar_join_url text,
+  zoom_meeting_id text,
+  zoom_meeting_join_url text,
+  emails_scheduled integer default 0,
+  status text not null default 'draft',
+  error_log text,
+  created_at timestamptz not null default now()
+);
+alter table challenges disable row level security;
+
+create table if not exists challenge_email_templates (
+  id uuid primary key default gen_random_uuid(),
+  sort_order integer not null,
+  subject text not null,
+  body_html text not null,
+  relative_day integer not null,
+  send_time time not null,
+  description text,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table challenge_email_templates disable row level security;

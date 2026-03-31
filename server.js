@@ -3364,6 +3364,332 @@ app.delete('/api/content/cards/:id', requireAuth, async (req, res) => {
   res.json({ success: true })
 })
 
+// ─── Challenge Launcher ───────────────────────────────────────────────────────
+
+// Zoom token cache (expires in ~1hr; refreshed automatically)
+let zoomTokenCache = null // { token, expiresAt }
+
+async function getZoomToken() {
+  if (zoomTokenCache && Date.now() < zoomTokenCache.expiresAt - 60_000) return zoomTokenCache.token
+  if (!process.env.ZOOM_ACCOUNT_ID || !process.env.ZOOM_CLIENT_ID || !process.env.ZOOM_CLIENT_SECRET) {
+    throw new Error('Zoom credentials not configured')
+  }
+  const creds = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64')
+  const resp = await fetch(
+    `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${encodeURIComponent(process.env.ZOOM_ACCOUNT_ID)}`,
+    { method: 'POST', headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+  )
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(`Zoom token error: ${data.message || resp.status}`)
+  zoomTokenCache = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 }
+  return zoomTokenCache.token
+}
+
+async function zoomPost(path, body) {
+  const token = await getZoomToken()
+  const resp = await fetch(`https://api.zoom.us/v2${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(`Zoom ${path} failed (${resp.status}): ${JSON.stringify(data)}`)
+  return data
+}
+
+async function kitApiPost(path, body) {
+  if (!process.env.KIT_API_KEY) throw new Error('KIT_API_KEY not configured')
+  const resp = await fetch(`https://api.kit.com/v4${path}`, {
+    method: 'POST',
+    headers: { 'X-Kit-Api-Key': process.env.KIT_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(`Kit POST ${path} failed (${resp.status}): ${JSON.stringify(data)}`)
+  return data
+}
+
+async function kitApiGet(path) {
+  if (!process.env.KIT_API_KEY) throw new Error('KIT_API_KEY not configured')
+  const resp = await fetch(`https://api.kit.com/v4${path}`, {
+    headers: { 'X-Kit-Api-Key': process.env.KIT_API_KEY },
+  })
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(`Kit GET ${path} failed (${resp.status}): ${JSON.stringify(data)}`)
+  return data
+}
+
+// Convert local datetime (date string + time string) in named timezone → UTC ISO string
+function challengeLocalToUTC(dateStr, timeStr, timezone) {
+  const [y, mo, d] = dateStr.split('-').map(Number)
+  const [h, mi, s = 0] = timeStr.split(':').map(Number)
+  const naiveUTC = new Date(Date.UTC(y, mo - 1, d, h, mi, s))
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+  const p = {}
+  fmt.formatToParts(naiveUTC).forEach(({ type, value }) => { p[type] = value })
+  const tzLocalAsUTC = new Date(Date.UTC(
+    parseInt(p.year), parseInt(p.month) - 1, parseInt(p.day),
+    p.hour === '24' ? 0 : parseInt(p.hour), parseInt(p.minute), parseInt(p.second || '0')
+  ))
+  return new Date(2 * naiveUTC.getTime() - tzLocalAsUTC.getTime()).toISOString()
+}
+
+function challengeAddDays(dateStr, days) {
+  const [y, mo, d] = dateStr.split('-').map(Number)
+  return new Date(Date.UTC(y, mo - 1, d + days)).toISOString().split('T')[0]
+}
+
+function challengeFormatDate(dateStr) {
+  const [y, mo, d] = dateStr.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  const weekday = dt.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'long' })
+  const month = dt.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long' })
+  const n = d % 100
+  const suffix = (n >= 11 && n <= 13) ? 'th' : (['th','st','nd','rd'][d % 10] || 'th')
+  return `${weekday}, ${month} ${d}${suffix}`
+}
+
+function challengeFormatTime(timeStr, timezone) {
+  const [h, m] = timeStr.split(':').map(Number)
+  const ampm = h < 12 ? 'AM' : 'PM'
+  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
+  const mins = m === 0 ? '' : `:${String(m).padStart(2, '0')}`
+  const tzAbbrMap = { 'America/Chicago': 'CT', 'America/New_York': 'ET', 'America/Denver': 'MT', 'America/Los_Angeles': 'PT' }
+  return `${h12}${mins} ${ampm} ${tzAbbrMap[timezone] || 'CT'}`
+}
+
+// GET /api/challenges
+app.get('/api/challenges', async (req, res) => {
+  if (!supabase) return res.json({ challenges: [] })
+  const { data, error } = await supabase.from('challenges').select('*').order('created_at', { ascending: false })
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ challenges: data || [] })
+})
+
+// GET /api/challenges/:id
+app.get('/api/challenges/:id', async (req, res) => {
+  if (!supabase) return res.status(404).json({ error: 'Not found' })
+  const { data, error } = await supabase.from('challenges').select('*').eq('id', req.params.id).single()
+  if (error) return res.status(404).json({ error: error.message })
+  res.json({ challenge: data })
+})
+
+// POST /api/challenges
+app.post('/api/challenges', async (req, res) => {
+  const { name, startDate, mainSessionTime, vipSessionTime, timezone } = req.body
+  if (!name?.trim() || !startDate || !mainSessionTime || !vipSessionTime) {
+    return res.status(400).json({ error: 'name, startDate, mainSessionTime, and vipSessionTime are required' })
+  }
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' })
+  const { data, error } = await supabase.from('challenges').insert({
+    name: name.trim(), start_date: startDate, main_session_time: mainSessionTime,
+    vip_session_time: vipSessionTime, timezone: timezone || 'America/Chicago', status: 'draft',
+  }).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ challenge: data })
+})
+
+// DELETE /api/challenges/:id  (drafts only)
+app.delete('/api/challenges/:id', async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { data: ch } = await supabase.from('challenges').select('status').eq('id', req.params.id).single()
+  if (ch?.status === 'launched') return res.status(400).json({ error: 'Cannot delete a launched challenge' })
+  const { error } = await supabase.from('challenges').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+// POST /api/challenges/:id/launch
+app.post('/api/challenges/:id/launch', async (req, res) => {
+  const { id } = req.params
+  const { testMode = false } = req.body
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' })
+  const { data: challenge, error: fetchErr } = await supabase.from('challenges').select('*').eq('id', id).single()
+  if (fetchErr || !challenge) return res.status(404).json({ error: 'Challenge not found' })
+  if (challenge.status === 'launched') return res.status(400).json({ error: 'Already launched' })
+
+  await supabase.from('challenges').update({ status: 'launching', error_log: null }).eq('id', id)
+  res.json({ success: true, message: 'Launch started', challengeId: id })
+
+  ;(async () => {
+    try {
+      const { name, start_date, main_session_time, vip_session_time, timezone } = challenge
+
+      // 1. Kit tag
+      console.log(`[Challenge ${id}] Creating Kit tag "${name}"`)
+      const tagResult = await kitApiPost('/tags', { name: testMode ? `[TEST] ${name}` : name })
+      const kitTagId = String(tagResult.tag.id)
+      const kitTagName = tagResult.tag.name
+      await supabase.from('challenges').update({ kit_tag_id: kitTagId, kit_tag_name: kitTagName }).eq('id', id)
+
+      // 2. Zoom webinar (main sessions)
+      console.log(`[Challenge ${id}] Creating Zoom webinar`)
+      const mainZoomTime = `${start_date}T${main_session_time.slice(0, 5)}:00`
+      const webinar = await zoomPost('/users/me/webinars', {
+        topic: `${name} - Main Sessions`, type: 9,
+        start_time: mainZoomTime, timezone, duration: 90,
+        recurrence: { type: 1, repeat_interval: 1, end_times: 5 },
+        settings: { registration_type: 1, approval_type: 2, auto_recording: 'none' },
+      })
+      const zoomWebinarId = String(webinar.id)
+      const zoomWebinarJoinUrl = webinar.join_url
+      await supabase.from('challenges').update({ zoom_webinar_id: zoomWebinarId, zoom_webinar_join_url: zoomWebinarJoinUrl }).eq('id', id)
+
+      // 3. Zoom meeting (VIP sessions)
+      console.log(`[Challenge ${id}] Creating Zoom VIP meeting`)
+      const vipZoomTime = `${start_date}T${vip_session_time.slice(0, 5)}:00`
+      const meeting = await zoomPost('/users/me/meetings', {
+        topic: `${name} - VIP Sessions`, type: 8,
+        start_time: vipZoomTime, timezone, duration: 60,
+        recurrence: { type: 1, repeat_interval: 1, end_times: 5 },
+        settings: { join_before_host: true, waiting_room: false },
+      })
+      const zoomMeetingId = String(meeting.id)
+      const zoomMeetingJoinUrl = meeting.join_url
+      await supabase.from('challenges').update({ zoom_meeting_id: zoomMeetingId, zoom_meeting_join_url: zoomMeetingJoinUrl }).eq('id', id)
+
+      // 4. Load templates + schedule emails
+      const { data: templates, error: tplErr } = await supabase
+        .from('challenge_email_templates').select('*').eq('active', true).order('sort_order')
+      if (tplErr) throw new Error(`Failed to load templates: ${tplErr.message}`)
+      console.log(`[Challenge ${id}] Scheduling ${templates.length} emails (testMode=${testMode})`)
+
+      const dayDates = {}
+      for (let i = 1; i <= 5; i++) dayDates[i] = challengeAddDays(start_date, i - 1)
+
+      const tokens = {
+        '{{ZOOM_WEBINAR_LINK}}': zoomWebinarJoinUrl,
+        '{{ZOOM_VIP_LINK}}': zoomMeetingJoinUrl,
+        '{{CHALLENGE_NAME}}': name,
+        '{{DAY_1_DATE}}': challengeFormatDate(dayDates[1]),
+        '{{DAY_2_DATE}}': challengeFormatDate(dayDates[2]),
+        '{{DAY_3_DATE}}': challengeFormatDate(dayDates[3]),
+        '{{DAY_4_DATE}}': challengeFormatDate(dayDates[4]),
+        '{{DAY_5_DATE}}': challengeFormatDate(dayDates[5]),
+        '{{MAIN_SESSION_TIME}}': challengeFormatTime(main_session_time, timezone),
+        '{{VIP_SESSION_TIME}}': challengeFormatTime(vip_session_time, timezone),
+      }
+      const applyTokens = (s) => Object.entries(tokens).reduce((a, [k, v]) => a.replaceAll(k, v), s)
+
+      let emailsScheduled = 0
+      for (let i = 0; i < templates.length; i++) {
+        const tpl = templates[i]
+        const sendDate = challengeAddDays(start_date, tpl.relative_day)
+        const broadcastBody = {
+          subject: applyTokens(tpl.subject),
+          content: applyTokens(tpl.body_html),
+          description: tpl.description || tpl.subject,
+          subscriber_filter: [{ all: [{ type: 'tag', ids: [parseInt(kitTagId)] }] }],
+        }
+        if (!testMode) broadcastBody.send_at = challengeLocalToUTC(sendDate, tpl.send_time, timezone)
+
+        try {
+          await kitApiPost('/broadcasts', broadcastBody)
+          emailsScheduled++
+          if (i % 5 === 0) await supabase.from('challenges').update({ emails_scheduled: emailsScheduled }).eq('id', id)
+        } catch (emailErr) {
+          console.error(`[Challenge ${id}] Email ${i + 1} failed: ${emailErr.message}`)
+        }
+        if (i < templates.length - 1) await new Promise(r => setTimeout(r, 500))
+      }
+
+      await supabase.from('challenges').update({ status: 'launched', emails_scheduled: emailsScheduled, error_log: null }).eq('id', id)
+      console.log(`[Challenge ${id}] ✓ Launched — ${emailsScheduled} emails`)
+    } catch (err) {
+      console.error(`[Challenge ${id}] Launch failed:`, err.message)
+      await supabase.from('challenges').update({ status: 'failed', error_log: err.message }).eq('id', id).catch(() => {})
+    }
+  })()
+})
+
+// GET /api/challenge-templates
+app.get('/api/challenge-templates', async (req, res) => {
+  if (!supabase) return res.json({ templates: [] })
+  const { data, error } = await supabase.from('challenge_email_templates').select('*').order('sort_order')
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ templates: data || [] })
+})
+
+// POST /api/challenge-templates
+app.post('/api/challenge-templates', async (req, res) => {
+  const { subject, body_html, relative_day, send_time, description, sort_order } = req.body
+  if (!subject?.trim() || body_html == null || relative_day == null || !send_time) {
+    return res.status(400).json({ error: 'subject, body_html, relative_day, and send_time are required' })
+  }
+  if (!supabase) return res.status(500).json({ error: 'Database not configured' })
+  const { data, error } = await supabase.from('challenge_email_templates').insert({
+    subject: subject.trim(), body_html, relative_day: parseInt(relative_day), send_time,
+    description: description || null, sort_order: sort_order ?? 999, active: true,
+    updated_at: new Date().toISOString(),
+  }).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ template: data })
+})
+
+// PUT /api/challenge-templates/:id
+app.put('/api/challenge-templates/:id', async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const updates = { ...req.body, updated_at: new Date().toISOString() }
+  delete updates.id; delete updates.created_at
+  const { data, error } = await supabase.from('challenge_email_templates').update(updates).eq('id', req.params.id).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ template: data })
+})
+
+// DELETE /api/challenge-templates/:id
+app.delete('/api/challenge-templates/:id', async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('challenge_email_templates').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+// POST /api/challenge-templates/reorder
+app.post('/api/challenge-templates/reorder', async (req, res) => {
+  const { order } = req.body
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array' })
+  if (!supabase) return res.json({ success: true })
+  await Promise.all(order.map(({ id, sort_order }) =>
+    supabase.from('challenge_email_templates').update({ sort_order }).eq('id', id)
+  ))
+  res.json({ success: true })
+})
+
+// POST /api/challenge-templates/import-from-kit
+// If broadcastIds not provided → returns list of recent broadcasts for selection UI
+// If broadcastIds provided → imports selected ones as templates
+app.post('/api/challenge-templates/import-from-kit', async (req, res) => {
+  const { broadcastIds } = req.body
+  try {
+    const result = await kitApiGet('/broadcasts?page[size]=50')
+    const broadcasts = (result.broadcasts || []).map(b => ({
+      id: String(b.id), subject: b.subject || '(no subject)',
+      description: b.description || '', created_at: b.created_at,
+    }))
+    if (!broadcastIds?.length) return res.json({ broadcasts })
+
+    if (!supabase) return res.status(500).json({ error: 'Database not configured' })
+    const full = await kitApiGet('/broadcasts?page[size]=50') // includes content
+    const toImport = (full.broadcasts || []).filter(b => broadcastIds.includes(String(b.id)))
+    const inserted = []
+    for (const b of toImport) {
+      const { data, error } = await supabase.from('challenge_email_templates').insert({
+        subject: b.subject || '(no subject)', body_html: b.content || '',
+        relative_day: 0, send_time: '08:00:00',
+        description: `Imported from Kit: ${b.subject || b.id}`,
+        sort_order: 999, active: true, updated_at: new Date().toISOString(),
+      }).select().single()
+      if (!error) inserted.push(data)
+    }
+    res.json({ imported: inserted.length, templates: inserted })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
