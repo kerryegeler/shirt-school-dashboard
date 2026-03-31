@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchFeedback, updateFeedbackNotes, fetchLearnedBehaviors, saveLearnedBehaviors } from '../../services/api.js'
+import { fetchFeedback, updateFeedbackNotes, fetchLearnedBehaviors, saveLearnedBehaviors, triggerLearningRebuild } from '../../services/api.js'
 import './FeedbackTab.css'
 
 const CATEGORY_LABELS = {
@@ -117,6 +117,8 @@ export default function FeedbackTab() {
   const [learnedDraft, setLearnedDraft] = useState('')
   const [savingLearned, setSavingLearned] = useState(false)
   const [learnedError, setLearnedError] = useState('')
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuildMsg, setRebuildMsg] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -143,6 +145,23 @@ export default function FeedbackTab() {
   }, [])
 
   useEffect(() => { load(); loadLearned() }, [load, loadLearned])
+
+  async function handleRebuildLearning() {
+    setRebuilding(true)
+    setRebuildMsg('')
+    try {
+      await triggerLearningRebuild()
+      setRebuildMsg('Rebuilding… check back in a few seconds.')
+      setTimeout(async () => {
+        await loadLearned()
+        setRebuildMsg('')
+        setRebuilding(false)
+      }, 4000)
+    } catch (err) {
+      setRebuildMsg(`Error: ${err.message}`)
+      setRebuilding(false)
+    }
+  }
 
   async function handleSaveLearned() {
     setSavingLearned(true)
@@ -278,12 +297,16 @@ export default function FeedbackTab() {
               </span>
             )}
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {rebuildMsg && <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{rebuildMsg}</span>}
             <button className="btn btn-ghost" onClick={loadLearned} disabled={loadingLearned} title="Refresh">
               <IconRefresh />
             </button>
+            <button className="btn btn-secondary" onClick={handleRebuildLearning} disabled={rebuilding} title="Re-process all feedback entries now">
+              {rebuilding ? 'Rebuilding…' : 'Rebuild Now'}
+            </button>
             {!editingLearned && (
-              <button className="btn btn-secondary" onClick={() => { setEditingLearned(true); setLearnedDraft(learnedContent) }}>
+              <button className="btn btn-ghost" onClick={() => { setEditingLearned(true); setLearnedDraft(learnedContent) }}>
                 Edit
               </button>
             )}

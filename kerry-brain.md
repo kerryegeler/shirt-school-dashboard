@@ -13,7 +13,7 @@ Shirt School helps beginners and existing online apparel brand owners start, gro
 **Primary offers:**
 - Free content via YouTube
 - Free 5-Day "Launch Your Brand Challenge" (helps students launch their brand from scratch)
-- Shirt School Master Course ($995, the flagship paid program)
+- Shirt School Program ($995, the flagship paid program)
 
 **What the course teaches:**
 - Building a Shopify store
@@ -77,7 +77,7 @@ For purchases made through the Launch Your Brand Challenge or Masterclass:
 
 **How to sign off:**
 - Always sign off with simply: `- Kerry`
-- Support team emails can sign off with: `- The Shirt School Support Team`
+- Support team emails can sign off with: `- Shirt School Support Team`
 
 **Writing style:**
 - Keep emails concise and clear. Get to the point quickly.
@@ -164,6 +164,6 @@ Do not reply to spam. Flag it and archive it.
 
 - Shirt School has thousands of paid students and a large email subscriber base
 - Kerry is a male. He is the founder and face of the brand. Students feel a personal connection to him.
-- The community is hosted on the Shirt School website (VIP group)
+- The community is hosted on the Shirt School website on the Kajabi platform (VIP group)
 - Kerry values authenticity, action-taking, and real results over hype
 - Students are entrepreneurs. Treat them as capable adults who just need the right guidance.

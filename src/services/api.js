@@ -425,3 +425,8 @@ export async function sendEmail(email, draft, fromAccount, toEmail, isManual = f
 
   return data
 }
+
+export async function triggerLearningRebuild() {
+  const r = await fetch('/api/learning/run', { method: 'POST' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed') }
+}

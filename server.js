@@ -1173,49 +1173,59 @@ function loadKerryBrain() {
   return ''
 }
 
+// In-memory cache so loadLearnedBehaviors() stays synchronous everywhere it's called
+let learnedBehaviorsCache = ''
+
 function loadLearnedBehaviors() {
+  if (learnedBehaviorsCache) return learnedBehaviorsCache
   try {
-    if (fs.existsSync(LEARNED_BEHAVIORS_PATH)) return fs.readFileSync(LEARNED_BEHAVIORS_PATH, 'utf8')
+    if (fs.existsSync(LEARNED_BEHAVIORS_PATH)) {
+      learnedBehaviorsCache = fs.readFileSync(LEARNED_BEHAVIORS_PATH, 'utf8')
+      return learnedBehaviorsCache
+    }
   } catch {}
   return ''
 }
 
 function saveLearnedBehaviors(content) {
-  // Write to local file (in-process cache)
+  // 1. Update in-memory cache immediately
+  learnedBehaviorsCache = content
+  // 2. Write to local file
   try {
     fs.writeFileSync(LEARNED_BEHAVIORS_PATH, content, 'utf8')
   } catch (err) {
     console.error('[Learning] Failed to write learned-behaviors.md:', err.message)
   }
-  // Persist to Supabase so it survives deploys
+  // 3. Persist to Supabase so it survives Railway deploys
   if (supabase) {
     supabase.from('app_settings')
       .upsert({ key: 'learned_behaviors', value: content, updated_at: new Date().toISOString() }, { onConflict: 'key' })
       .then(({ error }) => {
         if (error) console.error('[Learning] Failed to persist to Supabase:', error.message)
+        else console.log(`[Learning] ✓ Saved to Supabase (${content.length} bytes)`)
       })
   }
 }
 
-// On startup: load learned behaviors from Supabase into local file so deploy doesn't wipe it
+// On startup: restore learned behaviors from Supabase into memory + file so deploys don't wipe it
 async function syncLearnedBehaviorsFromDB() {
   if (!supabase) return
   try {
     const { data, error } = await supabase.from('app_settings')
       .select('value').eq('key', 'learned_behaviors').single()
     if (error || !data?.value) {
-      console.log('[Learning] No saved learned behaviors in Supabase — will build from feedback')
+      console.log('[Learning] No saved content in Supabase — will build from feedback')
       return
     }
-    // Check if the DB version is newer than the committed placeholder
     const dbContent = data.value
-    const isPlaceholder = dbContent.includes('(not yet updated)') || !dbContent.includes('Last updated:')
+    const isPlaceholder = !dbContent.includes('Last updated:') || dbContent.includes('(not yet updated)')
     if (isPlaceholder) {
-      console.log('[Learning] Supabase has placeholder content — will rebuild from feedback')
+      console.log('[Learning] Supabase has placeholder — will rebuild from feedback')
       return
     }
-    fs.writeFileSync(LEARNED_BEHAVIORS_PATH, dbContent, 'utf8')
-    console.log(`[Learning] ✓ Restored learned-behaviors.md from Supabase (${dbContent.length} bytes)`)
+    learnedBehaviorsCache = dbContent
+    try { fs.writeFileSync(LEARNED_BEHAVIORS_PATH, dbContent, 'utf8') } catch {}
+    console.log(`[Learning] ✓ Restored from Supabase (${dbContent.length} bytes)`)
   } catch (err) {
     console.error('[Learning] Failed to sync from Supabase:', err.message)
   }
@@ -1227,33 +1237,33 @@ function insertUnderSection(content, sectionHeader, newLine) {
   const headerIdx = lines.findIndex((l) => l.trim() === sectionHeader.trim())
   if (headerIdx === -1) return content
   let insertAt = headerIdx + 1
-  // Skip one blank line immediately after the header
   if (insertAt < lines.length && lines[insertAt].trim() === '') insertAt++
   lines.splice(insertAt, 0, newLine)
   return lines.join('\n')
 }
 
-// ─── Batch learning: query ALL ai_feedback and rewrite learned-behaviors.md ───
+// ─── Batch learning: rebuild learned-behaviors.md directly from ai_feedback ──
+// NO Claude API call — formats raw before/after examples the draft AI can learn from directly.
 let learningRunning = false
 async function processAIFeedbackIntoLearning() {
-  if (!supabase || !process.env.ANTHROPIC_API_KEY) {
-    console.log('[Learning] Skipped — supabase or ANTHROPIC_API_KEY not configured')
+  if (!supabase) {
+    console.log('[Learning] Skipped — Supabase not configured')
     return
   }
   if (learningRunning) {
-    console.log('[Learning] Already running, skipping duplicate call')
+    console.log('[Learning] Already running, skipping')
     return
   }
   learningRunning = true
-  console.log('[Learning] Starting batch processing of all ai_feedback entries...')
+  console.log('[Learning] Rebuilding learned-behaviors.md from ai_feedback...')
 
   try {
     const { data: rows, error } = await supabase.from('ai_feedback')
       .select('*')
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false }) // newest first — most relevant
     if (error) throw new Error(`Supabase query failed: ${error.message}`)
     if (!rows?.length) {
-      console.log('[Learning] No ai_feedback entries found — nothing to learn from')
+      console.log('[Learning] No ai_feedback entries yet')
       learningRunning = false
       return
     }
@@ -1261,115 +1271,65 @@ async function processAIFeedbackIntoLearning() {
     const edited = rows.filter((r) => r.action === 'edited')
     const approved = rows.filter((r) => r.action === 'approved')
     const skipped = rows.filter((r) => r.action === 'skipped')
+    console.log(`[Learning] ${rows.length} entries: ${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped`)
 
-    console.log(`[Learning] Found ${rows.length} entries: ${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped`)
+    const now = new Date().toISOString()
+    const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return '' } }
 
-    // Build a digest of all entries for Claude to analyze in one shot
-    const editedSamples = edited.slice(-30).map((e, i) => {
-      return `Entry ${i + 1} [${e.category}]:\nAI draft: "${(e.original_draft || '').slice(0, 300)}"\nKerry's version: "${(e.final_version || '').slice(0, 300)}"\nDiff: ${e.diff_summary || 'unknown'}`
+    // Format edited examples — these are the most valuable training signal
+    const editedBlock = edited.slice(0, 40).map((e, i) => {
+      const label = `[${e.category || 'general'} · ${fmtDate(e.created_at)}]`
+      const orig = (e.original_draft || '').trim().slice(0, 600)
+      const final = (e.final_version || '').trim().slice(0, 600)
+      const diff = e.diff_summary || ''
+      return `### Edit ${i + 1} ${label}\n**AI wrote:**\n${orig}\n\n**Kerry changed it to:**\n${final}${diff ? `\n\n*Changes: ${diff}*` : ''}`
     }).join('\n\n---\n\n')
 
-    const approvedSamples = approved.slice(-15).map((e, i) => {
-      return `Approved ${i + 1} [${e.category}]: "${(e.original_draft || '').slice(0, 300)}"`
-    }).join('\n\n')
-
-    const skippedSamples = skipped.slice(-10).map((e, i) => {
-      return `Skipped ${i + 1} [${e.category}]: "${(e.original_draft || '').slice(0, 200)}"`
-    }).join('\n\n')
-
-    const prompt = `You are analyzing Kerry Egeler's email feedback history to extract concrete writing preferences.
-
-EDITED DRAFTS (Kerry changed these before sending):
-${editedSamples || '(none)'}
-
-APPROVED DRAFTS (Kerry sent these as-is — these are good examples):
-${approvedSamples || '(none)'}
-
-SKIPPED DRAFTS (Kerry rejected these entirely):
-${skippedSamples || '(none)'}
-
-Analyze ALL entries above and produce a learning document. Be SPECIFIC — use real examples from the data. Do not be vague.
-
-Return ONLY valid JSON (no markdown fences) with these fields:
-{
-  "tone_patterns": ["list of specific tone/voice observations, e.g. 'Kerry uses casual greetings like Hey [Name] instead of Dear or Hello'"],
-  "common_corrections": ["list of specific changes Kerry consistently makes, e.g. 'Kerry removes I hope this helps at the end of emails'"],
-  "phrases_kerry_uses": ["exact phrases Kerry adds or prefers"],
-  "phrases_to_avoid": ["exact phrases Kerry consistently removes or changes"],
-  "student_support_prefs": ["preferences specific to student support emails"],
-  "sponsorship_prefs": ["preferences specific to sponsorship emails"],
-  "general_prefs": ["preferences specific to general emails"],
-  "skipped_patterns": ["patterns in drafts Kerry rejected entirely"],
-  "word_count_note": "observation about Kerry's preferred email length vs AI draft length",
-  "overall_style": "2-3 sentence summary of Kerry's email style"
-}`
-
-    const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2000,
-      messages: [{ role: 'user', content: prompt }],
-    })
-
-    const clean = resp.content[0].text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-    const analysis = JSON.parse(clean)
-
-    // Build the learned-behaviors.md content
-    const now = new Date().toISOString()
-    const fmt = (arr) => (arr || []).filter(Boolean).map((s) => `- ${s}`).join('\n') || '*(no data yet)*'
+    // Format approved examples — these show what already works
+    const approvedBlock = approved.slice(0, 20).map((e, i) => {
+      const label = `[${e.category || 'general'} · ${fmtDate(e.created_at)}]`
+      const draft = (e.original_draft || '').trim().slice(0, 600)
+      return `### Approved ${i + 1} ${label}\n${draft}`
+    }).join('\n\n---\n\n')
 
     const content = `# Learned Behaviors - Kerry Egeler Email Agent
 Last updated: ${now}
-Total feedback entries analyzed: ${rows.length} (${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped)
+Entries: ${edited.length} edited, ${approved.length} approved, ${skipped.length} skipped
 
-${analysis.overall_style || ''}
-${analysis.word_count_note ? `\n${analysis.word_count_note}` : ''}
+## HOW TO USE THIS DOCUMENT
+Before writing any email reply, read these examples carefully.
+The "edited" examples show exactly what Kerry changes — learn from every difference.
+The "approved" examples show the style Kerry is happy with — match that style.
+Weight the most recent examples most heavily.
 
-## Tone and Voice Patterns
-${fmt(analysis.tone_patterns)}
+## Emails Kerry Edited (Study Every Change)
+These are real AI drafts that Kerry modified before sending.
+Each shows the original AI draft and what Kerry actually wanted.
 
-## Common Corrections Kerry Makes
-${fmt(analysis.common_corrections)}
+${editedBlock || '*(no edited examples yet — edit an AI draft to start training)*'}
 
-## Phrases Kerry Uses
-${fmt(analysis.phrases_kerry_uses)}
+## Emails Kerry Approved Without Changes (Good Style Examples)
+Kerry sent these AI drafts exactly as written — this is the target style.
 
-## Phrases to Avoid
-${fmt(analysis.phrases_to_avoid)}
-
-## Per-Category Preferences
-
-### Student Support
-${fmt(analysis.student_support_prefs)}
-
-### Sponsorship
-${fmt(analysis.sponsorship_prefs)}
-
-### General
-${fmt(analysis.general_prefs)}
-
-## Patterns Kerry Rejects (Skipped Drafts)
-${fmt(analysis.skipped_patterns)}
+${approvedBlock || '*(no approved examples yet)*'}
 
 ## Recent Manual Reply Examples
 *(Last 10 emails Kerry wrote manually — used as style examples)*
 `
 
-    // Preserve any manual reply examples from the old file
-    const oldContent = loadLearnedBehaviors()
-    const manualSection = oldContent.split('## Recent Manual Reply Examples')[1]
-    let finalContent = content
-    if (manualSection && manualSection.trim() !== '*(Last 10 emails Kerry wrote manually — used as style examples)*') {
-      finalContent = content.replace(
-        '## Recent Manual Reply Examples\n*(Last 10 emails Kerry wrote manually — used as style examples)*',
-        '## Recent Manual Reply Examples' + manualSection
-      )
-    }
+    // Preserve existing manual reply examples
+    const existing = loadLearnedBehaviors()
+    const manualPart = existing.split('## Recent Manual Reply Examples')[1] || ''
+    const hasManualContent = manualPart.trim() && manualPart.trim() !== '*(Last 10 emails Kerry wrote manually — used as style examples)*'
+    const finalContent = hasManualContent
+      ? content.replace('## Recent Manual Reply Examples\n*(Last 10 emails Kerry wrote manually — used as style examples)*', '## Recent Manual Reply Examples' + manualPart)
+      : content
 
     saveLearnedBehaviors(finalContent)
-    console.log(`[Learning] ✓ Batch processing complete — learned-behaviors.md rewritten (${finalContent.length} bytes) from ${rows.length} entries`)
+    console.log(`[Learning] ✓ Done — ${finalContent.length} bytes written from ${rows.length} feedback entries`)
 
   } catch (err) {
-    console.error('[Learning] Batch processing failed:', err.message)
+    console.error('[Learning] Failed:', err.message)
   } finally {
     learningRunning = false
   }
@@ -2350,6 +2310,12 @@ app.patch('/api/feedback/:id/notes', requireAuth, async (req, res) => {
   const { error } = await supabase.from('ai_feedback').update({ notes }).eq('id', id)
   if (error) return res.status(500).json({ error: error.message })
   res.json({ success: true })
+})
+
+// Manual trigger — rebuild learned-behaviors.md from all feedback right now
+app.post('/api/learning/run', requireAuth, async (req, res) => {
+  res.json({ success: true, message: 'Learning rebuild started' })
+  processAIFeedbackIntoLearning().catch((err) => console.error('[Learning] Manual run error:', err.message))
 })
 
 // ─── Content Agent ────────────────────────────────────────────────────────────
