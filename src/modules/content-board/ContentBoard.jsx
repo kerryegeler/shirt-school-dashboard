@@ -98,7 +98,7 @@ function renderSectionValue(val) {
 function NewCardModal({ onClose, onCreated }) {
   const [title, setTitle] = useState('')
   const [boardType, setBoardType] = useState('long_form')
-  const [generateAI, setGenerateAI] = useState(true)
+  const [generateAI, setGenerateAI] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const inputRef = useRef(null)
