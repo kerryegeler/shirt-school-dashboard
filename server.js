@@ -2554,7 +2554,7 @@ async function fetchKerryChannelStats(channelIdOverride) {
 
     // Cache channel ID for future use
     if (supabase && channel.id) {
-      supabase.from('content_config').upsert({ key: 'youtube_channel_id', value: channel.id }).catch(() => {})
+      try { await supabase.from('content_config').upsert({ key: 'youtube_channel_id', value: channel.id }) } catch {}
     }
 
     const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
@@ -3657,7 +3657,7 @@ app.post('/api/challenges/:id/launch', async (req, res) => {
       console.log(`[Challenge ${id}] ✓ Launched — ${emailsScheduled} emails`)
     } catch (err) {
       console.error(`[Challenge ${id}] Launch failed:`, err.message)
-      await supabase.from('challenges').update({ status: 'failed', error_log: err.message }).eq('id', id).catch(() => {})
+      try { await supabase.from('challenges').update({ status: 'failed', error_log: err.message }).eq('id', id) } catch {}
     }
   })()
 })
