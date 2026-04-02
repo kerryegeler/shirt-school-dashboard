@@ -24,21 +24,18 @@ const SHORT_FORM_COLUMNS = [
 ]
 
 const LONG_FORM_SECTION_LABELS = {
-  hook: 'Hook',
-  angle: 'Angle',
-  outline: 'Outline',
-  script_notes: 'Script Notes',
-  b_roll: 'B-Roll',
-  thumbnail_idea: 'Thumbnail Idea',
+  title_ideas: 'Title Ideas',
+  hook_script: 'Hook Script',
+  main_points: 'Main Points',
   cta: 'CTA',
+  thumbnail_idea: 'Thumbnail Idea',
   tags: 'Tags',
 }
 
 const SHORT_FORM_SECTION_LABELS = {
-  hook: 'Hook',
-  angle: 'Angle',
-  script: 'Script',
-  visual_notes: 'Visual Notes',
+  title_ideas: 'Title Ideas',
+  hook_script: 'Hook Script',
+  main_points: 'Main Points',
   cta: 'CTA',
   tags: 'Tags',
 }
@@ -540,34 +537,34 @@ export default function ContentBoard() {
       return
     }
 
-    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: targetColumn } : c))
+    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: targetColumn } : c))
     try {
       await updateContentCard(card.id, { column: targetColumn })
     } catch {
       // Revert on error
-      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: card.board_column } : c))
+      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: card.board_column } : c))
     }
   }
 
   async function handlePublishedConfirm(date) {
     const { card, targetColumn } = publishedModal
     setPublishedModal(null)
-    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: targetColumn, published_date: date } : c))
+    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: targetColumn, published_date: date } : c))
     try {
       await updateContentCard(card.id, { column: targetColumn, published_date: date })
     } catch {
-      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: card.board_column } : c))
+      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: card.board_column } : c))
     }
   }
 
   async function handlePublishedSkip() {
     const { card, targetColumn } = publishedModal
     setPublishedModal(null)
-    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: targetColumn } : c))
+    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: targetColumn } : c))
     try {
       await updateContentCard(card.id, { column: targetColumn })
     } catch {
-      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: card.board_column } : c))
+      setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, board_column: card.board_column } : c))
     }
   }
 

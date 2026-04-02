@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  fetchContentIdeas, updateContentIdea, deleteContentIdea,
+  fetchContentIdeas, updateContentIdea, deleteContentIdea, saveContentIdea,
   fetchContentBriefs, fetchContentBrief, runContentBrief,
   fetchContentTopics, createContentTopic, updateContentTopic, deleteContentTopic,
   fetchChannelStats, fetchYouTubeChannels, lookupChannel, selectChannel, refreshChannelStats,
@@ -367,6 +367,41 @@ function PastBriefs() {
   )
 }
 
+function BriefIdeaCard({ idea, format }) {
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const isShort = format === 'short'
+
+  async function handleSave() {
+    if (saved || saving || !idea.id) return
+    setSaving(true)
+    try {
+      const result = await saveContentIdea(idea.id)
+      setSaved(true)
+      if (result.alreadySaved) setSaved(true)
+    } catch {}
+    setSaving(false)
+  }
+
+  return (
+    <div className="ca-brief-idea">
+      <div className="ca-brief-idea-header">
+        <span className={`ca-format-badge ${isShort ? 'ca-format-short' : 'ca-format-long'}`}>
+          {isShort ? '📱 Short' : '🎬 Long'}
+        </span>
+        <strong>{idea.title}</strong>
+        {idea.source && <span className="ca-source-mini">{idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}</span>}
+      </div>
+      {idea.hook && <div className="ca-brief-snippet">Hook: {idea.hook}</div>}
+      {idea.outline && <div className="ca-brief-snippet">{idea.outline}</div>}
+      {idea.why_timely && <div className="ca-brief-snippet ca-timely-text">{idea.why_timely}</div>}
+      <button className={`ca-save-idea-btn ${saved ? 'saved' : ''}`} onClick={handleSave} disabled={saving || saved}>
+        {saved ? '✅ Saved to Board' : saving ? 'Saving…' : '⭐ Save Idea'}
+      </button>
+    </div>
+  )
+}
+
 function BriefDetail({ brief }) {
   return (
     <div className="ca-brief-detail">
@@ -374,7 +409,6 @@ function BriefDetail({ brief }) {
         <div className="ca-brief-section">
           <div className="ca-brief-section-title">🎯 Competitor Activity</div>
           {brief.competitors.map((ch, i) => {
-            // New format: {channel, newVideos, noNew}
             if (ch.newVideos !== undefined) {
               if (ch.noNew || !ch.newVideos?.length) {
                 return (
@@ -395,7 +429,6 @@ function BriefDetail({ brief }) {
                 </div>
               ))
             }
-            // Legacy flat format
             return (
               <div key={i} className="ca-brief-item">
                 <a href={ch.url} target="_blank" rel="noreferrer" className="ca-link">
@@ -448,22 +481,10 @@ function BriefDetail({ brief }) {
         <div className="ca-brief-section">
           <div className="ca-brief-section-title">💡 Content Ideas</div>
           {brief.ideas.short_form?.map((idea, i) => (
-            <div key={i} className="ca-brief-idea">
-              <span className="ca-format-badge ca-format-short">📱 Short</span>
-              <strong>{idea.title}</strong>
-              {idea.source && <span className="ca-source-mini">{idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}</span>}
-              {idea.hook && <div className="ca-brief-snippet">Hook: {idea.hook}</div>}
-              {idea.why_timely && <div className="ca-brief-snippet ca-timely-text">{idea.why_timely}</div>}
-            </div>
+            <BriefIdeaCard key={idea.id || i} idea={idea} format="short" />
           ))}
           {brief.ideas.long_form?.map((idea, i) => (
-            <div key={i} className="ca-brief-idea">
-              <span className="ca-format-badge ca-format-long">🎬 Long</span>
-              <strong>{idea.title}</strong>
-              {idea.source && <span className="ca-source-mini">{idea.source === 'A' ? '📊 My Channel' : idea.source === 'B' ? '🎯 Competitor' : '📰 Trending'}</span>}
-              {idea.outline && <div className="ca-brief-snippet">{idea.outline}</div>}
-              {idea.why_timely && <div className="ca-brief-snippet ca-timely-text">{idea.why_timely}</div>}
-            </div>
+            <BriefIdeaCard key={idea.id || i} idea={idea} format="long" />
           ))}
         </div>
       )}

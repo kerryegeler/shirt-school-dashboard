@@ -232,6 +232,13 @@ export async function deleteContentIdea(id) {
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete idea') }
 }
 
+export async function saveContentIdea(id) {
+  const r = await fetch(`/api/content/ideas/${id}/save`, { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to save idea')
+  return d
+}
+
 export async function fetchContentBriefs() {
   const r = await fetch('/api/content/briefs')
   const d = await r.json()

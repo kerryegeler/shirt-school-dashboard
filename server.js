@@ -2056,6 +2056,18 @@ app.post('/api/slack/actions', async (req, res) => {
             console.log(`[Slack Ideas] ✓ Saved idea: "${existing.title}"`)
             await updateContentPreferences({ format: existing.format || 'short', title: existing.title })
 
+            // Auto-create a content board card
+            const boardType = existing.format === 'long' ? 'long_form' : 'short_form'
+            await supabase.from('content_cards').insert({
+              title: existing.title, board_type: boardType, board_column: 'idea',
+              sections: { hook: existing.hook || '', angle: existing.why_timely || '' },
+              notes: existing.outline || '', position: 0,
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            }).then(({ error: cardErr }) => {
+              if (cardErr) console.error('[Slack Ideas] Failed to create card:', cardErr.message)
+              else console.log('[Slack Ideas] ✓ Created content board card')
+            })
+
             // Update the Slack message to change the button to "✅ Saved"
             if (slackClient && channelId && payload.message?.ts && payload.message?.blocks) {
               const updatedBlocks = (payload.message.blocks || []).map((block) => {
@@ -3108,6 +3120,40 @@ app.patch('/api/content/ideas/:id', requireAuth, async (req, res) => {
   res.json({ success: true })
 })
 
+// Save a brief idea to Ideas Bank + auto-create a Content Board card
+app.post('/api/content/ideas/:id/save', requireAuth, async (req, res) => {
+  const { id } = req.params
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const { data: idea, error: lookupErr } = await supabase
+    .from('content_ideas').select('*').eq('id', id).single()
+  if (lookupErr || !idea) return res.status(404).json({ error: 'Idea not found' })
+  if (idea.status === 'saved') return res.json({ success: true, alreadySaved: true })
+
+  // Mark idea as saved
+  await supabase.from('content_ideas').update({ status: 'saved' }).eq('id', id)
+  await updateContentPreferences({ format: idea.format || 'short', title: idea.title })
+
+  // Auto-create a content board card in the Idea column
+  const boardType = idea.format === 'long' ? 'long_form' : 'short_form'
+  const card = {
+    title: idea.title,
+    board_type: boardType,
+    board_column: 'idea',
+    sections: {
+      hook: idea.hook || '',
+      angle: idea.why_timely || '',
+    },
+    notes: idea.outline || '',
+    position: 0,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  const { data: newCard, error: cardErr } = await supabase.from('content_cards').insert(card).select().single()
+  if (cardErr) console.error('[Content] Failed to auto-create card:', cardErr.message)
+
+  res.json({ success: true, card: newCard || null })
+})
+
 app.delete('/api/content/ideas/:id', requireAuth, async (req, res) => {
   if (!supabase) return res.json({ success: true })
   const { error } = await supabase.from('content_ideas').update({ status: 'deleted' }).eq('id', req.params.id)
@@ -3318,27 +3364,24 @@ async function generateCardSections(title, boardType) {
 ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What Kerry Has Learned ---\n${learnedBehaviors}\n---\n` : ''}${ctas ? `--- Kerry's CTA Guidelines ---\n${ctas}\n---\n` : ''}`
 
   const userPrompt = isLong
-    ? `Generate a full video content plan for this long-form YouTube video: "${title}"
+    ? `Generate a content plan for this long-form YouTube video: "${title}"
 
-Return ONLY valid JSON (no markdown fences):
+Research viral title patterns for this topic. Return ONLY valid JSON (no markdown fences):
 {
-  "hook": "Opening hook line — first 15 seconds of video, must grab attention",
-  "angle": "The unique angle or perspective that makes this video worth watching vs. others",
-  "outline": "Full video outline with timestamps (e.g. 0:00 - Intro, 1:30 - Point 1, etc.). 6-10 sections.",
-  "script_notes": "Key talking points, stats, or examples Kerry should include. Conversational, not formal.",
-  "b_roll": "Suggested B-roll shots or screen recordings to show",
-  "thumbnail_idea": "Thumbnail concept: what text overlay, what Kerry is doing/expressing, color palette",
+  "title_ideas": "3 viral-optimized title ideas for this video, numbered 1-3. Each should use proven YouTube title patterns (curiosity gap, numbers, how-to, challenge, etc.)",
+  "hook_script": "Word-for-word script for the first 30-60 seconds of the video. This is the hook — it must grab attention immediately, set up the value proposition, and give viewers a reason to keep watching. Write it conversational, like Kerry is talking to camera.",
+  "main_points": "The 3 main points Kerry should cover in this video. For each point, include a 1-2 sentence description of what to say. Numbered 1-3.",
   "cta": "Specific end-of-video CTA based on Kerry's CTA guidelines above",
+  "thumbnail_idea": "Thumbnail concept: what text overlay, what Kerry is doing/expressing, color palette",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
 }`
-    : `Generate a full content plan for this short-form YouTube video (Shorts): "${title}"
+    : `Generate a content plan for this short-form YouTube video (Shorts/Reels): "${title}"
 
-Return ONLY valid JSON (no markdown fences):
+Research viral title patterns for this topic. Return ONLY valid JSON (no markdown fences):
 {
-  "hook": "Opening hook — first 3 seconds. Must be a question, bold statement, or pattern interrupt.",
-  "angle": "The unique spin or insight that makes this Short worth watching all the way through",
-  "script": "Full word-for-word short script (15-60 seconds). Punchy, no fluff.",
-  "visual_notes": "How to film this: what Kerry is doing on screen, text overlays, pacing",
+  "title_ideas": "3 viral-optimized title/caption ideas for this Short, numbered 1-3. Short, punchy, curiosity-driven.",
+  "hook_script": "Word-for-word script for the first 5-10 seconds. Must be a question, bold statement, or pattern interrupt that stops the scroll.",
+  "main_points": "The 3 key points to hit in the Short. Keep each to 1 sentence. Numbered 1-3.",
   "cta": "Specific CTA at end of Short based on Kerry's guidelines",
   "tags": ["tag1", "tag2", "tag3"]
 }`
