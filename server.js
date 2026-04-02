@@ -2950,9 +2950,9 @@ async function runContentBrief({ manual = false } = {}) {
   return briefData
 }
 
-// Compute ms until next brief time: Mon/Wed/Fri at 8 AM America/Chicago
+// Compute ms until next brief time: Mon/Thu at 8 AM America/Chicago
 function msUntilNextBriefTime() {
-  const BRIEF_DAYS = new Set([1, 3, 5]) // Mon=1, Wed=3, Fri=5
+  const BRIEF_DAYS = new Set([1, 4]) // Mon=1, Thu=4
   const now = new Date()
 
   const getCTparts = (d) => {
@@ -2967,7 +2967,7 @@ function msUntilNextBriefTime() {
     }
   }
 
-  // Search the next 8 days for the next Mon/Wed/Fri at 8 AM CT
+  // Search the next 8 days for the next Mon/Thu at 8 AM CT
   for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
     for (const utcHour of [13, 14]) { // 8 AM CT = UTC-5 (CDT) or UTC-6 (CST)
       const candidate = new Date(now)
@@ -2983,11 +2983,39 @@ function msUntilNextBriefTime() {
   return 24 * 60 * 60 * 1000
 }
 
+// Returns true if today is Mon or Thu, it's past 8am CT, and no brief has run today yet
+async function shouldRunCatchUpBrief() {
+  try {
+    const now = new Date()
+    const ctParts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', hour: 'numeric', weekday: 'short',
+        year: 'numeric', month: '2-digit', day: '2-digit', hour12: false,
+      }).formatToParts(now).map(({ type, value }) => [type, value])
+    )
+    const dayNum = ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 })[ctParts.weekday] ?? -1
+    const hour = parseInt(ctParts.hour || '0')
+    if (![1, 4].includes(dayNum) || hour < 8) return false
+
+    if (!supabase) return true
+    // Check if a brief already ran today CT (search a 16-hour window starting at 8am UTC-6)
+    const todayStr = `${ctParts.year}-${ctParts.month}-${ctParts.day}`
+    const windowStart = new Date(`${todayStr}T13:00:00Z`) // conservative 8am CT in CST (UTC-5 = 13:00 UTC)
+    const windowEnd = new Date(windowStart.getTime() + 16 * 60 * 60 * 1000)
+    const { data } = await supabase.from('content_briefs')
+      .select('id').gte('run_at', windowStart.toISOString()).lte('run_at', windowEnd.toISOString()).limit(1)
+    return !data?.length
+  } catch {
+    return false
+  }
+}
+
 function startContentBriefScheduler() {
   if (!process.env.YOUTUBE_API_KEY && !process.env.SERPER_API_KEY) {
     console.log('  Content Agent: not configured (set YOUTUBE_API_KEY + SERPER_API_KEY to enable)')
     return
   }
+
   const scheduleNext = () => {
     let delay
     try { delay = msUntilNextBriefTime() } catch (err) {
@@ -3001,7 +3029,15 @@ function startContentBriefScheduler() {
       try { scheduleNext() } catch (err) { console.error('[Content] scheduleNext error:', err.message) }
     }, delay)
   }
-  scheduleNext()
+
+  // Catch-up on startup: if today is Mon/Thu, it's past 8am CT, and no brief ran today — run now
+  shouldRunCatchUpBrief().then((needed) => {
+    if (needed) {
+      console.log('  Content Agent: missed brief detected — running catch-up now')
+      runContentBrief().catch((err) => console.error('[Content] Catch-up brief error:', err.message))
+    }
+    scheduleNext()
+  }).catch(() => scheduleNext())
 }
 
 // ─── Content Agent API routes ─────────────────────────────────────────────────
