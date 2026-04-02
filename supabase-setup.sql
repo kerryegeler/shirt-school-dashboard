@@ -113,18 +113,21 @@ alter table content_briefs disable row level security;
 
 -- Generated and saved content ideas
 create table if not exists content_ideas (
-  id           uuid primary key,
-  brief_id     uuid references content_briefs(id),
-  format       text not null,  -- 'short' | 'long'
-  title        text not null,
-  hook         text,
-  outline      text,
-  why_timely   text,
-  notes        text,
-  status       text not null default 'generated',  -- 'generated' | 'saved' | 'filmed' | 'deleted'
-  calendar_date date,
-  created_at   timestamptz not null default now()
+  id             uuid primary key,
+  brief_id       uuid references content_briefs(id),
+  format         text not null,  -- 'short' | 'long'
+  title          text not null,
+  hook           text,
+  outline        text,
+  why_timely     text,
+  freshness_score text,
+  notes          text,
+  status         text not null default 'generated',  -- 'generated' | 'saved' | 'filmed' | 'deleted'
+  calendar_date  date,
+  created_at     timestamptz not null default now()
 );
+-- Run this if the table already exists:
+-- ALTER TABLE content_ideas ADD COLUMN IF NOT EXISTS freshness_score text;
 alter table content_ideas disable row level security;
 
 -- Learning preference profile

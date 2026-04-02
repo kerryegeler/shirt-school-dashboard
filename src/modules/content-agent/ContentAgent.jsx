@@ -295,11 +295,12 @@ function PastBriefs() {
 
   async function handleRunBrief() {
     setRunningBrief(true)
-    setBriefMessage('')
+    setBriefMessage('Generating brief… this takes about 30 seconds.')
     try {
       await runContentBrief()
-      setBriefMessage('Brief is running in the background. Refresh in ~60 seconds to see it.')
-      setTimeout(() => load(), 60_000)
+      setBriefMessage('Brief generated! Loading...')
+      await load()
+      setBriefMessage('')
     } catch (err) {
       setBriefMessage(`Error: ${err.message}`)
     }

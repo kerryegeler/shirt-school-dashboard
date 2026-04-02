@@ -2839,16 +2839,25 @@ async function getSeenUrls() {
 async function runContentBrief({ manual = false } = {}) {
   console.log(`[Content] Running brief (${manual ? 'manual' : 'scheduled'})...`)
   const topics = await getContentTopics()
+  console.log(`[Content] Topics: ${topics.join(', ')}`)
 
+  // Wrap Reddit fetch with a timeout to prevent indefinite hangs
+  const redditWithTimeout = Promise.race([
+    fetchRedditPosts(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur', 'ArtificialIntelligence']),
+    new Promise((resolve) => setTimeout(() => { console.log('[Content] Reddit timed out after 20s'); resolve([]) }, 20000)),
+  ])
+
+  console.log('[Content] Fetching data sources...')
   const [ytResults, newsResults, redditResults, toolResults, channelStats, competitorVideos, seenUrls] = await Promise.all([
     Promise.all(topics.map((t) => fetchYouTubeVideos(t))).then((r) => r.flat()),
     Promise.all(topics.map((t) => fetchSerperNews(t))).then((r) => r.flat()),
-    fetchRedditPosts(['printondemand', 'shopify', 'ecommerce', 'Entrepreneur', 'ArtificialIntelligence']),
+    redditWithTimeout,
     fetchToolUpdates(topics),
     fetchKerryChannelStats(),
     fetchCompetitorVideos(),
     getSeenUrls(),
   ])
+  console.log(`[Content] Data: ${ytResults.length} YT, ${newsResults.length} news, ${redditResults.length} reddit, ${toolResults.length} tools`)
 
   const dedupeByUrl = (arr) => {
     const seen = new Set()
@@ -2914,19 +2923,25 @@ async function runContentBrief({ manual = false } = {}) {
   }
 
   if (supabase) {
-    await supabase.from('content_briefs').insert({
+    console.log('[Content] Saving brief to Supabase...')
+    const { error: briefInsertErr } = await supabase.from('content_briefs').insert({
       id: briefId, run_at: briefData.run_at,
       youtube: topVideos, news: topNews, reddit: topReddit,
       tools: freshTools, ideas: ideasWithIds, channel_stats: channelStats,
       competitors: competitorVideos,
     })
+    if (briefInsertErr) {
+      console.error('[Content] ✗ Failed to insert content_briefs:', briefInsertErr.message)
+      throw new Error(`Supabase insert failed: ${briefInsertErr.message}`)
+    }
+    console.log('[Content] ✓ Brief saved to Supabase')
+
     // Store all generated ideas as individual rows for easy lookup (required for Slack save button)
     const allIdeas = [...ideasWithIds.short_form, ...ideasWithIds.long_form]
     if (allIdeas.length) {
       const { error: ideasInsertErr } = await supabase.from('content_ideas').insert(allIdeas.map((idea) => ({
         id: idea.id, brief_id: briefId, format: idea.format, title: idea.title,
         hook: idea.hook || null, outline: idea.outline || null, why_timely: idea.why_timely || null,
-        freshness_score: idea.freshness_score || null,
         status: 'generated', created_at: new Date().toISOString(),
       })))
       if (ideasInsertErr) {
@@ -2936,12 +2951,13 @@ async function runContentBrief({ manual = false } = {}) {
       }
     }
     if (channelStats) {
-      await supabase.from('youtube_channel_stats').insert({
+      const { error: statsErr } = await supabase.from('youtube_channel_stats').insert({
         fetched_at: briefData.run_at, channel_id: channelStats.channelId,
         channel_name: channelStats.channelName, subscriber_count: channelStats.subscriberCount,
         view_count: channelStats.totalViews, video_count: channelStats.videoCount,
         top_videos: channelStats.topVideos, recent_videos: channelStats.recentVideos, avg_views: channelStats.avgViews,
       })
+      if (statsErr) console.error('[Content] ✗ Failed to insert youtube_channel_stats:', statsErr.message)
     }
   }
 
@@ -3088,8 +3104,13 @@ app.get('/api/content/briefs/:id', requireAuth, async (req, res) => {
 })
 
 app.post('/api/content/run-brief', requireAuth, async (req, res) => {
-  res.json({ success: true, message: 'Brief running in background…' })
-  runContentBrief({ manual: true }).catch((err) => console.error('[Content] Manual brief error:', err.message))
+  try {
+    const brief = await runContentBrief({ manual: true })
+    res.json({ success: true, briefId: brief.id, message: 'Brief generated successfully.' })
+  } catch (err) {
+    console.error('[Content] Manual brief error:', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
 })
 
 app.get('/api/content/topics', requireAuth, async (req, res) => {
