@@ -2686,10 +2686,14 @@ Return ONLY valid JSON (no markdown fences) in this exact format:
 Generate exactly 5 short_form ideas and 3 long_form ideas. Aim for ~2 from Source A, ~2 from Source B, ~2 from Source C for short_form; ~1 each for long_form. Strictly follow all VARIETY RULES above.`
 
   const msg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6', max_tokens: 2000,
+    model: 'claude-sonnet-4-6', max_tokens: 4096,
     messages: [{ role: 'user', content: prompt }],
   })
-  const text = msg.content[0].text.trim()
+  if (msg.stop_reason === 'max_tokens') {
+    console.error('[Content] Claude response was truncated (hit max_tokens)')
+  }
+  const text = (msg.content[0]?.text || '').trim()
+  if (!text) throw new Error('Empty response from Claude')
   const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
   return JSON.parse(clean)
 }
@@ -2720,6 +2724,15 @@ async function sendBriefToSlack(brief) {
   const date = new Date(brief.run_at).toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Chicago',
   })
+
+  // Slack limits text blocks to 3000 chars
+  const mkSection = (text) => ({ type: 'section', text: { type: 'mrkdwn', text: text.slice(0, 2999) } })
+  const mkSectionWithBtn = (text, actionId, value) => ({
+    type: 'section',
+    text: { type: 'mrkdwn', text: text.slice(0, 2999) },
+    accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: actionId, value },
+  })
+
   const blocks = []
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `📊 Daily Industry Brief — ${date}` } })
   blocks.push({ type: 'divider' })
@@ -2728,7 +2741,7 @@ async function sendBriefToSlack(brief) {
     const lines = brief.news.slice(0, 5).map((n, i) =>
       `${i + 1}. <${n.url}|${n.title}>\n   _${n.source}_ — ${(n.snippet || '').slice(0, 100)}`
     ).join('\n')
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*📰 Industry News*\n${lines}` } })
+    blocks.push(mkSection(`*📰 Industry News*\n${lines}`))
     blocks.push({ type: 'divider' })
   }
 
@@ -2740,10 +2753,10 @@ async function sendBriefToSlack(brief) {
         r.numComments != null ? `💬 ${formatNum(r.numComments)}` : null,
         r.relevance || null,
       ].filter(Boolean).join(' • ')
-      const snippet = r.snippet ? `\n   >${r.snippet.slice(0, 180)}` : ''
+      const snippet = r.snippet ? `\n   >${r.snippet.slice(0, 120)}` : ''
       return `${i + 1}. <${r.url}|${r.title}>\n   _${meta}_${snippet}`
     }).join('\n\n')
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*💬 Reddit Buzz*\n${lines}` } })
+    blocks.push(mkSection(`*💬 Reddit Buzz*\n${lines}`))
     blocks.push({ type: 'divider' })
   }
 
@@ -2751,68 +2764,78 @@ async function sendBriefToSlack(brief) {
     const lines = brief.tools.slice(0, 4).map((t, i) =>
       `${i + 1}. <${t.url}|${t.title}> — ${(t.snippet || '').slice(0, 80)}`
     ).join('\n')
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🛠️ Tool & Platform Updates*\n${lines}` } })
+    blocks.push(mkSection(`*🛠️ Tool & Platform Updates*\n${lines}`))
     blocks.push({ type: 'divider' })
   }
 
-  // Competitor Activity section — show ALL videos since last brief, per channel
+  // Competitor Activity — split into multiple blocks if needed (one per channel)
   if (brief.competitors?.length) {
-    const lines = []
+    const allLines = []
     for (const ch of brief.competitors) {
       if (ch.noNew || !ch.newVideos?.length) {
-        lines.push(`• _${ch.channel}_ — no new videos`)
+        allLines.push(`• _${ch.channel}_ — no new videos`)
       } else {
         for (const v of ch.newVideos) {
           if (v.isBreakout) {
-            lines.push(`🔥 <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views _(${Math.round(v.views / v.channelAvgViews)}x avg)_`)
+            allLines.push(`🔥 <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views _(${Math.round(v.views / v.channelAvgViews)}x avg)_`)
           } else {
-            lines.push(`• <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`)
+            allLines.push(`• <${v.url}|${v.title}>\n   _${v.channel}_ • ${formatNum(v.views)} views`)
           }
         }
       }
     }
-    if (lines.length) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎯 Competitor Activity*\n${lines.join('\n')}` } })
+    if (allLines.length) {
+      // Split into chunks that fit within 2900 chars each
+      let chunk = '*🎯 Competitor Activity*\n'
+      for (const line of allLines) {
+        if ((chunk + line + '\n').length > 2900) {
+          blocks.push(mkSection(chunk))
+          chunk = ''
+        }
+        chunk += line + '\n'
+      }
+      if (chunk.trim()) blocks.push(mkSection(chunk))
       blocks.push({ type: 'divider' })
     }
   }
 
   const sourceLabel = (s) => s === 'A' ? '📊 My Channel' : s === 'B' ? '🎯 Competitor' : '📰 Trending'
 
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*💡 Content Ideas for Kerry*\n_Click ⭐ Save to add an idea to your Ideas Bank_' } })
+  blocks.push(mkSection('*💡 Content Ideas for Kerry*\n_Click ⭐ Save to add an idea to your Ideas Bank_'))
 
   const freshnessEmoji = (s) => ({ Evergreen: '🌿', Timely: '⏰', Trending: '🔥' }[s] || '')
 
   if (brief.ideas?.short_form?.length) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*📱 Short Form (Reels / Shorts)*' } })
+    blocks.push(mkSection('*📱 Short Form (Reels / Shorts)*'))
     for (const idea of brief.ideas.short_form) {
       const src = idea.source ? ` • _${sourceLabel(idea.source)}_` : ''
       const fresh = idea.freshness_score ? ` • ${freshnessEmoji(idea.freshness_score)} ${idea.freshness_score}` : ''
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*${src}${fresh}\nHook: _${idea.hook}_\n${idea.why_timely}` },
-        accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
-      })
+      blocks.push(mkSectionWithBtn(
+        `*${idea.title}*${src}${fresh}\nHook: _${(idea.hook || '').slice(0, 200)}_\n${(idea.why_timely || '').slice(0, 300)}`,
+        'content_save_idea', idea.id,
+      ))
     }
   }
 
   if (brief.ideas?.long_form?.length) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*🎬 Long Form (YouTube)*' } })
+    blocks.push(mkSection('*🎬 Long Form (YouTube)*'))
     for (const idea of brief.ideas.long_form) {
       const src = idea.source ? ` • _${sourceLabel(idea.source)}_` : ''
       const fresh = idea.freshness_score ? ` • ${freshnessEmoji(idea.freshness_score)} ${idea.freshness_score}` : ''
-      blocks.push({
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*${idea.title}*${src}${fresh}\n${idea.outline}\n_${idea.why_timely}_` },
-        accessory: { type: 'button', text: { type: 'plain_text', text: '⭐ Save' }, action_id: 'content_save_idea', value: idea.id },
-      })
+      blocks.push(mkSectionWithBtn(
+        `*${idea.title}*${src}${fresh}\n${(idea.outline || '').slice(0, 500)}\n_${(idea.why_timely || '').slice(0, 300)}_`,
+        'content_save_idea', idea.id,
+      ))
     }
   }
+
+  // Slack also limits total blocks to 50
+  const finalBlocks = blocks.slice(0, 50)
 
   const msg = await slackClient.chat.postMessage({
     channel: process.env.SLACK_CHANNEL_ID,
     text: `📊 Daily Industry Brief — ${date}`,
-    blocks,
+    blocks: finalBlocks,
   })
   if (supabase && msg.ts) {
     await supabase.from('content_briefs').update({ slack_ts: msg.ts }).eq('id', brief.id)
@@ -2961,7 +2984,12 @@ async function runContentBrief({ manual = false } = {}) {
     }
   }
 
-  await sendBriefToSlack(briefData)
+  try {
+    await sendBriefToSlack(briefData)
+    console.log('[Content] ✓ Sent to Slack')
+  } catch (err) {
+    console.error('[Content] ✗ Slack send failed:', err.message)
+  }
   console.log('[Content] Brief complete.')
   return briefData
 }
