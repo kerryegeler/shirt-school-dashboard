@@ -1656,7 +1656,7 @@ async function updateSlackMessage(notif, status) {
   })
 }
 
-async function postEmailToSlack(thread) {
+async function postEmailToSlack(thread, lastInboundMessageId = null) {
   if (!slackClient || !process.env.SLACK_CHANNEL_ID) return
 
   let result
@@ -1701,6 +1701,7 @@ async function postEmailToSlack(thread) {
       status: 'pending', draft, category: thread.category,
       confidence, confidence_reason: confidence_reason || null,
       summary, thread_meta: threadMeta,
+      last_notified_message_id: lastInboundMessageId,
       created_at: new Date().toISOString(),
     })
 
@@ -1844,37 +1845,27 @@ async function runSlackPoll() {
       const threads = listRes.data.threads || []
 
       for (const t of threads) {
-        if (slackNotifiedCache.has(t.id)) {
-          // Thread was already notified. If it re-appears in inbox after being sent/skipped,
-          // Gmail moved it back due to a new inbound reply — we should re-notify.
-          try {
-            const notif = await getSlackNotification(t.id)
-            if (notif && ['sent', 'skipped'].includes(notif.status)) {
-              console.log(`[Slack] Thread ${t.id} re-appeared in inbox after being ${notif.status} — checking for new reply`)
-              slackNotifiedCache.delete(t.id) // allow re-processing below
-            }
-          } catch {}
-          if (slackNotifiedCache.has(t.id)) continue
-        }
-
-        // Mark in cache immediately to prevent duplicate processing
-        slackNotifiedCache.add(t.id)
-
         try {
           const threadRes = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' })
           const thread = buildThreadObject(threadRes.data, account)
           if (!thread) continue
 
-          // Skip: too old, or we already sent the last message
           if (new Date(thread.timestamp).getTime() < cutoff) continue
-          const lastMsg = (thread.messages || []).at(-1)
-          if (lastMsg?.isOutgoing) continue
 
-          await postEmailToSlack(thread)
+          // Find the latest inbound (non-outgoing) message in the thread
+          const latestInbound = (thread.messages || []).filter((m) => !m.isOutgoing).at(-1)
+          if (!latestInbound) continue // no inbound messages — nothing to notify
+
+          const latestMsgId = latestInbound.messageId || latestInbound.id
+
+          // Check if we've already notified on this specific message
+          const notif = await getSlackNotification(t.id)
+          if (notif?.last_notified_message_id === latestMsgId) continue
+
+          await postEmailToSlack(thread, latestMsgId)
           await new Promise((r) => setTimeout(r, 800)) // Rate limit guard
         } catch (err) {
           console.error(`[Slack] Error processing thread ${t.id}:`, err.message)
-          slackNotifiedCache.delete(t.id) // Allow retry next poll
         }
       }
     } catch (err) {
@@ -1888,10 +1879,10 @@ function startSlackPolling() {
     console.log('  Slack: not configured (set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID to enable)')
     return
   }
-  console.log('  Slack: approval workflow enabled, polling every 15 min')
+  console.log('  Slack: approval workflow enabled, polling every 3 min')
   const safeRunSlackPoll = () => runSlackPoll().catch((err) => console.error('[Slack] Poll uncaught error:', err.message))
   setTimeout(safeRunSlackPoll, 15_000) // First run 15s after startup
-  setInterval(safeRunSlackPoll, 15 * 60 * 1000)
+  setInterval(safeRunSlackPoll, 3 * 60 * 1000)
 }
 
 
@@ -2009,14 +2000,9 @@ app.post('/api/slack/actions', async (req, res) => {
           }).catch(() => {})
         }
       }
-      console.log(`[Slack Action] Scheduling send in 5 minutes for thread ${threadId}`)
-      scheduleApprovalSend(threadId, 5 * 60 * 1000)
+      console.log(`[Slack Action] Sending immediately for thread ${threadId}`)
       await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'approved')
-      if (slackClient && channelId && slackTs) {
-        await slackClient.chat.postMessage({ channel: channelId, thread_ts: slackTs,
-          text: `⏳ Approved! Reply will be sent in 5 minutes. Press *Cancel Send* to stop it.`,
-        }).catch(() => {})
-      }
+      sendApprovedEmail(threadId).catch((err) => console.error('[Slack Action] Send error:', err.message))
 
     } else if (actionId === 'cancel_email') {
       if (approvalTimers.has(threadId)) {
@@ -2131,7 +2117,7 @@ app.post('/api/slack/actions', async (req, res) => {
       if (slackClient && channelId && slackTs) {
         await slackClient.chat.postMessage({
           channel: channelId, thread_ts: slackTs,
-          text: `Reply to this thread with your edit instructions and I will regenerate the draft.`,
+          text: `💬 Reply in this thread with your edit instructions (e.g. "add a link to shirtschool.com", "make it more casual", "shorten the 2nd paragraph") and I'll regenerate the draft.`,
         })
       }
 
@@ -3897,18 +3883,11 @@ async function init() {
       for (const row of slackRows) slackNotifiedCache.add(row.thread_id)
       console.log(`  Loaded ${slackRows.length} Slack notification(s)`)
 
-      // Recover any pending approval timers (server was restarted mid-countdown)
+      // Recover any approvals that never went out (e.g. crash between approve and send)
       const pendingApprovals = slackRows.filter((r) => r.status === 'approved' && r.approved_at)
       for (const row of pendingApprovals) {
-        const elapsed = Date.now() - new Date(row.approved_at).getTime()
-        const remaining = 5 * 60 * 1000 - elapsed
-        if (remaining > 0) {
-          console.log(`  Rescheduling Slack send for ${row.thread_id} in ${Math.round(remaining / 1000)}s`)
-          scheduleApprovalSend(row.thread_id, remaining)
-        } else {
-          console.log(`  Sending overdue Slack approval for ${row.thread_id}`)
-          sendApprovedEmail(row.thread_id)
-        }
+        console.log(`  Sending queued Slack approval for ${row.thread_id}`)
+        sendApprovedEmail(row.thread_id).catch((err) => console.error('  Send error:', err.message))
       }
     }
   } else {
