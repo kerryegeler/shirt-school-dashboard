@@ -1992,12 +1992,14 @@ app.post('/api/slack/actions', async (req, res) => {
         console.log(`[Slack Action] Supabase status→approved: ${updateErr ? `ERROR: ${updateErr.message}` : '✓'}`)
         // Log feedback: draft approved without changes
         if (notif?.draft) {
-          await supabase.from('ai_feedback').insert({
-            thread_id: threadId, category: notif.category || 'general',
-            original_draft: notif.draft, final_version: notif.draft,
-            diff_summary: 'Approved without changes', action: 'approved',
-            created_at: new Date().toISOString(),
-          }).catch(() => {})
+          try {
+            await supabase.from('ai_feedback').insert({
+              thread_id: threadId, category: notif.category || 'general',
+              original_draft: notif.draft, final_version: notif.draft,
+              diff_summary: 'Approved without changes', action: 'approved',
+              created_at: new Date().toISOString(),
+            })
+          } catch {}
         }
       }
       console.log(`[Slack Action] Sending immediately for thread ${threadId}`)
@@ -2093,12 +2095,14 @@ app.post('/api/slack/actions', async (req, res) => {
           .eq('thread_id', threadId)
         // Log feedback: skipped
         if (notif?.draft) {
-          await supabase.from('ai_feedback').insert({
-            thread_id: threadId, category: notif.category || 'general',
-            original_draft: notif.draft, final_version: notif.draft,
-            diff_summary: 'Skipped — no reply sent', action: 'skipped',
-            created_at: new Date().toISOString(),
-          }).catch(() => {})
+          try {
+            await supabase.from('ai_feedback').insert({
+              thread_id: threadId, category: notif.category || 'general',
+              original_draft: notif.draft, final_version: notif.draft,
+              diff_summary: 'Skipped — no reply sent', action: 'skipped',
+              created_at: new Date().toISOString(),
+            })
+          } catch {}
         }
       }
       if (notif) await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped')
@@ -2227,12 +2231,14 @@ app.post('/api/slack/events', async (req, res) => {
     savedDraftsCache.add(notif.thread_id)
 
     // Log feedback
-    await supabase.from('ai_feedback').insert({
-      thread_id: notif.thread_id, category: notif.category || 'general',
-      original_draft: currentDraft, final_version: revisedDraft,
-      diff_summary: computeDiffSummary(currentDraft, revisedDraft), action: 'edited',
-      created_at: new Date().toISOString(),
-    }).catch(() => {})
+    try {
+      await supabase.from('ai_feedback').insert({
+        thread_id: notif.thread_id, category: notif.category || 'general',
+        original_draft: currentDraft, final_version: revisedDraft,
+        diff_summary: computeDiffSummary(currentDraft, revisedDraft), action: 'edited',
+        created_at: new Date().toISOString(),
+      })
+    } catch {}
 
     // Post revised draft back to Slack thread with all 4 action buttons
     if (slackClient && notif.channel_id) {
