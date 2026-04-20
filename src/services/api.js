@@ -109,14 +109,14 @@ export async function fetchDraft(threadId) {
   const response = await fetch(`/api/drafts/${threadId}`)
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to fetch draft')
-  return data.content
+  return { content: data.content, originalAiDraft: data.originalAiDraft || null }
 }
 
-export async function saveDraft(threadId, content) {
+export async function saveDraft(threadId, content, originalAiDraft) {
   const response = await fetch(`/api/drafts/${threadId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, originalAiDraft }),
   })
   if (!response.ok) {
     const data = await response.json()

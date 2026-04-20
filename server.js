@@ -1113,26 +1113,32 @@ app.patch('/api/emails/:id/folder', requireAuth, async (req, res) => {
 app.get('/api/drafts/:threadId', requireAuth, async (req, res) => {
   const { threadId } = req.params
   if (supabase) {
-    const { data } = await supabase.from('saved_drafts').select('content').eq('thread_id', threadId).single()
-    return res.json({ content: data?.content || null })
+    const { data } = await supabase.from('saved_drafts').select('content, original_ai_draft').eq('thread_id', threadId).single()
+    return res.json({ content: data?.content || null, originalAiDraft: data?.original_ai_draft || null })
   }
   try {
     if (fs.existsSync(DRAFTS_PATH)) {
       const drafts = JSON.parse(fs.readFileSync(DRAFTS_PATH, 'utf8'))
-      return res.json({ content: drafts[threadId] || null })
+      return res.json({ content: drafts[threadId] || null, originalAiDraft: null })
     }
   } catch {}
-  res.json({ content: null })
+  res.json({ content: null, originalAiDraft: null })
 })
 
 app.put('/api/drafts/:threadId', requireAuth, async (req, res) => {
   const { threadId } = req.params
-  const { content } = req.body
+  const { content, originalAiDraft } = req.body
   if (!content?.trim()) return res.status(400).json({ error: 'Draft content required' })
   savedDraftsCache.add(threadId)
   if (supabase) {
-    const { error } = await supabase.from('saved_drafts')
-      .upsert({ thread_id: threadId, content, updated_at: new Date().toISOString() })
+    const payload = { thread_id: threadId, content, updated_at: new Date().toISOString() }
+    // Only set original_ai_draft if provided and not already stored
+    if (originalAiDraft) {
+      const { data: existing } = await supabase.from('saved_drafts')
+        .select('original_ai_draft').eq('thread_id', threadId).single()
+      if (!existing?.original_ai_draft) payload.original_ai_draft = originalAiDraft
+    }
+    const { error } = await supabase.from('saved_drafts').upsert(payload)
     if (error) return res.status(500).json({ error: 'Failed to save draft' })
   } else {
     try {
@@ -1699,8 +1705,10 @@ async function postEmailToSlack(thread) {
     })
 
     // Save draft to saved_drafts so it auto-loads in EmailDetail ("Edit in Dashboard")
+    // Also store as original_ai_draft so edits can be compared for feedback learning
     await supabase.from('saved_drafts').upsert({
-      thread_id: thread.id, content: draft, updated_at: new Date().toISOString(),
+      thread_id: thread.id, content: draft, original_ai_draft: draft,
+      updated_at: new Date().toISOString(),
     })
     savedDraftsCache.add(thread.id)
   }
@@ -2225,7 +2233,8 @@ app.post('/api/slack/events', async (req, res) => {
       .update({ draft: revisedDraft })
       .eq('thread_id', notif.thread_id)
 
-    // Update saved_drafts so EmailDetail picks it up
+    // Update saved_drafts so EmailDetail picks it up.
+    // Keep the original AI draft intact — only update the editable content.
     await supabase.from('saved_drafts').upsert({
       thread_id: notif.thread_id, content: revisedDraft, updated_at: new Date().toISOString(),
     })

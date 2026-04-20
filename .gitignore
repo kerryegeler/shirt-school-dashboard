@@ -7,6 +7,9 @@ dist/
 .tokens-*.json
 .categories.json
 
+# Runtime-only files (server writes these; source of truth is Supabase)
+learned-behaviors.md
+
 # macOS
 .DS_Store
 

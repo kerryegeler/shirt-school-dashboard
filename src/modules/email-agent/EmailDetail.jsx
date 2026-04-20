@@ -235,8 +235,9 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   // Load saved draft on mount
   useEffect(() => {
     if (email.hasDraft) {
-      fetchDraft(email.id).then((content) => {
+      fetchDraft(email.id).then(({ content, originalAiDraft }) => {
         if (content) { setDraft(content); setManualMode(true) }
+        if (originalAiDraft) aiDraftRef.current = originalAiDraft
       }).catch(() => {})
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -291,9 +292,15 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
     if (!draft.trim()) return
     setSavingDraft(true)
     try {
-      await saveDraft(email.id, draft)
+      const original = aiDraftRef.current
+      await saveDraft(email.id, draft, original || null)
       setDraftSavedAt(new Date())
       onDraftSaved?.(email.id)
+      // Log feedback if draft differs from the AI original
+      if (original && draft !== original) {
+        logFeedback({ threadId: email.id, category: email.category, originalDraft: original, finalVersion: draft })
+          .catch(() => {})
+      }
     } catch {}
     finally { setSavingDraft(false) }
   }
@@ -305,9 +312,9 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       await sendEmail(email, draft, effectiveFrom, toEmail, manualMode)
       setSent(true)
       setConfirmSend(false)
-      // Log feedback if user edited the AI draft (not in manual mode)
+      // Log feedback whenever the final sent version differs from the AI original
       const original = aiDraftRef.current
-      if (original && draft !== original && !manualMode) {
+      if (original && draft !== original) {
         logFeedback({ threadId: email.id, category: email.category, originalDraft: original, finalVersion: draft })
           .catch(() => {})
       }
