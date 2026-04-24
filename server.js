@@ -396,6 +396,10 @@ function buildMessageObject(message, account) {
   let bodyHtml = extractHtmlBody(message.payload)
   if (bodyHtml) bodyHtml = replaceCidReferences(bodyHtml, attachments, message.id, account)
 
+  // Show any attachment with a filename (real files the user attached).
+  // Truly-inline images used only for HTML rendering typically have no filename.
+  const visibleAttachments = attachments.filter((a) => a.filename && a.filename.length > 0)
+
   return {
     id: message.id,
     account,
@@ -411,7 +415,7 @@ function buildMessageObject(message, account) {
     preview: message.snippet || bodyText.substring(0, 140).replace(/\n/g, ' ').trim(),
     timestamp: new Date(parseInt(message.internalDate)).toISOString(),
     labelIds: message.labelIds || [],
-    attachments: attachments.filter((a) => !a.isInline),
+    attachments: visibleAttachments,
   }
 }
 
@@ -685,6 +689,50 @@ function deduplicateThreads(threadsByAccount) {
   return [...threadMap.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
 }
 
+// Inject forward events as synthetic messages into each thread
+async function injectForwardsIntoThreads(threads) {
+  if (!supabase || !threads.length) return threads
+  const threadIds = threads.map((t) => t.id).filter(Boolean)
+  if (!threadIds.length) return threads
+  try {
+    const { data: forwards } = await supabase.from('email_forwards')
+      .select('*').in('thread_id', threadIds)
+    if (!forwards?.length) return threads
+
+    const byThread = new Map()
+    for (const f of forwards) {
+      if (!byThread.has(f.thread_id)) byThread.set(f.thread_id, [])
+      byThread.get(f.thread_id).push(f)
+    }
+
+    for (const thread of threads) {
+      const fwds = byThread.get(thread.id)
+      if (!fwds?.length) continue
+      const syntheticMsgs = fwds.map((f) => ({
+        id: `forward-${f.id || f.forwarded_at}`,
+        isForward: true,
+        isOutgoing: true,
+        from: f.forwarded_from_account,
+        senderName: 'You',
+        name: 'You',
+        to: f.forwarded_to,
+        subject: thread.subject,
+        bodyText: f.note || '',
+        timestamp: f.forwarded_at,
+        labelIds: [],
+        attachments: [],
+        forwardedTo: f.forwarded_to,
+        forwardedFromAccount: f.forwarded_from_account,
+      }))
+      thread.messages = [...(thread.messages || []), ...syntheticMsgs]
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    }
+  } catch (err) {
+    console.error('[Forward] Failed to inject forwards:', err.message)
+  }
+  return threads
+}
+
 app.get('/api/emails', requireAuth, async (req, res) => {
   const { archived, pageTokens: pageTokensParam } = req.query
   let pageTokens = {}
@@ -712,7 +760,7 @@ app.get('/api/emails', requireAuth, async (req, res) => {
         return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
       })
     )
-    const emails = deduplicateThreads(threadsByAccount)
+    const emails = await injectForwardsIntoThreads(deduplicateThreads(threadsByAccount))
     res.json({
       emails,
       nextPageTokens: Object.keys(nextPageTokens).length ? nextPageTokens : null,
@@ -1026,7 +1074,25 @@ app.post('/api/emails/forward', requireAuth, async (req, res) => {
     })
 
     await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
-    res.json({ success: true, sentFrom: sendFrom })
+
+    // Log the forward in Supabase so we can render it in the thread UI
+    const forwardedAt = new Date().toISOString()
+    if (supabase) {
+      try {
+        await supabase.from('email_forwards').insert({
+          thread_id: email.id || email.threadId, forwarded_to: toEmail.trim(),
+          forwarded_from_account: sendFrom, note: note || null,
+          forwarded_at: forwardedAt,
+        })
+      } catch (err) {
+        console.error('[Forward] Failed to log forward:', err.message)
+      }
+    }
+
+    res.json({
+      success: true, sentFrom: sendFrom,
+      forward: { thread_id: email.id || email.threadId, forwarded_to: toEmail.trim(), forwarded_from_account: sendFrom, note: note || null, forwarded_at: forwardedAt },
+    })
   } catch (error) {
     console.error('Gmail forward error:', error.message)
     const isAuthError = error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials') || error.response?.status === 401

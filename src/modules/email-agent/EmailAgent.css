@@ -1301,6 +1301,24 @@
   background: #fffdf5;
 }
 
+/* ─── Forward event message ─────────────────────────────────────── */
+.thread-msg--forward {
+  background: rgba(108, 99, 255, 0.06);
+  border: 1px solid rgba(108, 99, 255, 0.3);
+  border-radius: 8px;
+  margin: 6px 0;
+}
+
+.thread-msg--forward .thread-msg-header {
+  cursor: default;
+  padding: 10px 12px;
+}
+
+.thread-msg--forward .thread-msg-sender {
+  color: #8b83ff;
+  font-weight: 600;
+}
+
 /* ─── Attachments ───────────────────────────────────────────────── */
 .thread-msg-attachments {
   margin-top: 14px;

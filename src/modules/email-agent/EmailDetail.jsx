@@ -220,6 +220,25 @@ function AttachmentList({ message }) {
 function ThreadMessage({ message, defaultExpanded = true }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
+  // Forward event — render as a compact card, not a full message
+  if (message.isForward) {
+    return (
+      <div className="thread-msg thread-msg--forward">
+        <div className="thread-msg-header">
+          <div className="thread-msg-avatar" style={{ background: '#6c63ff' }}>↪</div>
+          <div className="thread-msg-meta">
+            <span className="thread-msg-sender">Forwarded to {message.forwardedTo}</span>
+            <span className="thread-msg-preview-collapsed">
+              from {message.forwardedFromAccount}
+              {message.bodyText ? ` — "${message.bodyText.slice(0, 60)}"` : ''}
+            </span>
+          </div>
+          <span className="thread-msg-time">{formatShortDate(message.timestamp)}</span>
+        </div>
+      </div>
+    )
+  }
+
   const senderLabel = message.isOutgoing
     ? (message.senderName || message.from || 'You')
     : (message.senderName || message.from)
@@ -357,10 +376,24 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       // Forward the latest inbound message in the thread
       const msgs = email.messages || []
       const latestInbound = [...msgs].reverse().find((m) => !m.isOutgoing) || msgs[msgs.length - 1]
-      await forwardEmail({
+      const result = await forwardEmail({
         email, message: latestInbound,
         toEmail: forwardTo.trim(), fromAccount: effectiveFrom, note: forwardNote,
       })
+      // Inject a synthetic forward message into the local thread so it shows immediately
+      if (result?.forward && email.messages) {
+        const f = result.forward
+        email.messages.push({
+          id: `forward-${f.forwarded_at}`,
+          isForward: true, isOutgoing: true,
+          from: f.forwarded_from_account, senderName: 'You', name: 'You',
+          to: f.forwarded_to, subject: email.subject,
+          bodyText: f.note || '', timestamp: f.forwarded_at,
+          labelIds: [], attachments: [],
+          forwardedTo: f.forwarded_to,
+          forwardedFromAccount: f.forwarded_from_account,
+        })
+      }
       setForwarded(true)
       setTimeout(() => {
         setShowForward(false)
