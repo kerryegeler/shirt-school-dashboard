@@ -490,6 +490,21 @@ function buildThreadObject(thread, account) {
   }
 }
 
+function buildForwardRaw({ from, to, subject, body }) {
+  const fwdSubject = /^fwd?:/i.test(subject) ? subject : `Fwd: ${subject}`
+  return Buffer.from(
+    [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: ${fwdSubject}`,
+      'Content-Type: text/plain; charset=utf-8',
+      'MIME-Version: 1.0',
+      '',
+      body,
+    ].join('\r\n')
+  ).toString('base64url')
+}
+
 function buildReplyRaw({ from, to, subject, inReplyTo, references, body }) {
   const reSubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`
   return Buffer.from(
@@ -966,6 +981,64 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
   }
 })
 
+// Forward a message to a new recipient (not a reply — starts a new thread)
+app.post('/api/emails/forward', requireAuth, async (req, res) => {
+  const { email, message, toEmail, fromAccount, note } = req.body
+  if (!email || !toEmail?.trim()) return res.status(400).json({ error: 'Missing recipient' })
+
+  const sendFrom =
+    fromAccount && TARGET_ACCOUNTS.includes(fromAccount) && hasTokens(fromAccount)
+      ? fromAccount
+      : email.account
+  if (!hasTokens(sendFrom)) {
+    return res.status(400).json({ error: `${sendFrom} is not connected. Connect it first.` })
+  }
+
+  const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
+  try {
+    const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendFrom] })
+    const { data: userInfo } = await oauth2.userinfo.get()
+
+    // Build forwarded body: optional note + original message details + original body
+    const origFrom = message?.from || email.from || 'unknown'
+    const origFromName = message?.senderName || message?.name || email.name || ''
+    const origDate = message?.timestamp ? new Date(message.timestamp).toString() : ''
+    const origSubject = message?.subject || email.subject || '(no subject)'
+    const origTo = message?.to || email.to || ''
+    const origBody = message?.bodyText || email.bodyText || '(no content)'
+
+    const body = [
+      note?.trim() ? note.trim() + '\n\n' : '',
+      '---------- Forwarded message ----------',
+      `From: ${origFromName ? `${origFromName} <${origFrom}>` : origFrom}`,
+      origDate ? `Date: ${origDate}` : '',
+      `Subject: ${origSubject}`,
+      origTo ? `To: ${origTo}` : '',
+      '',
+      origBody,
+    ].filter(Boolean).join('\n')
+
+    const raw = buildForwardRaw({
+      from: `${userInfo.name || sendFrom} <${sendFrom}>`,
+      to: toEmail.trim(),
+      subject: origSubject,
+      body,
+    })
+
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+    res.json({ success: true, sentFrom: sendFrom })
+  } catch (error) {
+    console.error('Gmail forward error:', error.message)
+    const isAuthError = error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials') || error.response?.status === 401
+    if (isAuthError) {
+      await clearTokens(sendFrom)
+      clients[sendFrom].setCredentials({})
+      return res.status(401).json({ error: `Gmail token expired for ${sendFrom}. Please reconnect.` })
+    }
+    res.status(500).json({ error: `Failed to forward: ${error.message}` })
+  }
+})
+
 // ─── Email label routes ───────────────────────────────────────────────────────
 
 app.patch('/api/emails/:id/read', requireAuth, async (req, res) => {
@@ -1435,13 +1508,33 @@ ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
 
+  // Build conversation-aware prompt: separate prior messages from the latest reply
+  const msgs = thread.messages || []
+  const latestInbound = [...msgs].reverse().find((m) => !m.isOutgoing) || msgs[msgs.length - 1]
+  const priorMsgs = msgs.filter((m) => m !== latestInbound)
+
+  const latestBody = stripEmailQuotes(latestInbound?.bodyText || '').slice(0, 3000)
+  const historyText = priorMsgs.length
+    ? priorMsgs.map((m) => {
+        const who = m.isOutgoing ? `[${personaName} sent]` : `[${m.senderName || 'them'} wrote]`
+        const when = new Date(m.timestamp).toLocaleDateString()
+        return `${who} (${when}):\n${stripEmailQuotes(m.bodyText || '').slice(0, 500)}`
+      }).join('\n\n')
+    : ''
+
   const userPrompt = `Category: ${category}. Reply as ${personaName}.
 
-From: ${thread.name} <${thread.from}>
 Subject: ${thread.subject}
+${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}
+--- LATEST MESSAGE TO REPLY TO ---
+From: ${latestInbound?.senderName || thread.name} <${latestInbound?.from || thread.from}>
+Date: ${new Date(latestInbound?.timestamp || thread.timestamp).toLocaleString()}
+
+${latestBody}
 ---
-${(thread.bodyText || '').slice(0, 2000)}
----
+
+Draft a reply that directly addresses the LATEST message above. The prior conversation is context — do not re-answer points that have already been resolved.
+
 Return JSON only.`
 
   const message = await anthropic.messages.create({
@@ -1537,7 +1630,7 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
   )
 
   const statusMessages = {
-    approved: '✅ *Approved* — sending in 5 minutes…',
+    approved: '✅ *Approved* — sending now…',
     sent:     '✅ *Sent* via Gmail.',
     skipped:  '⏭️ *Skipped* — no reply needed.',
   }
@@ -1556,7 +1649,7 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
           action_id: 'approve_email', value: thread.id,
           confirm: {
             title: { type: 'plain_text', text: 'Approve this reply?' },
-            text: { type: 'mrkdwn', text: 'The draft will be sent in 5 minutes. You can cancel during that window.' },
+            text: { type: 'mrkdwn', text: 'The draft will be sent immediately to Gmail.' },
             confirm: { type: 'plain_text', text: 'Approve' },
             deny: { type: 'plain_text', text: 'Cancel' },
           },
@@ -1577,16 +1670,6 @@ function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, 
           action_id: 'archive_email', value: thread.id,
         },
       ],
-    })
-  } else if (status === 'approved') {
-    blocks.push({
-      type: 'actions',
-      block_id: 'email_approval',
-      elements: [{
-        type: 'button', style: 'danger',
-        text: { type: 'plain_text', text: '❌ Cancel Send' },
-        action_id: 'cancel_email', value: thread.id,
-      }],
     })
   }
 
@@ -1801,6 +1884,21 @@ async function sendApprovedEmail(threadId) {
         .eq('thread_id', threadId)
     }
 
+    // Auto-archive the thread from all connected accounts that know about it
+    const archiveAccounts = (notif.thread_meta?.accounts?.length)
+      ? notif.thread_meta.accounts
+      : [notif.account]
+    await Promise.allSettled(archiveAccounts.map(async (acct) => {
+      if (!hasTokens(acct)) return
+      const g = google.gmail({ version: 'v1', auth: clients[acct] })
+      try {
+        await g.users.threads.modify({ userId: 'me', id: threadId, requestBody: { removeLabelIds: ['INBOX'] } })
+        console.log(`[Slack Send] ✓ Archived thread ${threadId} from ${acct}`)
+      } catch (err) {
+        console.error(`[Slack Send] Archive failed for ${acct}:`, err.message)
+      }
+    }))
+
     await updateSlackMessage({ ...notif, status: 'sent' }, 'sent')
 
     // Post success confirmation in the Slack thread
@@ -1808,7 +1906,7 @@ async function sendApprovedEmail(threadId) {
       const recipient = meta.from ? `${meta.fromName ? meta.fromName + ' ' : ''}<${meta.from}>` : 'recipient'
       await slackClient.chat.postMessage({
         channel: notif.channel_id, thread_ts: notif.slack_ts,
-        text: `✅ Email sent to ${recipient} from *${sendFrom}*`,
+        text: `✅ Email sent to ${recipient} from *${sendFrom}* — thread archived.`,
       }).catch(() => {})
     }
 
@@ -1923,16 +2021,32 @@ ${feedbackContext}
 
 Write only the email body — no subject line, no "From:", no metadata. Start directly with the greeting.`
 
-  const userPrompt = `Draft a reply to this email:
+  // Build conversation-aware prompt: separate prior messages from the latest reply
+  const msgs = email.messages || []
+  const latestInbound = [...msgs].reverse().find((m) => !m.isOutgoing) || msgs[msgs.length - 1]
+  const priorMsgs = msgs.filter((m) => m !== latestInbound)
 
-From: ${email.name} <${email.from}>
-To: ${email.to}
+  const latestBody = stripEmailQuotes(latestInbound?.bodyText || email.bodyText || email.body || '').slice(0, 3000)
+  const historyText = priorMsgs.length
+    ? priorMsgs.map((m) => {
+        const who = m.isOutgoing ? `[${personaName} sent]` : `[${m.senderName || 'them'} wrote]`
+        const when = new Date(m.timestamp).toLocaleDateString()
+        return `${who} (${when}):\n${stripEmailQuotes(m.bodyText || '').slice(0, 500)}`
+      }).join('\n\n')
+    : ''
+
+  const userPrompt = `Draft a reply to the LATEST message in this email thread.
+
 Subject: ${email.subject}
----
-${email.bodyText || email.body || '(no body)'}
+${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}
+--- LATEST MESSAGE TO REPLY TO ---
+From: ${latestInbound?.senderName || email.name} <${latestInbound?.from || email.from}>
+Date: ${new Date(latestInbound?.timestamp || email.timestamp || Date.now()).toLocaleString()}
+
+${latestBody}
 ---
 
-Reply as instructed in the context above.`
+Draft a reply that directly addresses the LATEST message above. Do not re-answer points that have already been resolved in the prior conversation.`
 
   try {
     const message = await anthropic.messages.create({

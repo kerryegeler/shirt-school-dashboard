@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback } from '../../services/api.js'
+import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback, forwardEmail } from '../../services/api.js'
 
 const CATEGORY_LABELS = {
   student_support: 'Student Support',
@@ -162,6 +162,60 @@ function HtmlEmail({ html, msgId }) {
   )
 }
 
+// ─── Attachment pill ───────────────────────────────────────────────────────────
+function formatBytes(n) {
+  if (!n || n < 1024) return `${n || 0} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+function attachmentIcon(mimeType) {
+  if (!mimeType) return '📎'
+  if (mimeType.startsWith('image/')) return '🖼️'
+  if (mimeType === 'application/pdf') return '📄'
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel') || mimeType.includes('csv')) return '📊'
+  if (mimeType.includes('zip') || mimeType.includes('compressed')) return '🗜️'
+  if (mimeType.includes('audio')) return '🎵'
+  if (mimeType.includes('video')) return '🎬'
+  return '📎'
+}
+
+function AttachmentList({ message }) {
+  const atts = message.attachments || []
+  if (!atts.length) return null
+
+  return (
+    <div className="thread-msg-attachments">
+      <div className="attachments-label">Attachments ({atts.length})</div>
+      <div className="attachments-grid">
+        {atts.map((att) => {
+          const url = `/api/emails/${message.id}/attachment/${att.attachmentId}?type=${encodeURIComponent(att.mimeType || '')}&account=${encodeURIComponent(message.account || '')}`
+          const isImage = (att.mimeType || '').startsWith('image/')
+          return (
+            <div key={att.attachmentId} className="attachment-pill">
+              {isImage ? (
+                <a href={url} target="_blank" rel="noreferrer" className="attachment-image-link" title={att.filename}>
+                  <img src={url} alt={att.filename || 'attachment'} loading="lazy" className="attachment-image-thumb" />
+                </a>
+              ) : (
+                <div className="attachment-icon">{attachmentIcon(att.mimeType)}</div>
+              )}
+              <div className="attachment-info">
+                <div className="attachment-name" title={att.filename}>{att.filename || 'unnamed'}</div>
+                <div className="attachment-meta">{formatBytes(att.size)}</div>
+              </div>
+              <div className="attachment-actions">
+                <a href={url} target="_blank" rel="noreferrer" className="attachment-btn">View</a>
+                <a href={url} download={att.filename || 'attachment'} className="attachment-btn">Download</a>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── Individual thread message ─────────────────────────────────────────────────
 function ThreadMessage({ message, defaultExpanded = true }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
@@ -207,6 +261,7 @@ function ThreadMessage({ message, defaultExpanded = true }) {
           ) : (
             <pre className="thread-msg-text">{message.bodyText || message.body || '(no content)'}</pre>
           )}
+          <AttachmentList message={message} />
         </div>
       )}
     </div>
@@ -230,6 +285,12 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   const [sendError, setSendError] = useState('')
   const [savingDraft, setSavingDraft] = useState(false)
   const [draftSavedAt, setDraftSavedAt] = useState(null)
+  const [showForward, setShowForward] = useState(false)
+  const [forwardTo, setForwardTo] = useState('')
+  const [forwardNote, setForwardNote] = useState('')
+  const [forwarding, setForwarding] = useState(false)
+  const [forwardError, setForwardError] = useState('')
+  const [forwarded, setForwarded] = useState(false)
   const aiDraftRef = useRef('') // Original AI-generated draft before user edits
 
   // Load saved draft on mount
@@ -286,6 +347,31 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
     await navigator.clipboard.writeText(draft)
     setCopied(true)
     setTimeout(() => setCopied(false), 2500)
+  }
+
+  async function handleForward() {
+    if (!forwardTo.trim()) { setForwardError('Recipient email is required'); return }
+    setForwarding(true)
+    setForwardError('')
+    try {
+      // Forward the latest inbound message in the thread
+      const msgs = email.messages || []
+      const latestInbound = [...msgs].reverse().find((m) => !m.isOutgoing) || msgs[msgs.length - 1]
+      await forwardEmail({
+        email, message: latestInbound,
+        toEmail: forwardTo.trim(), fromAccount: effectiveFrom, note: forwardNote,
+      })
+      setForwarded(true)
+      setTimeout(() => {
+        setShowForward(false)
+        setForwardTo(''); setForwardNote('')
+        setForwarded(false)
+      }, 1500)
+    } catch (err) {
+      setForwardError(err.message)
+    } finally {
+      setForwarding(false)
+    }
   }
 
   async function handleSaveDraft() {
@@ -462,6 +548,9 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
                   <><IconSparkle />{loading ? 'Drafting...' : 'Generate Draft'}</>
                 )}
               </button>
+              <button className="btn btn-ghost" onClick={() => setShowForward(true)} disabled={loading}>
+                ↪ Forward
+              </button>
             </div>
           )}
         </div>
@@ -596,6 +685,53 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
           </div>
         )}
       </div>}
+
+      {showForward && (
+        <div className="forward-modal-overlay" onClick={() => !forwarding && setShowForward(false)}>
+          <div className="forward-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="forward-modal-header">
+              <h3>Forward Email</h3>
+              <button className="icon-btn" onClick={() => setShowForward(false)} disabled={forwarding}>✕</button>
+            </div>
+            <div className="forward-modal-body">
+              <label className="forward-label">To</label>
+              <input
+                type="email"
+                className="forward-input"
+                placeholder="recipient@example.com"
+                value={forwardTo}
+                onChange={(e) => setForwardTo(e.target.value)}
+                autoFocus
+                disabled={forwarding || forwarded}
+              />
+              <label className="forward-label">Add a note (optional)</label>
+              <textarea
+                className="forward-textarea"
+                placeholder="FYI — thought you'd want to see this."
+                value={forwardNote}
+                onChange={(e) => setForwardNote(e.target.value)}
+                rows={3}
+                disabled={forwarding || forwarded}
+              />
+              <div className="forward-preview">
+                <div className="forward-preview-label">Forwarded content:</div>
+                <div className="forward-preview-text">
+                  <strong>From:</strong> {email.from}<br />
+                  <strong>Subject:</strong> {email.subject}<br />
+                  <strong>Preview:</strong> {(email.bodyText || '').slice(0, 200)}…
+                </div>
+              </div>
+              {forwardError && <div className="forward-error">{forwardError}</div>}
+            </div>
+            <div className="forward-modal-footer">
+              <button className="btn btn-ghost" onClick={() => setShowForward(false)} disabled={forwarding}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleForward} disabled={forwarding || forwarded || !forwardTo.trim()}>
+                {forwarded ? '✓ Forwarded' : forwarding ? 'Forwarding…' : 'Forward'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

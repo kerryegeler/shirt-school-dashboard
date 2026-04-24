@@ -433,6 +433,27 @@ export async function sendEmail(email, draft, fromAccount, toEmail, isManual = f
   return data
 }
 
+export async function forwardEmail({ email, message, toEmail, fromAccount, note }) {
+  const trimmedEmail = {
+    id: email.id, threadId: email.threadId, from: email.from, to: email.to,
+    name: email.name, subject: email.subject, account: email.account,
+    bodyText: email.bodyText,
+  }
+  const trimmedMsg = message ? {
+    from: message.from, senderName: message.senderName, name: message.name,
+    to: message.to, subject: message.subject, bodyText: message.bodyText,
+    timestamp: message.timestamp,
+  } : null
+  const response = await fetch('/api/emails/forward', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: trimmedEmail, message: trimmedMsg, toEmail, fromAccount, note }),
+  })
+  const data = await response.json().catch(() => ({ error: 'Server error' }))
+  if (!response.ok) throw new Error(data.error || 'Failed to forward email')
+  return data
+}
+
 export async function triggerLearningRebuild() {
   const r = await fetch('/api/learning/run', { method: 'POST' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed') }
