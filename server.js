@@ -1001,6 +1001,35 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
     await gmail.users.messages.send({ userId: 'me', requestBody })
     res.json({ success: true, sentFrom: sendFrom })
 
+    // Mark this thread as "handled through the latest inbound message" so the Slack
+    // poll doesn't re-notify us about older messages if the thread stays/reappears in inbox.
+    // We look up the actual latest inbound Gmail message ID from the thread.
+    if (supabase && email.threadId) {
+      try {
+        const threadRes = await gmail.users.threads.get({ userId: 'me', id: email.threadId, format: 'metadata', metadataHeaders: ['Message-ID', 'From'] })
+        const msgs = threadRes.data.messages || []
+        const latestInbound = [...msgs].reverse().find((m) => {
+          const fromHeader = (m.payload?.headers || []).find((h) => h.name.toLowerCase() === 'from')?.value || ''
+          return !TARGET_ACCOUNTS.some((a) => fromHeader.toLowerCase().includes(a.toLowerCase()))
+        })
+        const latestInboundMsgId = latestInbound
+          ? ((latestInbound.payload?.headers || []).find((h) => h.name.toLowerCase() === 'message-id')?.value || latestInbound.id)
+          : null
+        if (latestInboundMsgId) {
+          await supabase.from('slack_notifications').upsert({
+            thread_id: email.threadId,
+            account: email.account || sendFrom,
+            status: 'sent',
+            last_notified_message_id: latestInboundMsgId,
+            sent_at: new Date().toISOString(),
+          }, { onConflict: 'thread_id' })
+          console.log(`[Dashboard Send] Marked thread ${email.threadId} handled through msg ${latestInboundMsgId}`)
+        }
+      } catch (err) {
+        console.error('[Dashboard Send] Could not mark thread handled:', err.message)
+      }
+    }
+
     // Save manual replies to learned-behaviors.md
     if (isManual) {
       const manualReplyData = {
