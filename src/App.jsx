@@ -5,6 +5,7 @@ import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
 import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import ChallengeLauncher from './modules/challenge-launcher/ChallengeLauncher.jsx'
+import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 
@@ -110,6 +111,7 @@ export default function App() {
           {activeModule === 'content-agent' && <ContentAgent />}
           {activeModule === 'content-board' && <ContentBoard />}
           {activeModule === 'challenge-launcher' && <ChallengeLauncher />}
+          {activeModule === 'payment-recovery' && <PaymentRecovery />}
         </main>
       </div>
 

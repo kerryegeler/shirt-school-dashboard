@@ -42,12 +42,21 @@ const IconRocket = () => (
   </svg>
 )
 
+const IconCard = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="3" width="14" height="10" rx="2" />
+    <path d="M1 6h14" />
+    <path d="M4 10h3" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
   { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: false },
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'challenge-launcher', label: 'Challenge Launcher', icon: IconRocket, comingSoon: false },
+  { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
   { id: 'sponsorship-tracker', label: 'Sponsorship Tracker', icon: IconChart, comingSoon: true },
 ]
 

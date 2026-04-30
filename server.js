@@ -4028,6 +4028,401 @@ app.post('/api/challenge-templates/import-from-kit', async (req, res) => {
   }
 })
 
+// ─── Payment Recovery (Kajabi) ────────────────────────────────────────────────
+
+const KAJABI_UPDATE_CARD_URL = 'https://www.shirtschool.com/settings/cards'
+const KAJABI_API_BASE = 'https://api.kajabi.com'
+let kajabiTokenCache = { token: null, expiresAt: 0 }
+
+async function getKajabiToken() {
+  const now = Date.now()
+  if (kajabiTokenCache.token && kajabiTokenCache.expiresAt > now + 60_000) {
+    return kajabiTokenCache.token
+  }
+  if (!process.env.KAJABI_API_KEY || !process.env.KAJABI_API_SECRET) {
+    throw new Error('KAJABI_API_KEY and KAJABI_API_SECRET must be set')
+  }
+  const res = await fetch(`${KAJABI_API_BASE}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'client_credentials',
+      client_id: process.env.KAJABI_API_KEY,
+      client_secret: process.env.KAJABI_API_SECRET,
+    }),
+  })
+  if (!res.ok) throw new Error(`Kajabi auth failed: ${res.status} ${await res.text()}`)
+  const data = await res.json()
+  kajabiTokenCache = {
+    token: data.access_token,
+    expiresAt: now + (data.expires_in || 3600) * 1000,
+  }
+  return data.access_token
+}
+
+async function kajabiGet(path, query = {}) {
+  const token = await getKajabiToken()
+  const qs = new URLSearchParams(query).toString()
+  const url = `${KAJABI_API_BASE}${path}${qs ? `?${qs}` : ''}`
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  })
+  if (!res.ok) throw new Error(`Kajabi GET ${path} failed: ${res.status} ${await res.text()}`)
+  return res.json()
+}
+
+// Pull recent failed payments from Kajabi and upsert into kajabi_payments.
+// Note: Kajabi's specific endpoint paths may need adjustment. We try the most
+// common ones and log what works/fails so the user can see actual API responses.
+async function syncKajabiPayments() {
+  if (!process.env.KAJABI_API_KEY || !supabase) return
+  console.log('[Kajabi] Starting payment sync...')
+
+  // Try a few likely endpoint shapes — Kajabi's API surface has shifted across versions.
+  // We attempt /v1/charges first, then /v1/transactions, then /v1/subscriptions.
+  const endpoints = [
+    { path: '/v1/charges', extract: (d) => d?.data || d?.charges || [] },
+    { path: '/v1/transactions', extract: (d) => d?.data || d?.transactions || [] },
+  ]
+
+  let payments = []
+  let workingEndpoint = null
+  for (const ep of endpoints) {
+    try {
+      const data = await kajabiGet(ep.path, { 'page[size]': '100' })
+      const items = ep.extract(data)
+      if (items.length) {
+        payments = items
+        workingEndpoint = ep.path
+        console.log(`[Kajabi] Found ${items.length} records via ${ep.path}`)
+        break
+      }
+    } catch (err) {
+      console.log(`[Kajabi] ${ep.path} not available: ${err.message.slice(0, 100)}`)
+    }
+  }
+
+  if (!workingEndpoint) {
+    console.log('[Kajabi] No payment endpoint responded. Verify your API credentials and Kajabi developer scopes.')
+    return
+  }
+
+  // Normalize each record into our shape. Field names are best-guess; we store the
+  // full raw payload so we can adjust the parser without re-fetching.
+  let upserted = 0
+  for (const p of payments) {
+    const attrs = p.attributes || p
+    const status = (attrs.status || attrs.state || '').toLowerCase()
+    const normalizedStatus =
+      status.includes('fail') || status === 'declined' ? 'failed' :
+      status.includes('succe') || status === 'paid' || status === 'completed' ? 'success' :
+      status === 'refund' || status === 'refunded' ? 'refunded' : 'pending'
+
+    const payment = {
+      kajabi_id: String(p.id || attrs.id || ''),
+      type: attrs.type || attrs.payment_type || 'one_time',
+      status: normalizedStatus,
+      customer_email: attrs.customer_email || attrs.email || attrs.user_email || null,
+      customer_name: attrs.customer_name || attrs.name || attrs.user_name || null,
+      customer_kajabi_id: String(attrs.customer_id || attrs.user_id || ''),
+      amount_cents: attrs.amount_cents || (attrs.amount ? Math.round(parseFloat(attrs.amount) * 100) : null),
+      currency: attrs.currency || 'USD',
+      product_name: attrs.product_name || attrs.offer_name || attrs.product || null,
+      failed_at: attrs.failed_at || (normalizedStatus === 'failed' ? attrs.created_at || attrs.updated_at : null) || null,
+      raw_data: p,
+      synced_at: new Date().toISOString(),
+    }
+    if (!payment.kajabi_id) continue
+    try {
+      await supabase.from('kajabi_payments').upsert(payment, { onConflict: 'kajabi_id' })
+      upserted++
+    } catch (err) {
+      console.error('[Kajabi] upsert error:', err.message)
+    }
+  }
+  console.log(`[Kajabi] Synced ${upserted} payments`)
+
+  // Auto-cancel sequences for payments that are now successful
+  await autoCancelRecoveredSequences()
+}
+
+async function autoCancelRecoveredSequences() {
+  if (!supabase) return
+  const { data: active } = await supabase.from('payment_recovery_sequences')
+    .select('id, customer_email, payment_id').eq('status', 'active')
+  if (!active?.length) return
+
+  for (const seq of active) {
+    if (!seq.payment_id) continue
+    const { data: payment } = await supabase.from('kajabi_payments')
+      .select('status').eq('id', seq.payment_id).single()
+    if (payment?.status === 'success') {
+      await supabase.from('payment_recovery_sequences')
+        .update({ status: 'paid', updated_at: new Date().toISOString() }).eq('id', seq.id)
+      await supabase.from('payment_recovery_emails')
+        .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
+      console.log(`[Recovery] Auto-cancelled sequence ${seq.id} (payment recovered)`)
+    }
+  }
+}
+
+const RECOVERY_EMAIL_TEMPLATES = [
+  {
+    step: 1, dayOffset: 0,
+    subject: "Your {{product}} payment didn't go through",
+    body: `Hey {{name}},
+
+Your most recent payment for {{product}} didn't go through. Usually it's an expired card or a bank flagging the charge.
+
+Update your card and complete the payment here: {{link}}
+
+We'll be revoking your access soon if this isn't taken care of, so update ASAP. Let me know if you run into any trouble.
+
+Kerry`,
+  },
+  {
+    step: 2, dayOffset: 5,
+    subject: 'Following up on your payment',
+    body: `Hey {{name}},
+
+Following up on the payment that didn't go through for {{product}}. Wanted to make sure this didn't slip through the cracks.
+
+Quick fix here: {{link}}
+
+You've got 5 days before your access is revoked. If something else is going on, let me know. Happy to help figure it out.
+
+Kerry`,
+  },
+  {
+    step: 3, dayOffset: 10,
+    subject: 'Final notice, your access is being removed',
+    body: `Hey {{name}},
+
+This is the last note from me on this. Your {{product}} access will be completely removed within 24 hours and you won't be able to regain access in the future.
+
+Update your card here: {{link}}
+
+Update your card or reply back ASAP. If money is tight or something changed, I'd rather hear from you than lose you.
+
+Kerry`,
+  },
+]
+
+function fillTemplate(text, vars) {
+  return text
+    .replace(/\{\{name\}\}/g, vars.name || 'there')
+    .replace(/\{\{product\}\}/g, vars.product || 'your subscription')
+    .replace(/\{\{link\}\}/g, vars.link || KAJABI_UPDATE_CARD_URL)
+}
+
+// Process due recovery emails: send them via Gmail and update status
+async function processDueRecoveryEmails() {
+  if (!supabase) return
+  const { data: due } = await supabase.from('payment_recovery_emails')
+    .select('*, payment_recovery_sequences(*)')
+    .lte('scheduled_for', new Date().toISOString())
+    .eq('status', 'pending')
+    .limit(20)
+  if (!due?.length) return
+
+  const sendAccount = 'kerry@shirtschool.com'
+  if (!hasTokens(sendAccount)) {
+    console.error('[Recovery] kerry@shirtschool.com is not connected — cannot send emails')
+    return
+  }
+
+  for (const row of due) {
+    const seq = row.payment_recovery_sequences
+    if (!seq || seq.status !== 'active') {
+      // Sequence was cancelled/paid — mark email cancelled
+      await supabase.from('payment_recovery_emails')
+        .update({ status: 'cancelled' }).eq('id', row.id)
+      continue
+    }
+    try {
+      const gmail = google.gmail({ version: 'v1', auth: clients[sendAccount] })
+      const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendAccount] })
+      const { data: userInfo } = await oauth2.userinfo.get()
+      const safeName = seq.customer_name ? `"${seq.customer_name.replace(/["\\]/g, '')}"` : ''
+      const toField = safeName ? `${safeName} <${seq.customer_email}>` : seq.customer_email
+      const raw = Buffer.from([
+        `From: ${userInfo.name || 'Kerry'} <${sendAccount}>`,
+        `To: ${toField}`,
+        `Subject: ${row.subject}`,
+        'Content-Type: text/plain; charset=utf-8',
+        'MIME-Version: 1.0',
+        '',
+        row.body,
+      ].join('\r\n')).toString('base64url')
+      await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+      await supabase.from('payment_recovery_emails')
+        .update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', row.id)
+      console.log(`[Recovery] Sent email step ${row.step} to ${seq.customer_email}`)
+    } catch (err) {
+      console.error(`[Recovery] Send failed for email ${row.id}:`, err.message)
+      await supabase.from('payment_recovery_emails')
+        .update({ status: 'failed', error_message: err.message }).eq('id', row.id)
+    }
+    await new Promise((r) => setTimeout(r, 600)) // gentle pacing
+  }
+}
+
+// On Day 11+: alert Slack to revoke access manually
+async function checkRevocationAlerts() {
+  if (!supabase || !slackClient || !process.env.SLACK_CHANNEL_ID) return
+  // Find sequences where step 3 was sent more than 24h ago and status is still 'active'
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const { data: candidates } = await supabase.from('payment_recovery_emails')
+    .select('sequence_id, sent_at, payment_recovery_sequences!inner(*)')
+    .eq('step', 3).eq('status', 'sent').lte('sent_at', cutoff)
+  if (!candidates?.length) return
+
+  for (const row of candidates) {
+    const seq = row.payment_recovery_sequences
+    if (!seq || seq.status !== 'active') continue
+    try {
+      await slackClient.chat.postMessage({
+        channel: process.env.SLACK_CHANNEL_ID,
+        text: `⚠️ Payment Recovery: Manual action needed for ${seq.customer_email}`,
+        blocks: [
+          { type: 'header', text: { type: 'plain_text', text: '⚠️ Manual Access Revocation Needed' } },
+          {
+            type: 'section', text: {
+              type: 'mrkdwn',
+              text: `I tried to recover the payment for *${seq.customer_name || seq.customer_email}* (${seq.customer_email}) for 11 days with no resolution.\n\n*Product:* ${seq.product_name || 'Unknown'}\n*Sequence started:* ${new Date(seq.started_at).toLocaleDateString()}\n\nTheir access needs to be revoked manually in Kajabi.`,
+            },
+          },
+        ],
+      })
+      await supabase.from('payment_recovery_sequences')
+        .update({ status: 'revocation_needed', updated_at: new Date().toISOString() }).eq('id', seq.id)
+      console.log(`[Recovery] Posted revocation alert for ${seq.customer_email}`)
+    } catch (err) {
+      console.error('[Recovery] Slack alert failed:', err.message)
+    }
+  }
+}
+
+function startPaymentRecoveryWorkers() {
+  if (!process.env.KAJABI_API_KEY) {
+    console.log('  Payment Recovery: not configured (set KAJABI_API_KEY + KAJABI_API_SECRET to enable)')
+    return
+  }
+  console.log('  Payment Recovery: enabled (Kajabi sync every 30 min, email scheduler every 5 min)')
+
+  // Initial Kajabi sync 30s after startup, then every 30 min
+  setTimeout(() => syncKajabiPayments().catch((err) => console.error('[Kajabi] sync error:', err.message)), 30_000)
+  setInterval(() => syncKajabiPayments().catch((err) => console.error('[Kajabi] sync error:', err.message)), 30 * 60 * 1000)
+
+  // Email scheduler runs every 5 min
+  const tickEmails = async () => {
+    try { await processDueRecoveryEmails() } catch (err) { console.error('[Recovery] email tick error:', err.message) }
+    try { await checkRevocationAlerts() } catch (err) { console.error('[Recovery] revocation tick error:', err.message) }
+  }
+  setTimeout(tickEmails, 60_000)
+  setInterval(tickEmails, 5 * 60 * 1000)
+}
+
+// ─── Payment Recovery API routes ──────────────────────────────────────────────
+
+app.get('/api/payment-recovery/payments', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ payments: [] })
+  const status = req.query.status || 'failed'
+  const { data, error } = await supabase.from('kajabi_payments')
+    .select('*').eq('status', status).order('failed_at', { ascending: false }).limit(100)
+  if (error) return res.status(500).json({ error: error.message })
+
+  // Attach any active sequence for each payment
+  const ids = (data || []).map((p) => p.id)
+  let seqMap = {}
+  if (ids.length) {
+    const { data: seqs } = await supabase.from('payment_recovery_sequences')
+      .select('*').in('payment_id', ids)
+    seqMap = Object.fromEntries((seqs || []).map((s) => [s.payment_id, s]))
+  }
+  const payments = (data || []).map((p) => ({ ...p, sequence: seqMap[p.id] || null }))
+  res.json({ payments })
+})
+
+app.post('/api/payment-recovery/sync', requireAuth, async (_req, res) => {
+  res.json({ success: true, message: 'Sync starting in background…' })
+  syncKajabiPayments().catch((err) => console.error('[Kajabi] manual sync error:', err.message))
+})
+
+app.post('/api/payment-recovery/start/:paymentId', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const { data: payment, error: lookupErr } = await supabase.from('kajabi_payments')
+    .select('*').eq('id', req.params.paymentId).single()
+  if (lookupErr || !payment) return res.status(404).json({ error: 'Payment not found' })
+  if (!payment.customer_email) return res.status(400).json({ error: 'Payment has no customer email' })
+
+  // Check for existing active sequence
+  const { data: existing } = await supabase.from('payment_recovery_sequences')
+    .select('id').eq('payment_id', payment.id).eq('status', 'active').limit(1)
+  if (existing?.length) return res.status(400).json({ error: 'A recovery sequence is already active for this payment' })
+
+  // Create sequence
+  const { data: seq, error: seqErr } = await supabase.from('payment_recovery_sequences')
+    .insert({
+      payment_id: payment.id, customer_email: payment.customer_email,
+      customer_name: payment.customer_name, product_name: payment.product_name,
+      status: 'active',
+    }).select().single()
+  if (seqErr) return res.status(500).json({ error: seqErr.message })
+
+  // Schedule the 3 emails
+  const now = Date.now()
+  const vars = {
+    name: payment.customer_name?.split(' ')[0] || 'there',
+    product: payment.product_name || 'your subscription',
+    link: KAJABI_UPDATE_CARD_URL,
+  }
+  const rows = RECOVERY_EMAIL_TEMPLATES.map((tpl) => ({
+    sequence_id: seq.id, step: tpl.step,
+    scheduled_for: new Date(now + tpl.dayOffset * 24 * 60 * 60 * 1000).toISOString(),
+    subject: fillTemplate(tpl.subject, vars),
+    body: fillTemplate(tpl.body, vars),
+    status: 'pending',
+  }))
+  await supabase.from('payment_recovery_emails').insert(rows)
+
+  // Send the first one immediately by triggering the worker
+  processDueRecoveryEmails().catch((err) => console.error('[Recovery] immediate send error:', err.message))
+
+  res.json({ success: true, sequence: seq })
+})
+
+app.get('/api/payment-recovery/sequences/:sequenceId', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(404).json({ error: 'Not found' })
+  const { data: seq, error } = await supabase.from('payment_recovery_sequences')
+    .select('*').eq('id', req.params.sequenceId).single()
+  if (error || !seq) return res.status(404).json({ error: 'Not found' })
+  const { data: emails } = await supabase.from('payment_recovery_emails')
+    .select('*').eq('sequence_id', seq.id).order('step')
+  res.json({ sequence: seq, emails: emails || [] })
+})
+
+app.post('/api/payment-recovery/sequences/:sequenceId/cancel', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const { error } = await supabase.from('payment_recovery_sequences')
+    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+    .eq('id', req.params.sequenceId)
+  if (error) return res.status(500).json({ error: error.message })
+  await supabase.from('payment_recovery_emails')
+    .update({ status: 'cancelled' }).eq('sequence_id', req.params.sequenceId).eq('status', 'pending')
+  res.json({ success: true })
+})
+
+app.get('/api/payment-recovery/sequences', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ sequences: [] })
+  const status = req.query.status
+  let q = supabase.from('payment_recovery_sequences').select('*').order('started_at', { ascending: false }).limit(100)
+  if (status) q = q.eq('status', status)
+  const { data, error } = await q
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ sequences: data || [] })
+})
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -4157,6 +4552,7 @@ async function init() {
 
   startSlackPolling()
   startContentBriefScheduler()
+  startPaymentRecoveryWorkers()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)

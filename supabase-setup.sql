@@ -211,3 +211,53 @@ create table if not exists challenge_email_templates (
   updated_at timestamptz not null default now()
 );
 alter table challenge_email_templates disable row level security;
+
+-- ─── Payment Recovery ─────────────────────────────────────────────────────────
+
+create table if not exists kajabi_payments (
+  id uuid primary key default gen_random_uuid(),
+  kajabi_id text unique not null,
+  type text,                        -- 'subscription' | 'payment_plan' | 'one_time'
+  status text,                      -- 'failed' | 'success' | 'pending' | 'refunded'
+  customer_email text,
+  customer_name text,
+  customer_kajabi_id text,
+  amount_cents integer,
+  currency text default 'USD',
+  product_name text,
+  failed_at timestamptz,
+  raw_data jsonb,
+  synced_at timestamptz not null default now()
+);
+alter table kajabi_payments disable row level security;
+create index if not exists idx_kajabi_payments_status on kajabi_payments(status, failed_at desc);
+create index if not exists idx_kajabi_payments_email on kajabi_payments(customer_email);
+
+create table if not exists payment_recovery_sequences (
+  id uuid primary key default gen_random_uuid(),
+  payment_id uuid references kajabi_payments(id),
+  customer_email text not null,
+  customer_name text,
+  product_name text,
+  started_at timestamptz not null default now(),
+  status text not null default 'active',  -- 'active' | 'paid' | 'cancelled' | 'revocation_needed' | 'revoked'
+  notes text,
+  updated_at timestamptz not null default now()
+);
+alter table payment_recovery_sequences disable row level security;
+create index if not exists idx_recovery_sequences_status on payment_recovery_sequences(status);
+create index if not exists idx_recovery_sequences_email on payment_recovery_sequences(customer_email);
+
+create table if not exists payment_recovery_emails (
+  id uuid primary key default gen_random_uuid(),
+  sequence_id uuid not null references payment_recovery_sequences(id) on delete cascade,
+  step integer not null,                  -- 1, 2, 3
+  scheduled_for timestamptz not null,
+  sent_at timestamptz,
+  subject text,
+  body text,
+  status text not null default 'pending', -- 'pending' | 'sent' | 'failed' | 'cancelled'
+  error_message text
+);
+alter table payment_recovery_emails disable row level security;
+create index if not exists idx_recovery_emails_due on payment_recovery_emails(scheduled_for, status);

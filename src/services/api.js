@@ -565,3 +565,48 @@ export async function importChallengeTemplatesFromKit(broadcastIds) {
   if (!r.ok) throw new Error(d.error || 'Failed to import templates')
   return d
 }
+
+// ─── Payment Recovery ─────────────────────────────────────────────────────────
+
+export async function fetchFailedPayments(status = 'failed') {
+  const r = await fetch(`/api/payment-recovery/payments?status=${encodeURIComponent(status)}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch payments')
+  return d.payments
+}
+
+export async function syncKajabi() {
+  const r = await fetch('/api/payment-recovery/sync', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to sync')
+  return d
+}
+
+export async function startRecoverySequence(paymentId) {
+  const r = await fetch(`/api/payment-recovery/start/${paymentId}`, { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to start sequence')
+  return d.sequence
+}
+
+export async function fetchRecoverySequence(sequenceId) {
+  const r = await fetch(`/api/payment-recovery/sequences/${sequenceId}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch sequence')
+  return d
+}
+
+export async function cancelRecoverySequence(sequenceId) {
+  const r = await fetch(`/api/payment-recovery/sequences/${sequenceId}/cancel`, { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to cancel sequence')
+  return d
+}
+
+export async function fetchRecoverySequences(status) {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : ''
+  const r = await fetch(`/api/payment-recovery/sequences${qs}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch sequences')
+  return d.sequences
+}
