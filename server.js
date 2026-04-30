@@ -4443,6 +4443,26 @@ app.post('/api/kajabi/webhook', async (req, res) => {
       console.error('[Kajabi Webhook] Failed to upsert:', err.message)
     }
   } else if (isSuccess && customerEmail) {
+    // Record the successful payment for the dashboard's Successful Payments tab
+    try {
+      await supabase.from('kajabi_payments').upsert({
+        kajabi_id: eventId,
+        type: eventType.includes('subscription') ? 'subscription' : 'one_time',
+        status: 'success',
+        customer_email: customerEmail,
+        customer_name: customerName,
+        amount_cents: amountCents,
+        currency: data.currency || 'USD',
+        product_name: productName,
+        failed_at: null,
+        raw_data: body,
+        synced_at: new Date().toISOString(),
+      }, { onConflict: 'kajabi_id' })
+      console.log(`[Kajabi Webhook] ✓ Recorded successful payment for ${customerEmail}`)
+    } catch (err) {
+      console.error('[Kajabi Webhook] Failed to record success:', err.message)
+    }
+
     // Auto-cancel any active recovery sequences for this customer
     try {
       const { data: active } = await supabase.from('payment_recovery_sequences')
@@ -4454,6 +4474,12 @@ app.post('/api/kajabi/webhook', async (req, res) => {
           .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
         console.log(`[Kajabi Webhook] ✓ Marked sequence paid for ${customerEmail}`)
       }
+
+      // Also flip any cached failed payment for this customer to 'success' so the
+      // failed-payments tab clears it out
+      await supabase.from('kajabi_payments')
+        .update({ status: 'success', synced_at: new Date().toISOString() })
+        .eq('customer_email', customerEmail).eq('status', 'failed')
     } catch (err) {
       console.error('[Kajabi Webhook] Auto-cancel error:', err.message)
     }
@@ -4494,8 +4520,34 @@ app.get('/api/payment-recovery/payments', requireAuth, async (req, res) => {
 })
 
 app.post('/api/payment-recovery/sync', requireAuth, async (_req, res) => {
-  res.json({ success: true, message: 'Sync starting in background…' })
-  syncKajabiPayments().catch((err) => console.error('[Kajabi] manual sync error:', err.message))
+  // Count failed payments before scan so we can report how many were newly added
+  let beforeCount = 0
+  if (supabase) {
+    const { count } = await supabase.from('kajabi_payments').select('*', { count: 'exact', head: true }).eq('status', 'failed')
+    beforeCount = count || 0
+  }
+
+  // Run email scan synchronously — this is the primary source
+  try {
+    await syncKajabiFailureEmails()
+  } catch (err) {
+    console.error('[Kajabi Email] manual scan error:', err.message)
+    return res.status(500).json({ error: `Scan failed: ${err.message}` })
+  }
+
+  // Best-effort Kajabi API sync (tolerates 403 / missing scopes — fires and forgets)
+  if (process.env.KAJABI_API_KEY) {
+    syncKajabiPayments().catch(() => {}) // silently ignore — email scan is the primary path
+  }
+
+  // Count after to report how many new failures were detected
+  let afterCount = 0
+  if (supabase) {
+    const { count } = await supabase.from('kajabi_payments').select('*', { count: 'exact', head: true }).eq('status', 'failed')
+    afterCount = count || 0
+  }
+  const newFailures = Math.max(0, afterCount - beforeCount)
+  res.json({ success: true, newFailures, totalFailures: afterCount })
 })
 
 app.post('/api/payment-recovery/start/:paymentId', requireAuth, async (req, res) => {

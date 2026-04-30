@@ -60,19 +60,20 @@ function FailedPaymentsTab({ onOpenSequence }) {
 
   async function handleSync() {
     setSyncing(true)
-    setMsg('Syncing from Kajabi…')
+    setMsg('Scanning Gmail for failure notifications…')
     try {
-      await syncKajabi()
-      setTimeout(async () => {
-        await load()
-        setMsg('Sync complete.')
-        setSyncing(false)
-        setTimeout(() => setMsg(''), 3000)
-      }, 4000)
+      const result = await syncKajabi()
+      await load()
+      const found = result?.newFailures || 0
+      const total = result?.totalFailures || 0
+      setMsg(found > 0
+        ? `Found ${found} new failed payment${found === 1 ? '' : 's'}. (${total} total)`
+        : `No new failed payments. (${total} total tracked)`)
+      setTimeout(() => setMsg(''), 5000)
     } catch (err) {
       setMsg(`Error: ${err.message}`)
-      setSyncing(false)
     }
+    setSyncing(false)
   }
 
   async function handleStart(payment) {
@@ -92,7 +93,7 @@ function FailedPaymentsTab({ onOpenSequence }) {
     <div className="pr-panel">
       <div className="pr-toolbar">
         <button className="btn btn-primary" onClick={handleSync} disabled={syncing}>
-          {syncing ? 'Syncing…' : '↻ Sync from Kajabi'}
+          {syncing ? 'Scanning…' : '↻ Scan Inbox for Failures'}
         </button>
         <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
         {msg && <span className="pr-msg">{msg}</span>}
@@ -151,6 +152,63 @@ function FailedPaymentsTab({ onOpenSequence }) {
               </div>
             )
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Successful Payments Tab ──────────────────────────────────────────────────
+
+function SuccessfulPaymentsTab() {
+  const [payments, setPayments] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await fetchFailedPayments('success')
+      setPayments(data)
+    } catch {}
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  return (
+    <div className="pr-panel">
+      <div className="pr-toolbar">
+        <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
+        <span className="pr-msg">Updates automatically when Kajabi fires the Payment Succeeded webhook.</span>
+      </div>
+      {loading && <div className="pr-loading"><div className="pr-spinner" /></div>}
+      {!loading && payments.length === 0 && (
+        <div className="pr-empty">
+          <div>No successful payments recorded yet.</div>
+          <div className="pr-empty-sub">Make sure the Payment Succeeded webhook is configured in Kajabi.</div>
+        </div>
+      )}
+      {!loading && payments.length > 0 && (
+        <div className="pr-table">
+          <div className="pr-row pr-row--5col">
+            <div className="pr-customer-name" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Customer</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Product</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Amount</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Type</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Recorded</div>
+          </div>
+          {payments.map((p) => (
+            <div key={p.id} className="pr-row pr-row--5col">
+              <div className="pr-customer">
+                <div className="pr-customer-name">{p.customer_name || '—'}</div>
+                <div className="pr-customer-email">{p.customer_email || '—'}</div>
+              </div>
+              <div>{p.product_name || '—'}</div>
+              <div className="pr-amount">{formatMoney(p.amount_cents, p.currency)}</div>
+              <div style={{ textTransform: 'capitalize' }}>{(p.type || '—').replace(/_/g, ' ')}</div>
+              <div>{formatDate(p.synced_at)}</div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -386,12 +444,14 @@ export default function PaymentRecovery() {
 
       <div className="pr-tabs">
         <button className={`pr-tab ${tab === 'failed' ? 'active' : ''}`} onClick={() => setTab('failed')}>Failed Payments</button>
+        <button className={`pr-tab ${tab === 'successful' ? 'active' : ''}`} onClick={() => setTab('successful')}>Successful Payments</button>
         <button className={`pr-tab ${tab === 'active' ? 'active' : ''}`} onClick={() => setTab('active')}>Active Recoveries</button>
         <button className={`pr-tab ${tab === 'history' ? 'active' : ''}`} onClick={() => setTab('history')}>History</button>
       </div>
 
       <div className="pr-content" key={refreshKey}>
         {tab === 'failed' && <FailedPaymentsTab onOpenSequence={setOpenSequenceId} />}
+        {tab === 'successful' && <SuccessfulPaymentsTab />}
         {tab === 'active' && <ActiveRecoveriesTab onOpenSequence={setOpenSequenceId} />}
         {tab === 'history' && <HistoryTab onOpenSequence={setOpenSequenceId} />}
       </div>
