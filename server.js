@@ -4615,27 +4615,115 @@ function startPaymentRecoveryWorkers() {
 //
 // We accept any shape Kajabi sends and try to extract the fields we need. The
 // raw payload is always stored so we can refine the parser without losing data.
+// Recursively walk an object/array tree and return the first value matching one
+// of the given keys. Useful for digging into Kajabi's nested payload shapes.
+function findValueByKeys(obj, keys, depth = 0) {
+  if (depth > 7 || obj == null) return null
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const found = findValueByKeys(v, keys, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  if (typeof obj !== 'object') return null
+  for (const [k, v] of Object.entries(obj)) {
+    if (keys.includes(k.toLowerCase()) && v != null && v !== '') return v
+  }
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'object') {
+      const found = findValueByKeys(v, keys, depth + 1)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+// Find any string value that looks like an email
+function findEmailRecursive(obj, depth = 0) {
+  if (depth > 7 || obj == null) return null
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const found = findEmailRecursive(v, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  if (typeof obj === 'string') {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(obj) ? obj : null
+  }
+  if (typeof obj !== 'object') return null
+  for (const v of Object.values(obj)) {
+    const found = findEmailRecursive(v, depth + 1)
+    if (found) return found
+  }
+  return null
+}
+
+// Stringify the entire object's keys/values to a haystack we can grep for
+// classification keywords (succeeded / failed / cancelled).
+function flattenForKeywords(obj, depth = 0) {
+  if (depth > 5 || obj == null) return ''
+  if (typeof obj === 'string') return ` ${obj} `
+  if (typeof obj !== 'object') return ` ${String(obj)} `
+  if (Array.isArray(obj)) return obj.map((v) => flattenForKeywords(v, depth + 1)).join(' ')
+  let out = ''
+  for (const [k, v] of Object.entries(obj)) {
+    out += ` ${k} ` + flattenForKeywords(v, depth + 1)
+  }
+  return out
+}
+
 app.post('/api/kajabi/webhook', async (req, res) => {
   res.status(200).send() // Always ack quickly so Kajabi doesn't retry
   if (!supabase) return
 
   const body = req.body || {}
-  const eventType = (body.event || body.event_type || body.type || body.topic || '').toLowerCase()
-  console.log(`[Kajabi Webhook] event=${eventType || 'unknown'} payload-keys=${Object.keys(body).join(',')}`)
 
-  // Try to extract payment + customer fields from common Kajabi payload shapes
-  const data = body.data?.attributes || body.payload || body.data || body
-  const customerEmail = data.email || data.customer_email || data.user_email || data.contact_email || null
-  const customerName = data.name || data.customer_name || data.user_name || data.contact_name || null
-  const productName = data.offer_name || data.product_name || data.product || data.offer || null
-  const amountCents = data.amount_in_cents || data.amount_cents || (data.amount ? Math.round(parseFloat(data.amount) * 100) : null)
-  const eventId = String(body.id || data.id || `${eventType}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  const occurredAt = data.created_at || data.occurred_at || data.failed_at || new Date().toISOString()
+  // Aggressive field extraction — Kajabi nests payment data differently across event types
+  const customerEmail = findValueByKeys(body, ['email', 'customer_email', 'user_email', 'member_email', 'contact_email', 'buyer_email'])
+    || findEmailRecursive(body)
+  const customerName = findValueByKeys(body, ['name', 'customer_name', 'user_name', 'member_name', 'full_name', 'contact_name'])
+    || [findValueByKeys(body, ['first_name']), findValueByKeys(body, ['last_name'])].filter(Boolean).join(' ').trim() || null
+  const productName = findValueByKeys(body, ['offer_name', 'product_name', 'plan_name', 'subscription_name', 'offer_title', 'product_title', 'product', 'offer'])
+  const amountCents = findValueByKeys(body, ['amount_in_cents', 'amount_cents'])
+    || (() => {
+      const a = findValueByKeys(body, ['amount', 'total_amount', 'subtotal'])
+      return a ? Math.round(parseFloat(a) * 100) : null
+    })()
+  const currency = findValueByKeys(body, ['currency']) || 'USD'
+  const occurredAt = findValueByKeys(body, ['created_at', 'occurred_at', 'failed_at', 'paid_at', 'timestamp']) || new Date().toISOString()
+  const explicitEventType = findValueByKeys(body, ['event', 'event_type', 'type', 'topic', 'event_name'])
+  const eventType = (explicitEventType || '').toString().toLowerCase()
+  const eventId = String(body.id || findValueByKeys(body, ['id']) || `${eventType || 'event'}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
-  // Classify the event
-  const isFailure = eventType.includes('fail') || eventType.includes('declin') || eventType.includes('past_due')
-  const isSuccess = eventType.includes('succe') || eventType.includes('paid')
-  const isCancel = eventType.includes('cancel') || eventType.includes('deactiv')
+  // Classify by event type field, OR by keywords found anywhere in the payload.
+  // Some Kajabi setups don't include an explicit event field; the URL alone tells
+  // them apart. Falling back to keyword matching lets us still classify those.
+  const haystack = (eventType + ' ' + flattenForKeywords(body)).toLowerCase()
+  const isFailure = /(\bfail\b|failed|declin|past[_\s]?due|insufficient|unable to collect)/i.test(haystack)
+  const isSuccessRaw = /(succeed|succes|paid|completed|charged|payment_succeeded|invoice\.paid)/i.test(haystack)
+  const isCancel = /(\bcancel|deactiv|terminat|refund)/i.test(haystack)
+  // Avoid double-counting: failure trumps success in keyword matches because
+  // failure emails sometimes contain the word "successful" in unrelated places.
+  const isSuccess = isSuccessRaw && !isFailure
+
+  console.log(`[Kajabi Webhook] event="${eventType || 'unknown'}" classification=${isFailure ? 'FAIL' : isSuccess ? 'SUCCESS' : isCancel ? 'CANCEL' : 'UNKNOWN'} email=${customerEmail || 'NONE'} payload-keys=${Object.keys(body).join(',')}`)
+
+  // Persist every webhook to a debug log so we can inspect Kajabi's actual payload
+  // shape if extraction fails. Capped to 100 most recent rows by post-cleanup.
+  try {
+    await supabase.from('kajabi_webhook_log').insert({
+      event_type: eventType || null,
+      payload: body,
+      parsed_email: customerEmail || null,
+      parsed_name: customerName || null,
+      parsed_product: productName || null,
+      classification: isFailure ? 'failure' : isSuccess ? 'success' : isCancel ? 'cancel' : 'unknown',
+    })
+  } catch (err) {
+    console.error('[Kajabi Webhook] log insert error:', err.message)
+  }
 
   if (isFailure && customerEmail) {
     try {
@@ -4646,7 +4734,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
         customer_email: customerEmail,
         customer_name: customerName,
         amount_cents: amountCents,
-        currency: data.currency || 'USD',
+        currency,
         product_name: productName,
         failed_at: occurredAt,
         raw_data: body,
@@ -4666,7 +4754,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
         customer_email: customerEmail,
         customer_name: customerName,
         amount_cents: amountCents,
-        currency: data.currency || 'USD',
+        currency,
         product_name: productName,
         failed_at: null,
         raw_data: body,
@@ -4709,7 +4797,20 @@ app.post('/api/kajabi/webhook', async (req, res) => {
           .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
       }
     } catch {}
+  } else {
+    // Couldn't classify or extract email — log it loudly so we know to investigate.
+    console.warn(`[Kajabi Webhook] ⚠ Could not process event. classification=${isFailure ? 'fail' : isSuccess ? 'success' : 'unknown'} email=${customerEmail || 'none'} body=${JSON.stringify(body).slice(0, 800)}`)
   }
+})
+
+// Debug endpoint: see the most recent Kajabi webhook payloads we received.
+// Useful for diagnosing parse failures without hunting through Railway logs.
+app.get('/api/payment-recovery/webhook-log', requireAuth, async (_req, res) => {
+  if (!supabase) return res.json({ logs: [] })
+  const { data, error } = await supabase.from('kajabi_webhook_log')
+    .select('*').order('received_at', { ascending: false }).limit(20)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ logs: data || [] })
 })
 
 // ─── Payment Recovery API routes ──────────────────────────────────────────────

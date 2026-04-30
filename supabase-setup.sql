@@ -237,6 +237,22 @@ alter table kajabi_payments add column if not exists ignored boolean not null de
 alter table kajabi_payments add column if not exists slack_message_ts text;
 alter table kajabi_payments add column if not exists slack_channel_id text;
 
+-- Debug log of every Kajabi webhook payload we receive, so we can inspect what
+-- Kajabi actually sends and adjust extraction logic without losing data.
+create table if not exists kajabi_webhook_log (
+  id uuid primary key default gen_random_uuid(),
+  received_at timestamptz not null default now(),
+  event_type text,
+  payload jsonb,
+  parsed_email text,
+  parsed_name text,
+  parsed_product text,
+  classification text,
+  outcome text
+);
+alter table kajabi_webhook_log disable row level security;
+create index if not exists idx_kajabi_webhook_log_received on kajabi_webhook_log(received_at desc);
+
 create table if not exists payment_recovery_sequences (
   id uuid primary key default gen_random_uuid(),
   payment_id uuid references kajabi_payments(id),
