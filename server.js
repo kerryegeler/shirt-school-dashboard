@@ -669,6 +669,24 @@ app.post('/api/auth/logout', (req, res) => {
 
 // ─── Gmail routes ─────────────────────────────────────────────────────────────
 
+// Detect Kajabi billing/payment notification threads so we can hide them from the
+// inbox UI and skip them in the Slack polling loop. We check ANY message in the
+// thread for either:
+//   - From contains "kajabimail.net" (direct Kajabi emails), OR
+//   - Body contains the Kajabi failure marker phrase (catches forwarded emails
+//     where the From has been replaced with the forwarder's address).
+function isKajabiNotificationThread(thread) {
+  const messages = thread?.messages || []
+  for (const m of messages) {
+    const from = (m.from || '').toLowerCase()
+    if (from.includes('kajabimail.net')) return true
+    const body = (m.bodyText || '').toLowerCase()
+    if (body.includes('unable to collect a recent subscription payment')) return true
+    if (body.includes('kajabi payments was unable')) return true
+  }
+  return false
+}
+
 // Shared dedup helper
 function deduplicateThreads(threadsByAccount) {
   const threadMap = new Map()
@@ -762,11 +780,9 @@ app.get('/api/emails', requireAuth, async (req, res) => {
       })
     )
     const dedupedThreads = deduplicateThreads(threadsByAccount)
-    // Filter out Kajabi billing notifications — those live in Payment Recovery, not the inbox
-    const filteredThreads = dedupedThreads.filter((thread) => {
-      const senders = (thread.messages || []).map((m) => (m.from || '').toLowerCase())
-      return !senders.some((s) => s.includes('kajabimail.net'))
-    })
+    // Filter out Kajabi billing notifications — those live in Payment Recovery, not the inbox.
+    // Catches both direct emails (from kajabimail.net) and forwarded ones (body contains marker).
+    const filteredThreads = dedupedThreads.filter((thread) => !isKajabiNotificationThread(thread))
     const emails = await injectForwardsIntoThreads(filteredThreads)
     res.json({
       emails,
@@ -2093,6 +2109,9 @@ async function runSlackPoll() {
           if (!thread) continue
 
           if (new Date(thread.timestamp).getTime() < cutoff) continue
+
+          // Skip Kajabi billing notifications — Payment Recovery handles those separately
+          if (isKajabiNotificationThread(thread)) continue
 
           // Find the latest inbound (non-outgoing) message in the thread
           const latestInbound = (thread.messages || []).filter((m) => !m.isOutgoing).at(-1)
