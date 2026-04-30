@@ -90,6 +90,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/auth/dashboard-logout',
   '/api/slack/actions',  // Called by Slack, not the dashboard user
   '/api/slack/events',   // Slack Event Subscriptions
+  '/api/kajabi/webhook', // Called by Kajabi, not the dashboard user
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -4042,14 +4043,14 @@ async function getKajabiToken() {
   if (!process.env.KAJABI_API_KEY || !process.env.KAJABI_API_SECRET) {
     throw new Error('KAJABI_API_KEY and KAJABI_API_SECRET must be set')
   }
-  const res = await fetch(`${KAJABI_API_BASE}/oauth/token`, {
+  const res = await fetch(`${KAJABI_API_BASE}/v1/oauth/token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       grant_type: 'client_credentials',
       client_id: process.env.KAJABI_API_KEY,
       client_secret: process.env.KAJABI_API_SECRET,
-    }),
+    }).toString(),
   })
   if (!res.ok) throw new Error(`Kajabi auth failed: ${res.status} ${await res.text()}`)
   const data = await res.json()
@@ -4071,79 +4072,130 @@ async function kajabiGet(path, query = {}) {
   return res.json()
 }
 
-// Pull recent failed payments from Kajabi and upsert into kajabi_payments.
-// Note: Kajabi's specific endpoint paths may need adjustment. We try the most
-// common ones and log what works/fails so the user can see actual API responses.
+// Pull recent SUCCESSFUL transactions from Kajabi. Kajabi's public API does not
+// expose failed payments — those come in via webhooks (see /api/kajabi/webhook).
+// This sync exists so we can match successful payments back to active recovery
+// sequences and auto-cancel them.
 async function syncKajabiPayments() {
   if (!process.env.KAJABI_API_KEY || !supabase) return
-  console.log('[Kajabi] Starting payment sync...')
+  console.log('[Kajabi] Starting payment sync (successful transactions for auto-cancel)...')
 
-  // Try a few likely endpoint shapes — Kajabi's API surface has shifted across versions.
-  // We attempt /v1/charges first, then /v1/transactions, then /v1/subscriptions.
-  const endpoints = [
-    { path: '/v1/charges', extract: (d) => d?.data || d?.charges || [] },
-    { path: '/v1/transactions', extract: (d) => d?.data || d?.transactions || [] },
-  ]
-
-  let payments = []
-  let workingEndpoint = null
-  for (const ep of endpoints) {
-    try {
-      const data = await kajabiGet(ep.path, { 'page[size]': '100' })
-      const items = ep.extract(data)
-      if (items.length) {
-        payments = items
-        workingEndpoint = ep.path
-        console.log(`[Kajabi] Found ${items.length} records via ${ep.path}`)
-        break
-      }
-    } catch (err) {
-      console.log(`[Kajabi] ${ep.path} not available: ${err.message.slice(0, 100)}`)
-    }
-  }
-
-  if (!workingEndpoint) {
-    console.log('[Kajabi] No payment endpoint responded. Verify your API credentials and Kajabi developer scopes.')
+  let transactions = []
+  try {
+    const data = await kajabiGet('/v1/transactions', { 'page[size]': '100' })
+    transactions = data?.data || []
+    console.log(`[Kajabi] Fetched ${transactions.length} successful transactions`)
+  } catch (err) {
+    console.error('[Kajabi] /v1/transactions failed:', err.message)
     return
   }
 
-  // Normalize each record into our shape. Field names are best-guess; we store the
-  // full raw payload so we can adjust the parser without re-fetching.
-  let upserted = 0
-  for (const p of payments) {
-    const attrs = p.attributes || p
-    const status = (attrs.status || attrs.state || '').toLowerCase()
-    const normalizedStatus =
-      status.includes('fail') || status === 'declined' ? 'failed' :
-      status.includes('succe') || status === 'paid' || status === 'completed' ? 'success' :
-      status === 'refund' || status === 'refunded' ? 'refunded' : 'pending'
+  // Index by customer email so the auto-cancel step can match against active sequences
+  const successfulEmails = new Set()
+  for (const t of transactions) {
+    const attrs = t.attributes || {}
+    // Customer email comes via `included` relationships in JSON:API; for now we
+    // rely on the raw payload + customer relationship lookup later if needed.
+    // The state field on a transaction will be something like "succeeded".
+    const state = (attrs.state || '').toLowerCase()
+    if (!state.includes('succe') && state !== 'completed' && state !== 'paid') continue
 
-    const payment = {
-      kajabi_id: String(p.id || attrs.id || ''),
-      type: attrs.type || attrs.payment_type || 'one_time',
-      status: normalizedStatus,
-      customer_email: attrs.customer_email || attrs.email || attrs.user_email || null,
-      customer_name: attrs.customer_name || attrs.name || attrs.user_name || null,
-      customer_kajabi_id: String(attrs.customer_id || attrs.user_id || ''),
-      amount_cents: attrs.amount_cents || (attrs.amount ? Math.round(parseFloat(attrs.amount) * 100) : null),
-      currency: attrs.currency || 'USD',
-      product_name: attrs.product_name || attrs.offer_name || attrs.product || null,
-      failed_at: attrs.failed_at || (normalizedStatus === 'failed' ? attrs.created_at || attrs.updated_at : null) || null,
-      raw_data: p,
-      synced_at: new Date().toISOString(),
-    }
-    if (!payment.kajabi_id) continue
-    try {
-      await supabase.from('kajabi_payments').upsert(payment, { onConflict: 'kajabi_id' })
-      upserted++
-    } catch (err) {
-      console.error('[Kajabi] upsert error:', err.message)
+    // Try to find customer email directly in attributes (depends on includes param)
+    const email = attrs.customer_email || attrs.email
+    if (email) successfulEmails.add(email.toLowerCase())
+  }
+
+  // For any active recovery sequence whose customer recently had a successful
+  // transaction, mark it paid and cancel pending emails.
+  if (successfulEmails.size) {
+    const { data: active } = await supabase.from('payment_recovery_sequences')
+      .select('id, customer_email').eq('status', 'active')
+    for (const seq of active || []) {
+      if (successfulEmails.has(seq.customer_email.toLowerCase())) {
+        await supabase.from('payment_recovery_sequences')
+          .update({ status: 'paid', updated_at: new Date().toISOString() }).eq('id', seq.id)
+        await supabase.from('payment_recovery_emails')
+          .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
+        console.log(`[Recovery] Auto-cancelled sequence for ${seq.customer_email} (payment recovered)`)
+      }
     }
   }
-  console.log(`[Kajabi] Synced ${upserted} payments`)
+}
 
-  // Auto-cancel sequences for payments that are now successful
-  await autoCancelRecoveredSequences()
+// Scan Gmail for Kajabi payment-failure notifications and create kajabi_payments rows.
+// Looks across ALL connected Gmail accounts so it picks up forwarded mail too.
+// Searches the body content (not the From header) so forwarded emails still match.
+async function syncKajabiFailureEmails() {
+  if (!supabase) return
+  const accounts = connectedAccounts()
+  if (!accounts.length) return
+  console.log('[Kajabi Email] Scanning Gmail for payment failure notifications...')
+
+  let totalProcessed = 0
+  for (const account of accounts) {
+    const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+    try {
+      const listRes = await gmail.users.messages.list({
+        userId: 'me',
+        q: '"unable to collect a recent subscription payment" newer_than:30d',
+        maxResults: 50,
+      })
+      const msgs = listRes.data.messages || []
+      if (!msgs.length) continue
+      console.log(`[Kajabi Email] ${account}: found ${msgs.length} candidate notification(s)`)
+
+      for (const m of msgs) {
+        try {
+          const msgRes = await gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' })
+          const body = extractTextBody(msgRes.data.payload) || ''
+          if (!body.includes('unable to collect')) continue
+
+          const customerName = (body.match(/Customer name:\s*([^\n\r]+)/) || [])[1]?.trim()
+          const customerEmail = (body.match(/Customer email:\s*([^\s\n\r]+)/) || [])[1]?.trim()
+          const offer = (body.match(/Offer:\s*([^\n\r]+)/) || [])[1]?.trim()
+          const attemptMatch = body.match(/Attempt number:\s*(\d+)\s*of\s*(\d+)/)
+          const attemptNumber = attemptMatch ? parseInt(attemptMatch[1]) : null
+          const totalAttempts = attemptMatch ? parseInt(attemptMatch[2]) : null
+          const nextAttempt = (body.match(/Next attempt:\s*([^\n\r]+)/) || [])[1]?.trim()
+
+          if (!customerEmail || !offer) {
+            console.log(`[Kajabi Email] Skipped msg ${m.id}: missing email or offer`)
+            continue
+          }
+
+          // Stable upsert key per customer+offer so retries don't create duplicates
+          const offerSlug = offer.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60)
+          const kajabiId = `email-fail-${customerEmail}-${offerSlug}`
+
+          await supabase.from('kajabi_payments').upsert({
+            kajabi_id: kajabiId,
+            type: 'subscription',
+            status: 'failed',
+            customer_email: customerEmail,
+            customer_name: customerName || null,
+            product_name: offer,
+            failed_at: new Date(parseInt(msgRes.data.internalDate)).toISOString(),
+            raw_data: {
+              source: 'gmail',
+              gmail_message_id: m.id,
+              gmail_account: account,
+              attempt_number: attemptNumber,
+              total_attempts: totalAttempts,
+              next_attempt: nextAttempt,
+            },
+            synced_at: new Date().toISOString(),
+          }, { onConflict: 'kajabi_id' })
+
+          totalProcessed++
+        } catch (err) {
+          console.error(`[Kajabi Email] Parse error for msg ${m.id}:`, err.message)
+        }
+      }
+    } catch (err) {
+      console.error(`[Kajabi Email] ${account} scan error:`, err.message)
+    }
+  }
+  console.log(`[Kajabi Email] Recorded ${totalProcessed} failed payments from email`)
 }
 
 async function autoCancelRecoveredSequences() {
@@ -4304,24 +4356,121 @@ async function checkRevocationAlerts() {
 }
 
 function startPaymentRecoveryWorkers() {
-  if (!process.env.KAJABI_API_KEY) {
-    console.log('  Payment Recovery: not configured (set KAJABI_API_KEY + KAJABI_API_SECRET to enable)')
+  if (!supabase) {
+    console.log('  Payment Recovery: not configured (Supabase required)')
     return
   }
-  console.log('  Payment Recovery: enabled (Kajabi sync every 30 min, email scheduler every 5 min)')
+  console.log('  Payment Recovery: enabled')
+  console.log('    • Failure email scan: every 15 min')
+  console.log('    • Sequence email scheduler: every 5 min')
+  if (process.env.KAJABI_API_KEY) console.log('    • Kajabi success-payment sync: every 30 min')
 
-  // Initial Kajabi sync 30s after startup, then every 30 min
-  setTimeout(() => syncKajabiPayments().catch((err) => console.error('[Kajabi] sync error:', err.message)), 30_000)
-  setInterval(() => syncKajabiPayments().catch((err) => console.error('[Kajabi] sync error:', err.message)), 30 * 60 * 1000)
+  // Failure email scanner runs every 15 min — primary source of failed payments
+  const tickFailureScan = () => syncKajabiFailureEmails().catch((err) => console.error('[Kajabi Email] scan error:', err.message))
+  setTimeout(tickFailureScan, 45_000)
+  setInterval(tickFailureScan, 15 * 60 * 1000)
 
-  // Email scheduler runs every 5 min
+  // Recovery email scheduler + revocation alerts run every 5 min
   const tickEmails = async () => {
     try { await processDueRecoveryEmails() } catch (err) { console.error('[Recovery] email tick error:', err.message) }
     try { await checkRevocationAlerts() } catch (err) { console.error('[Recovery] revocation tick error:', err.message) }
   }
   setTimeout(tickEmails, 60_000)
   setInterval(tickEmails, 5 * 60 * 1000)
+
+  // Kajabi REST sync (success transactions for auto-cancel) — optional, requires API key
+  if (process.env.KAJABI_API_KEY) {
+    const tickKajabiSync = () => syncKajabiPayments().catch((err) => console.error('[Kajabi] sync error:', err.message))
+    setTimeout(tickKajabiSync, 30_000)
+    setInterval(tickKajabiSync, 30 * 60 * 1000)
+  }
 }
+
+// ─── Kajabi webhook (no dashboard auth — Kajabi calls this directly) ─────────
+//
+// Kajabi sends payment-related events here. Payment failure events are the only
+// way to detect failed charges since Kajabi's REST API excludes them.
+//
+// Configure in Kajabi: Settings → Webhooks → Add webhook
+//   URL: https://<your-domain>/api/kajabi/webhook
+//   Events to subscribe to (best-effort coverage):
+//     - subscription.payment_failed (or "subscription.charge_failed")
+//     - purchase.failed
+//     - subscription.cancelled (so we can mark sequences revoked)
+//     - subscription.payment_succeeded (used for auto-cancel of active sequences)
+//
+// We accept any shape Kajabi sends and try to extract the fields we need. The
+// raw payload is always stored so we can refine the parser without losing data.
+app.post('/api/kajabi/webhook', async (req, res) => {
+  res.status(200).send() // Always ack quickly so Kajabi doesn't retry
+  if (!supabase) return
+
+  const body = req.body || {}
+  const eventType = (body.event || body.event_type || body.type || body.topic || '').toLowerCase()
+  console.log(`[Kajabi Webhook] event=${eventType || 'unknown'} payload-keys=${Object.keys(body).join(',')}`)
+
+  // Try to extract payment + customer fields from common Kajabi payload shapes
+  const data = body.data?.attributes || body.payload || body.data || body
+  const customerEmail = data.email || data.customer_email || data.user_email || data.contact_email || null
+  const customerName = data.name || data.customer_name || data.user_name || data.contact_name || null
+  const productName = data.offer_name || data.product_name || data.product || data.offer || null
+  const amountCents = data.amount_in_cents || data.amount_cents || (data.amount ? Math.round(parseFloat(data.amount) * 100) : null)
+  const eventId = String(body.id || data.id || `${eventType}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const occurredAt = data.created_at || data.occurred_at || data.failed_at || new Date().toISOString()
+
+  // Classify the event
+  const isFailure = eventType.includes('fail') || eventType.includes('declin') || eventType.includes('past_due')
+  const isSuccess = eventType.includes('succe') || eventType.includes('paid')
+  const isCancel = eventType.includes('cancel') || eventType.includes('deactiv')
+
+  if (isFailure && customerEmail) {
+    try {
+      await supabase.from('kajabi_payments').upsert({
+        kajabi_id: eventId,
+        type: eventType.includes('subscription') ? 'subscription' : 'payment_plan',
+        status: 'failed',
+        customer_email: customerEmail,
+        customer_name: customerName,
+        amount_cents: amountCents,
+        currency: data.currency || 'USD',
+        product_name: productName,
+        failed_at: occurredAt,
+        raw_data: body,
+        synced_at: new Date().toISOString(),
+      }, { onConflict: 'kajabi_id' })
+      console.log(`[Kajabi Webhook] ✓ Recorded failed payment for ${customerEmail}`)
+    } catch (err) {
+      console.error('[Kajabi Webhook] Failed to upsert:', err.message)
+    }
+  } else if (isSuccess && customerEmail) {
+    // Auto-cancel any active recovery sequences for this customer
+    try {
+      const { data: active } = await supabase.from('payment_recovery_sequences')
+        .select('id').eq('status', 'active').eq('customer_email', customerEmail)
+      for (const seq of active || []) {
+        await supabase.from('payment_recovery_sequences')
+          .update({ status: 'paid', updated_at: new Date().toISOString() }).eq('id', seq.id)
+        await supabase.from('payment_recovery_emails')
+          .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
+        console.log(`[Kajabi Webhook] ✓ Marked sequence paid for ${customerEmail}`)
+      }
+    } catch (err) {
+      console.error('[Kajabi Webhook] Auto-cancel error:', err.message)
+    }
+  } else if (isCancel && customerEmail) {
+    // Subscription was cancelled (likely after Day 11 alert + manual revocation)
+    try {
+      const { data: active } = await supabase.from('payment_recovery_sequences')
+        .select('id').in('status', ['active', 'revocation_needed']).eq('customer_email', customerEmail)
+      for (const seq of active || []) {
+        await supabase.from('payment_recovery_sequences')
+          .update({ status: 'revoked', updated_at: new Date().toISOString() }).eq('id', seq.id)
+        await supabase.from('payment_recovery_emails')
+          .update({ status: 'cancelled' }).eq('sequence_id', seq.id).eq('status', 'pending')
+      }
+    } catch {}
+  }
+})
 
 // ─── Payment Recovery API routes ──────────────────────────────────────────────
 
