@@ -120,6 +120,93 @@ const CATEGORY_OPTIONS = [
   { value: 'general',         label: 'Spam' },
 ]
 
+// ─── Compose Modal ────────────────────────────────────────────────────────────
+
+function ComposeModal({ connectedAccounts, onClose }) {
+  const [fromAccount, setFromAccount] = useState(connectedAccounts[0] || '')
+  const [toEmail, setToEmail] = useState('')
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
+  const [sent, setSent] = useState(false)
+
+  async function handleSend() {
+    setError('')
+    if (!toEmail.trim()) return setError('Recipient email is required')
+    if (!subject.trim() && !body.trim()) return setError('Add a subject or message body')
+    setSending(true)
+    try {
+      const { composeEmail } = await import('../../services/api.js')
+      await composeEmail({ fromAccount, toEmail: toEmail.trim(), subject, body })
+      setSent(true)
+      setTimeout(onClose, 1200)
+    } catch (err) {
+      setError(err.message)
+    }
+    setSending(false)
+  }
+
+  return (
+    <div className="compose-modal-overlay" onClick={() => !sending && onClose()}>
+      <div className="compose-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="compose-modal-header">
+          <h3>New Email</h3>
+          <button className="icon-btn" onClick={onClose} disabled={sending}>✕</button>
+        </div>
+        <div className="compose-modal-body">
+          <label className="compose-label">From</label>
+          <select
+            className="compose-input"
+            value={fromAccount}
+            onChange={(e) => setFromAccount(e.target.value)}
+            disabled={sending || sent}
+          >
+            {connectedAccounts.length === 0 && <option value="">No connected account</option>}
+            {connectedAccounts.map((a) => (<option key={a} value={a}>{a}</option>))}
+          </select>
+
+          <label className="compose-label">To</label>
+          <input
+            type="email"
+            className="compose-input"
+            placeholder="recipient@example.com"
+            value={toEmail}
+            onChange={(e) => setToEmail(e.target.value)}
+            disabled={sending || sent}
+            autoFocus
+          />
+
+          <label className="compose-label">Subject</label>
+          <input
+            type="text"
+            className="compose-input"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            disabled={sending || sent}
+          />
+
+          <label className="compose-label">Message</label>
+          <textarea
+            className="compose-textarea"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={12}
+            disabled={sending || sent}
+          />
+          {error && <div className="compose-error">{error}</div>}
+        </div>
+        <div className="compose-modal-footer">
+          <button className="btn btn-ghost" onClick={onClose} disabled={sending}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSend} disabled={sending || sent || !toEmail.trim()}>
+            {sent ? '✓ Sent' : sending ? 'Sending…' : 'Send'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
@@ -163,6 +250,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   // Mobile nav sheet
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  // Compose modal
+  const [composeOpen, setComposeOpen] = useState(false)
 
   // ── Fetch emails ────────────────────────────────────────────────────────────
 
@@ -615,6 +705,13 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
           {unreadCount > 0 && !loading && viewMode === 'inbox' && !isSearchMode && (
             <span className="header-unread-badge">{unreadCount} unread</span>
           )}
+          <button
+            className="btn btn-primary"
+            onClick={() => setComposeOpen(true)}
+            title="Compose new email"
+          >
+            ✏️ Compose
+          </button>
           {viewMode === 'inbox' && !isSearchMode && emails.length > 0 && (
             <button
               className="btn btn-ghost btn-archive-all"
@@ -636,6 +733,13 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
           </button>
         </div>
       </div>
+
+      {composeOpen && (
+        <ComposeModal
+          connectedAccounts={connectedAccounts}
+          onClose={() => setComposeOpen(false)}
+        />
+      )}
 
       <div className="email-agent-body">
         {/* ── Left nav sidebar ── */}

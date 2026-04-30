@@ -19,13 +19,6 @@ const IconEdit = () => (
   </svg>
 )
 
-const IconChart = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M2 12l3-4 3 2 3-5 3 3" />
-    <path d="M2 14h12" />
-  </svg>
-)
-
 const IconBoard = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1" y="2" width="4" height="12" rx="1" />
@@ -57,7 +50,6 @@ const modules = [
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'challenge-launcher', label: 'Challenge Launcher', icon: IconRocket, comingSoon: false },
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
-  { id: 'sponsorship-tracker', label: 'Sponsorship Tracker', icon: IconChart, comingSoon: true },
 ]
 
 export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect }) {

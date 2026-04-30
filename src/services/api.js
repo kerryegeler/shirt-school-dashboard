@@ -433,6 +433,17 @@ export async function sendEmail(email, draft, fromAccount, toEmail, isManual = f
   return data
 }
 
+export async function composeEmail({ fromAccount, toEmail, subject, body }) {
+  const response = await fetch('/api/emails/compose', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromAccount, toEmail, subject, body }),
+  })
+  const data = await response.json().catch(() => ({ error: 'Server error' }))
+  if (!response.ok) throw new Error(data.error || 'Failed to send email')
+  return data
+}
+
 export async function forwardEmail({ email, message, toEmail, fromAccount, note }) {
   const trimmedEmail = {
     id: email.id, threadId: email.threadId, from: email.from, to: email.to,

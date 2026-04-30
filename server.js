@@ -761,7 +761,13 @@ app.get('/api/emails', requireAuth, async (req, res) => {
         return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
       })
     )
-    const emails = await injectForwardsIntoThreads(deduplicateThreads(threadsByAccount))
+    const dedupedThreads = deduplicateThreads(threadsByAccount)
+    // Filter out Kajabi billing notifications — those live in Payment Recovery, not the inbox
+    const filteredThreads = dedupedThreads.filter((thread) => {
+      const senders = (thread.messages || []).map((m) => (m.from || '').toLowerCase())
+      return !senders.some((s) => s.includes('kajabimail.net'))
+    })
+    const emails = await injectForwardsIntoThreads(filteredThreads)
     res.json({
       emails,
       nextPageTokens: Object.keys(nextPageTokens).length ? nextPageTokens : null,
@@ -1054,6 +1060,48 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
       await clearTokens(sendFrom)
       clients[sendFrom].setCredentials({})
       return res.status(401).json({ error: `Gmail token expired for ${sendFrom}. Please reconnect the account.` })
+    }
+    res.status(500).json({ error: `Failed to send: ${error.message}` })
+  }
+})
+
+// Compose a brand new email (no thread, no In-Reply-To)
+app.post('/api/emails/compose', requireAuth, async (req, res) => {
+  const { fromAccount, toEmail, subject, body } = req.body
+  if (!toEmail?.trim()) return res.status(400).json({ error: 'Recipient email is required' })
+  if (!subject?.trim() && !body?.trim()) return res.status(400).json({ error: 'Subject or body is required' })
+
+  const sendFrom = TARGET_ACCOUNTS.includes(fromAccount) && hasTokens(fromAccount)
+    ? fromAccount
+    : connectedAccounts()[0]
+  if (!sendFrom || !hasTokens(sendFrom)) {
+    return res.status(400).json({ error: 'No connected sending account' })
+  }
+
+  const gmail = google.gmail({ version: 'v1', auth: clients[sendFrom] })
+  try {
+    const oauth2 = google.oauth2({ version: 'v2', auth: clients[sendFrom] })
+    const { data: userInfo } = await oauth2.userinfo.get()
+
+    const raw = Buffer.from([
+      `From: ${userInfo.name || sendFrom} <${sendFrom}>`,
+      `To: ${toEmail.trim()}`,
+      `Subject: ${subject?.trim() || '(no subject)'}`,
+      'Content-Type: text/plain; charset=utf-8',
+      'MIME-Version: 1.0',
+      '',
+      body || '',
+    ].join('\r\n')).toString('base64url')
+
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+    res.json({ success: true, sentFrom: sendFrom })
+  } catch (error) {
+    console.error('Gmail compose error:', error.message)
+    const isAuthError = error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials') || error.response?.status === 401
+    if (isAuthError) {
+      await clearTokens(sendFrom)
+      clients[sendFrom].setCredentials({})
+      return res.status(401).json({ error: `Gmail token expired for ${sendFrom}. Please reconnect.` })
     }
     res.status(500).json({ error: `Failed to send: ${error.message}` })
   }
