@@ -2408,6 +2408,47 @@ app.post('/api/slack/actions', async (req, res) => {
         // Update the original message to show skipped
         await updateSlackMessage({ ...notif, slack_ts: slackTs, channel_id: channelId }, 'skipped').catch(() => {})
       }
+
+    } else if (actionId === 'start_recovery') {
+      // Slack button on a failed-payment notification — kick off the recovery sequence.
+      // The action `value` holds the kajabi_payments.id (UUID).
+      const paymentId = threadId
+      if (!supabase) return
+      const { data: payment } = await supabase.from('kajabi_payments')
+        .select('*').eq('id', paymentId).single()
+      if (!payment) {
+        if (slackClient && channelId && slackTs) {
+          await slackClient.chat.postMessage({
+            channel: channelId, thread_ts: slackTs,
+            text: `⚠️ Could not find that failed payment in the database.`,
+          }).catch(() => {})
+        }
+        return
+      }
+      const result = await startRecoveryForPayment(paymentId)
+      if (result.error) {
+        if (slackClient && channelId && slackTs) {
+          await slackClient.chat.postMessage({
+            channel: channelId, thread_ts: slackTs,
+            text: `⚠️ Could not start recovery: ${result.error}`,
+          }).catch(() => {})
+        }
+        return
+      }
+      console.log(`[Slack Action] ✅ Started recovery for ${payment.customer_email}`)
+      await updateFailedPaymentSlack(channelId, slackTs, payment, 'started')
+
+    } else if (actionId === 'ignore_recovery') {
+      // Slack button — mark as ignored, don't run sequence
+      const paymentId = threadId
+      if (!supabase) return
+      const { data: payment } = await supabase.from('kajabi_payments')
+        .select('*').eq('id', paymentId).single()
+      if (!payment) return
+      await supabase.from('kajabi_payments')
+        .update({ ignored: true }).eq('id', paymentId)
+      console.log(`[Slack Action] ✕ Ignored failed payment for ${payment.customer_email}`)
+      await updateFailedPaymentSlack(channelId, slackTs, payment, 'ignored')
     }
   } catch (err) {
     console.error('[Slack] Action handler error:', err.message)
@@ -4170,6 +4211,92 @@ async function syncKajabiPayments() {
   }
 }
 
+// Post a Slack notification when a brand-new failed payment is detected.
+// Includes "Start Recovery" and "Ignore" action buttons that the user can click.
+async function postFailedPaymentToSlack(payment) {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID) return null
+  try {
+    const blocks = [
+      { type: 'header', text: { type: 'plain_text', text: '🔴 New Failed Payment' } },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: [
+            `*Customer:* ${payment.customer_name || 'Unknown'}`,
+            `*Email:* ${payment.customer_email}`,
+            `*Product:* ${payment.product_name || 'Unknown'}`,
+          ].join('\n'),
+        },
+      },
+      {
+        type: 'actions',
+        block_id: `payment_recovery_${payment.id}`,
+        elements: [
+          {
+            type: 'button', style: 'primary',
+            text: { type: 'plain_text', text: '▶ Start Recovery' },
+            action_id: 'start_recovery', value: payment.id,
+            confirm: {
+              title: { type: 'plain_text', text: 'Start recovery sequence?' },
+              text: { type: 'mrkdwn', text: `First email will send to ${payment.customer_email} immediately, with follow-ups on Day 5 and Day 10.` },
+              confirm: { type: 'plain_text', text: 'Start' },
+              deny: { type: 'plain_text', text: 'Cancel' },
+            },
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: '✕ Ignore' },
+            action_id: 'ignore_recovery', value: payment.id,
+          },
+        ],
+      },
+    ]
+
+    const msg = await slackClient.chat.postMessage({
+      channel: process.env.SLACK_CHANNEL_ID,
+      text: `🔴 New failed payment from ${payment.customer_email}`,
+      blocks,
+    })
+    return { ts: msg.ts, channel: process.env.SLACK_CHANNEL_ID }
+  } catch (err) {
+    console.error('[Kajabi Slack] postFailedPaymentToSlack error:', err.message)
+    return null
+  }
+}
+
+// Update the Slack message after the user takes an action (Start / Ignore)
+async function updateFailedPaymentSlack(channelId, ts, payment, outcome) {
+  if (!slackClient || !channelId || !ts) return
+  try {
+    const outcomeText = outcome === 'started'
+      ? '✅ *Recovery sequence started.* First email is on its way.'
+      : '✕ *Ignored.* No emails will be sent.'
+
+    await slackClient.chat.update({
+      channel: channelId, ts,
+      text: `Failed payment for ${payment.customer_email} — ${outcome === 'started' ? 'recovery started' : 'ignored'}`,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: '🔴 New Failed Payment' } },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: [
+              `*Customer:* ${payment.customer_name || 'Unknown'}`,
+              `*Email:* ${payment.customer_email}`,
+              `*Product:* ${payment.product_name || 'Unknown'}`,
+            ].join('\n'),
+          },
+        },
+        { type: 'section', text: { type: 'mrkdwn', text: outcomeText } },
+      ],
+    })
+  } catch (err) {
+    console.error('[Kajabi Slack] updateFailedPaymentSlack error:', err.message)
+  }
+}
+
 // Scan Gmail for Kajabi payment-failure notifications and create kajabi_payments rows.
 // Looks across ALL connected Gmail accounts so it picks up forwarded mail too.
 // Searches the body content (not the From header) so forwarded emails still match.
@@ -4215,7 +4342,11 @@ async function syncKajabiFailureEmails() {
           const offerSlug = offer.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60)
           const kajabiId = `email-fail-${customerEmail}-${offerSlug}`
 
-          await supabase.from('kajabi_payments').upsert({
+          // Check if this row already existed (and was already Slack-notified)
+          const { data: existing } = await supabase.from('kajabi_payments')
+            .select('id, slack_notified_at, ignored').eq('kajabi_id', kajabiId).maybeSingle()
+
+          const { data: upserted, error: upsertErr } = await supabase.from('kajabi_payments').upsert({
             kajabi_id: kajabiId,
             type: 'subscription',
             status: 'failed',
@@ -4232,7 +4363,23 @@ async function syncKajabiFailureEmails() {
               next_attempt: nextAttempt,
             },
             synced_at: new Date().toISOString(),
-          }, { onConflict: 'kajabi_id' })
+          }, { onConflict: 'kajabi_id' }).select().single()
+          if (upsertErr) {
+            console.error('[Kajabi Email] upsert error:', upsertErr.message)
+            continue
+          }
+
+          // Only post to Slack if this is a brand-new failure or the user hasn't been notified yet
+          if (!existing || !existing.slack_notified_at) {
+            const slack = await postFailedPaymentToSlack(upserted)
+            if (slack) {
+              await supabase.from('kajabi_payments').update({
+                slack_notified_at: new Date().toISOString(),
+                slack_message_ts: slack.ts,
+                slack_channel_id: slack.channel,
+              }).eq('id', upserted.id)
+            }
+          }
 
           totalProcessed++
         } catch (err) {
@@ -4598,28 +4745,26 @@ app.post('/api/payment-recovery/sync', requireAuth, async (_req, res) => {
   res.json({ success: true, newFailures, totalFailures: afterCount })
 })
 
-app.post('/api/payment-recovery/start/:paymentId', requireAuth, async (req, res) => {
-  if (!supabase) return res.status(400).json({ error: 'No database' })
+// Shared helper used by both the dashboard endpoint and the Slack action button
+async function startRecoveryForPayment(paymentId) {
+  if (!supabase) return { error: 'No database' }
   const { data: payment, error: lookupErr } = await supabase.from('kajabi_payments')
-    .select('*').eq('id', req.params.paymentId).single()
-  if (lookupErr || !payment) return res.status(404).json({ error: 'Payment not found' })
-  if (!payment.customer_email) return res.status(400).json({ error: 'Payment has no customer email' })
+    .select('*').eq('id', paymentId).single()
+  if (lookupErr || !payment) return { error: 'Payment not found' }
+  if (!payment.customer_email) return { error: 'Payment has no customer email' }
 
-  // Check for existing active sequence
   const { data: existing } = await supabase.from('payment_recovery_sequences')
     .select('id').eq('payment_id', payment.id).eq('status', 'active').limit(1)
-  if (existing?.length) return res.status(400).json({ error: 'A recovery sequence is already active for this payment' })
+  if (existing?.length) return { error: 'A recovery sequence is already active for this payment' }
 
-  // Create sequence
   const { data: seq, error: seqErr } = await supabase.from('payment_recovery_sequences')
     .insert({
       payment_id: payment.id, customer_email: payment.customer_email,
       customer_name: payment.customer_name, product_name: payment.product_name,
       status: 'active',
     }).select().single()
-  if (seqErr) return res.status(500).json({ error: seqErr.message })
+  if (seqErr) return { error: seqErr.message }
 
-  // Schedule the 3 emails
   const now = Date.now()
   const vars = {
     name: payment.customer_name?.split(' ')[0] || 'there',
@@ -4634,11 +4779,18 @@ app.post('/api/payment-recovery/start/:paymentId', requireAuth, async (req, res)
     status: 'pending',
   }))
   await supabase.from('payment_recovery_emails').insert(rows)
-
-  // Send the first one immediately by triggering the worker
   processDueRecoveryEmails().catch((err) => console.error('[Recovery] immediate send error:', err.message))
 
-  res.json({ success: true, sequence: seq })
+  return { sequence: seq, payment }
+}
+
+app.post('/api/payment-recovery/start/:paymentId', requireAuth, async (req, res) => {
+  const result = await startRecoveryForPayment(req.params.paymentId)
+  if (result.error) {
+    const status = result.error.includes('not found') ? 404 : 400
+    return res.status(status).json({ error: result.error })
+  }
+  res.json({ success: true, sequence: result.sequence })
 })
 
 app.get('/api/payment-recovery/sequences/:sequenceId', requireAuth, async (req, res) => {

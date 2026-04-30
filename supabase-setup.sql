@@ -232,6 +232,10 @@ create table if not exists kajabi_payments (
 alter table kajabi_payments disable row level security;
 create index if not exists idx_kajabi_payments_status on kajabi_payments(status, failed_at desc);
 create index if not exists idx_kajabi_payments_email on kajabi_payments(customer_email);
+alter table kajabi_payments add column if not exists slack_notified_at timestamptz;
+alter table kajabi_payments add column if not exists ignored boolean not null default false;
+alter table kajabi_payments add column if not exists slack_message_ts text;
+alter table kajabi_payments add column if not exists slack_channel_id text;
 
 create table if not exists payment_recovery_sequences (
   id uuid primary key default gen_random_uuid(),
