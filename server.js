@@ -4615,29 +4615,59 @@ function startPaymentRecoveryWorkers() {
 //
 // We accept any shape Kajabi sends and try to extract the fields we need. The
 // raw payload is always stored so we can refine the parser without losing data.
-// Recursively walk an object/array tree and return the first value matching one
-// of the given keys. Useful for digging into Kajabi's nested payload shapes.
-function findValueByKeys(obj, keys, depth = 0) {
+// Recursively walk and return first SCALAR value (string/number/boolean) matching
+// any of the given keys. Skips objects/arrays so we don't accidentally store an
+// entire nested payload as a "name".
+function findScalarByKeys(obj, keys, depth = 0) {
   if (depth > 7 || obj == null) return null
   if (Array.isArray(obj)) {
     for (const v of obj) {
-      const found = findValueByKeys(v, keys, depth + 1)
-      if (found) return found
+      const f = findScalarByKeys(v, keys, depth + 1)
+      if (f != null) return f
     }
     return null
   }
   if (typeof obj !== 'object') return null
+  const lcKeys = keys.map((k) => k.toLowerCase())
   for (const [k, v] of Object.entries(obj)) {
-    if (keys.includes(k.toLowerCase()) && v != null && v !== '') return v
+    if (lcKeys.includes(k.toLowerCase()) && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') && v !== '') return v
   }
   for (const v of Object.values(obj)) {
     if (typeof v === 'object') {
-      const found = findValueByKeys(v, keys, depth + 1)
-      if (found) return found
+      const f = findScalarByKeys(v, keys, depth + 1)
+      if (f != null) return f
     }
   }
   return null
 }
+
+// Find first OBJECT (non-array, non-null) value matching one of the given keys.
+// Used to locate nested entities like "offer" or "subscription" so we can pluck
+// fields like .title out of them.
+function findObjectByKeys(obj, keys, depth = 0) {
+  if (depth > 7 || obj == null || typeof obj !== 'object') return null
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const f = findObjectByKeys(v, keys, depth + 1)
+      if (f) return f
+    }
+    return null
+  }
+  const lcKeys = keys.map((k) => k.toLowerCase())
+  for (const [k, v] of Object.entries(obj)) {
+    if (lcKeys.includes(k.toLowerCase()) && typeof v === 'object' && v != null && !Array.isArray(v)) return v
+  }
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'object') {
+      const f = findObjectByKeys(v, keys, depth + 1)
+      if (f) return f
+    }
+  }
+  return null
+}
+
+// Backwards-compat alias used by older code paths
+const findValueByKeys = findScalarByKeys
 
 // Find any string value that looks like an email
 function findEmailRecursive(obj, depth = 0) {
@@ -4681,21 +4711,53 @@ app.post('/api/kajabi/webhook', async (req, res) => {
   const body = req.body || {}
 
   // Aggressive field extraction — Kajabi nests payment data differently across event types
-  const customerEmail = findValueByKeys(body, ['email', 'customer_email', 'user_email', 'member_email', 'contact_email', 'buyer_email'])
+
+  // Email: scalar fields first, then any string in the payload that looks like an email
+  const customerEmail = findScalarByKeys(body, ['email', 'customer_email', 'user_email', 'member_email', 'contact_email', 'buyer_email'])
     || findEmailRecursive(body)
-  const customerName = findValueByKeys(body, ['name', 'customer_name', 'user_name', 'member_name', 'full_name', 'contact_name'])
-    || [findValueByKeys(body, ['first_name']), findValueByKeys(body, ['last_name'])].filter(Boolean).join(' ').trim() || null
-  const productName = findValueByKeys(body, ['offer_name', 'product_name', 'plan_name', 'subscription_name', 'offer_title', 'product_title', 'product', 'offer'])
-  const amountCents = findValueByKeys(body, ['amount_in_cents', 'amount_cents'])
-    || (() => {
-      const a = findValueByKeys(body, ['amount', 'total_amount', 'subtotal'])
-      return a ? Math.round(parseFloat(a) * 100) : null
-    })()
-  const currency = findValueByKeys(body, ['currency']) || 'USD'
-  const occurredAt = findValueByKeys(body, ['created_at', 'occurred_at', 'failed_at', 'paid_at', 'timestamp']) || new Date().toISOString()
-  const explicitEventType = findValueByKeys(body, ['event', 'event_type', 'type', 'topic', 'event_name'])
+
+  // Name: composite fall-through (full name, then first+last)
+  const customerName = findScalarByKeys(body, ['name', 'customer_name', 'user_name', 'member_name', 'full_name', 'contact_name'])
+    || [findScalarByKeys(body, ['first_name']), findScalarByKeys(body, ['last_name'])].filter(Boolean).join(' ').trim() || null
+
+  // Product: scalar field first, then dive into the offer/product/subscription OBJECT
+  // and pull .title or .name out of it.
+  let productName = findScalarByKeys(body, ['offer_name', 'product_name', 'plan_name', 'subscription_name', 'offer_title', 'product_title'])
+  if (!productName) {
+    const offerObj = findObjectByKeys(body, ['offer', 'product', 'subscription', 'plan'])
+    if (offerObj) productName = offerObj.title || offerObj.name || offerObj.internal_title || null
+  }
+
+  // Amount: prefer explicit *_in_cents fields. For a generic 'amount' field, decide
+  // whether it's cents or dollars based on whether it's an integer or has decimals.
+  // Kajabi typically sends integer cents (e.g. 9900 for $99.00).
+  const amountCents = (() => {
+    const cents = findScalarByKeys(body, ['amount_in_cents', 'amount_cents', 'price_in_cents', 'total_in_cents'])
+    if (cents != null && cents !== '') return parseInt(cents, 10)
+    const amt = findScalarByKeys(body, ['amount', 'total_amount', 'subtotal', 'price', 'total'])
+    if (amt == null || amt === '') return null
+    const num = typeof amt === 'string' ? parseFloat(amt) : amt
+    if (Number.isNaN(num)) return null
+    // Integer values without decimals → already in cents (Kajabi convention)
+    // Decimal values → in dollars, multiply by 100
+    if (Number.isInteger(num) && num > 0) return num
+    return Math.round(num * 100)
+  })()
+
+  const currency = findScalarByKeys(body, ['currency']) || 'USD'
+  const occurredAt = findScalarByKeys(body, ['created_at', 'occurred_at', 'failed_at', 'paid_at', 'timestamp']) || new Date().toISOString()
+
+  // Event type: prefer explicit fields, then look inside offer.type for "subscription" hint
+  const explicitEventType = findScalarByKeys(body, ['event', 'event_type', 'topic', 'event_name'])
   const eventType = (explicitEventType || '').toString().toLowerCase()
-  const eventId = String(body.id || findValueByKeys(body, ['id']) || `${eventType || 'event'}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+
+  // Determine subscription vs one-time. Look at the offer object's type field;
+  // it usually has values like "subscription" or "one_time".
+  const offerObj = findObjectByKeys(body, ['offer', 'product', 'subscription', 'plan'])
+  const offerType = (offerObj?.type || findScalarByKeys(body, ['payment_type', 'subscription_type']) || '').toString().toLowerCase()
+  const isSubscription = offerType.includes('subscription') || offerType.includes('recurring') || eventType.includes('subscription')
+
+  const eventId = String(body.id || findScalarByKeys(body, ['id']) || `${eventType || 'event'}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
   // Classify by event type field, OR by keywords found anywhere in the payload.
   // Some Kajabi setups don't include an explicit event field; the URL alone tells
@@ -4729,7 +4791,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
     try {
       await supabase.from('kajabi_payments').upsert({
         kajabi_id: eventId,
-        type: eventType.includes('subscription') ? 'subscription' : 'payment_plan',
+        type: isSubscription ? 'subscription' : 'payment_plan',
         status: 'failed',
         customer_email: customerEmail,
         customer_name: customerName,
@@ -4749,7 +4811,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
     try {
       await supabase.from('kajabi_payments').upsert({
         kajabi_id: eventId,
-        type: eventType.includes('subscription') ? 'subscription' : 'one_time',
+        type: isSubscription ? 'subscription' : 'one_time',
         status: 'success',
         customer_email: customerEmail,
         customer_name: customerName,
