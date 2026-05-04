@@ -115,49 +115,77 @@ export default function App() {
         </main>
       </div>
 
-      {/* Mobile bottom tab bar */}
-      <nav className="mobile-tab-bar">
-        <button
-          className={`mobile-tab-btn ${activeModule === 'email-agent' ? 'active' : ''}`}
-          onClick={() => setActiveModule('email-agent')}
-        >
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="1" y="3" width="14" height="10" rx="1.5" />
-            <path d="M1 5l7 5 7-5" />
+      {/* Mobile menu launcher (pill in the bottom-center) + sections sheet */}
+      <MobileMenu
+        activeModule={activeModule}
+        onSelect={(id) => setActiveModule(id)}
+        unreadCount={unreadCount}
+      />
+    </>
+  )
+}
+
+// ─── Mobile menu (centered pill button + bottom sheet) ────────────────────────
+
+const MOBILE_SECTIONS = [
+  { id: 'email-agent', label: 'Email Agent', short: 'Email' },
+  { id: 'ai-feedback', label: 'AI Feedback', short: 'Feedback' },
+  { id: 'content-agent', label: 'Content Agent', short: 'Content' },
+  { id: 'content-board', label: 'Content Board', short: 'Board' },
+  { id: 'challenge-launcher', label: 'Challenge Launcher', short: 'Launch' },
+  { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
+]
+
+function MobileMenu({ activeModule, onSelect, unreadCount }) {
+  const [open, setOpen] = useState(false)
+  const active = MOBILE_SECTIONS.find((s) => s.id === activeModule) || MOBILE_SECTIONS[0]
+
+  return (
+    <>
+      <button
+        className="mobile-menu-launcher"
+        onClick={() => setOpen(true)}
+        aria-label="Open menu"
+      >
+        <span className="mobile-menu-launcher-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <rect x="2" y="2.5" width="4.5" height="4.5" rx="1" />
+            <rect x="9.5" y="2.5" width="4.5" height="4.5" rx="1" />
+            <rect x="2" y="9" width="4.5" height="4.5" rx="1" />
+            <rect x="9.5" y="9" width="4.5" height="4.5" rx="1" />
           </svg>
-          Email
-          {unreadCount > 0 && <span className="mobile-tab-badge">{unreadCount}</span>}
-        </button>
-        <button
-          className={`mobile-tab-btn ${activeModule === 'content-agent' ? 'active' : ''}`}
-          onClick={() => setActiveModule('content-agent')}
-        >
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M11 2l3 3-9 9H2v-3L11 2z" />
-          </svg>
-          Content
-        </button>
-        <button
-          className={`mobile-tab-btn ${activeModule === 'ai-feedback' ? 'active' : ''}`}
-          onClick={() => setActiveModule('ai-feedback')}
-        >
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 1v14M1 8h14M4.5 4.5l7 7M11.5 4.5l-7 7" />
-          </svg>
-          Feedback
-        </button>
-        <button
-          className={`mobile-tab-btn ${activeModule === 'challenge-launcher' ? 'active' : ''}`}
-          onClick={() => setActiveModule('challenge-launcher')}
-        >
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 1c0 0 4 2 4 7H4C4 3 8 1 8 1z" />
-            <path d="M5 8v4l3 2 3-2V8" />
-            <circle cx="8" cy="5" r="1" fill="currentColor" stroke="none" />
-          </svg>
-          Launch
-        </button>
-      </nav>
+        </span>
+        <span className="mobile-menu-launcher-label">{active.short}</span>
+        {unreadCount > 0 && activeModule !== 'email-agent' && (
+          <span className="mobile-menu-launcher-badge">{unreadCount}</span>
+        )}
+        <svg className="mobile-menu-launcher-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d="M4 10l4-4 4 4" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="mobile-menu-overlay" onClick={() => setOpen(false)}>
+          <div className="mobile-menu-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="mobile-menu-sheet-handle" />
+            <div className="mobile-menu-sheet-title">Sections</div>
+            <div className="mobile-menu-sheet-grid">
+              {MOBILE_SECTIONS.map((s) => (
+                <button
+                  key={s.id}
+                  className={`mobile-menu-card ${activeModule === s.id ? 'active' : ''}`}
+                  onClick={() => { onSelect(s.id); setOpen(false) }}
+                >
+                  {s.id === 'email-agent' && unreadCount > 0 && (
+                    <span className="mobile-menu-card-badge">{unreadCount}</span>
+                  )}
+                  <span className="mobile-menu-card-label">{s.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

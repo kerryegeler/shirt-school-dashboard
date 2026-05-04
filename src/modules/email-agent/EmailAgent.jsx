@@ -706,11 +706,15 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
             <span className="header-unread-badge">{unreadCount} unread</span>
           )}
           <button
-            className="btn btn-primary"
+            className="compose-trigger compose-trigger--header"
             onClick={() => setComposeOpen(true)}
             title="Compose new email"
+            aria-label="Compose new email"
           >
-            ✏️ Compose
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 2l3 3-9 9H2v-3L11 2z" />
+            </svg>
+            <span className="compose-trigger-label">Compose</span>
           </button>
           {viewMode === 'inbox' && !isSearchMode && emails.length > 0 && (
             <button

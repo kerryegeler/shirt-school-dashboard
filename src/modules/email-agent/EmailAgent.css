@@ -1435,6 +1435,68 @@
   }
 }
 
+/* ─── Compose trigger button ───────────────────────────────────── */
+.compose-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--orange, #f5a623);
+  color: #000;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: inherit;
+  transition: transform 0.12s, box-shadow 0.12s, background 0.12s;
+  user-select: none;
+}
+
+.compose-trigger:hover {
+  background: color-mix(in srgb, var(--orange, #f5a623) 88%, white);
+}
+
+.compose-trigger:active {
+  transform: scale(0.97);
+}
+
+.compose-trigger svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Desktop: rounded pill in the header */
+.compose-trigger--header {
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+@media (max-width: 768px) {
+  /* Mobile: hide the header pill, replace with a circular FAB rendered next to the menu */
+  .compose-trigger--header {
+    position: fixed;
+    bottom: max(78px, calc(env(safe-area-inset-bottom) + 78px));
+    right: 16px;
+    width: 52px;
+    height: 52px;
+    padding: 0;
+    border-radius: 50%;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.2);
+    z-index: 200;
+  }
+
+  .compose-trigger--header .compose-trigger-label {
+    display: none;
+  }
+
+  .compose-trigger--header svg {
+    width: 22px;
+    height: 22px;
+  }
+}
+
 /* ─── Compose modal ─────────────────────────────────────────────── */
 .compose-modal-overlay {
   position: fixed;
@@ -2102,10 +2164,10 @@
     transform: translateX(0);
   }
 
-  /* Bulk toolbar: fixed above the bottom tab bar on mobile */
+  /* Bulk toolbar: fixed above the floating menu launcher on mobile */
   .bulk-toolbar-bar {
     position: fixed;
-    bottom: 56px; /* height of mobile-tab-bar */
+    bottom: 80px; /* clear of the floating menu launcher pill */
     left: 0;
     right: 0;
     top: auto;
@@ -2287,9 +2349,9 @@
     height: 18px;
   }
 
-  /* Email detail panel: extra bottom padding so buttons clear the tab bar */
+  /* Email detail panel: extra bottom padding so content clears the floating menu */
   .email-detail-panel {
-    padding-bottom: max(80px, calc(56px + env(safe-area-inset-bottom)));
+    padding-bottom: max(120px, calc(96px + env(safe-area-inset-bottom)));
   }
 
   /* Draft section: reduce side padding, add bottom breathing room */
