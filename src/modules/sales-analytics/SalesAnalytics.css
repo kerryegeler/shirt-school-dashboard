@@ -43,11 +43,53 @@
 
 @keyframes sa-spin { to { transform: rotate(360deg); } }
 
+/* ─── Period selector bar ────────────────────────────────────── */
+.sa-period-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-elevated, #1c1c1e);
+  border: 1px solid var(--border, #3a3a3c);
+  border-radius: 10px;
+}
+
+.sa-period-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #8e8e93);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sa-period-dash {
+  color: var(--text-secondary, #8e8e93);
+  font-size: 13px;
+}
+
+.sa-period-range {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary, #8e8e93);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ─── Top stat cards ─────────────────────────────────────────── */
 .sa-stat-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1.4fr 1fr 1fr;
   gap: 12px;
+}
+
+.sa-stat--primary {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--orange, #f5a623) 18%, var(--bg-elevated, #1c1c1e)), var(--bg-elevated, #1c1c1e));
+  border-color: color-mix(in srgb, var(--orange, #f5a623) 35%, var(--border, #3a3a3c));
+}
+
+.sa-stat--primary .sa-stat-value {
+  color: var(--orange, #f5a623);
+  font-size: 32px;
 }
 
 .sa-stat {
@@ -377,6 +419,9 @@
   .sa-content { padding: 12px; }
   .sa-stat-grid { grid-template-columns: 1fr; }
   .sa-stat-value { font-size: 22px; }
+  .sa-stat--primary .sa-stat-value { font-size: 26px; }
+  .sa-period-bar { padding: 10px 12px; }
+  .sa-period-range { margin-left: 0; flex-basis: 100%; }
   .sa-chart { height: 180px; }
   .sa-bar-value { display: none; }
   .sa-bar-label { font-size: 9px; }

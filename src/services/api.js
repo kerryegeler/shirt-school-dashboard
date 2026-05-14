@@ -624,16 +624,21 @@ export async function fetchRecoverySequences(status) {
 
 // ─── Sales Analytics ──────────────────────────────────────────────────────────
 
-export async function fetchSalesSummary() {
-  const r = await fetch('/api/sales/summary')
+export async function fetchSalesSummary({ from, to } = {}) {
+  const qs = new URLSearchParams()
+  if (from) qs.set('from', from)
+  if (to) qs.set('to', to)
+  const r = await fetch(`/api/sales/summary?${qs.toString()}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch summary')
   return d
 }
 
-export async function fetchRevenueEntries({ source, limit = 50 } = {}) {
+export async function fetchRevenueEntries({ source, from, to, limit = 100 } = {}) {
   const qs = new URLSearchParams()
   if (source) qs.set('source', source)
+  if (from) qs.set('from', from)
+  if (to) qs.set('to', to)
   if (limit) qs.set('limit', String(limit))
   const r = await fetch(`/api/sales/entries?${qs.toString()}`)
   const d = await r.json()

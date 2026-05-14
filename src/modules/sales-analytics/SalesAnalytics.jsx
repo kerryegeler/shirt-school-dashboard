@@ -36,6 +36,49 @@ function todayLocal() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Compute from/to for a named preset. All ranges are inclusive on both ends.
+function rangeForPreset(preset) {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth()
+  switch (preset) {
+    case 'this_month':
+      return { from: isoDate(new Date(y, m, 1)), to: isoDate(now), label: 'This Month' }
+    case 'last_month': {
+      const lastFirst = new Date(y, m - 1, 1)
+      const lastEnd = new Date(y, m, 0) // day 0 of current = last day of last
+      return { from: isoDate(lastFirst), to: isoDate(lastEnd), label: 'Last Month' }
+    }
+    case 'last_3_months':
+      return { from: isoDate(new Date(now.getTime() - 90 * 86400000)), to: isoDate(now), label: 'Last 3 Months' }
+    case 'last_6_months':
+      return { from: isoDate(new Date(now.getTime() - 180 * 86400000)), to: isoDate(now), label: 'Last 6 Months' }
+    case 'last_12_months':
+      return { from: isoDate(new Date(y - 1, m, now.getDate())), to: isoDate(now), label: 'Last 12 Months' }
+    case 'ytd':
+      return { from: isoDate(new Date(y, 0, 1)), to: isoDate(now), label: 'Year to Date' }
+    case 'all_time':
+      return { from: '2000-01-01', to: isoDate(now), label: 'All Time' }
+    default:
+      return { from: isoDate(new Date(y, m, 1)), to: isoDate(now), label: 'This Month' }
+  }
+}
+
+const PERIOD_OPTIONS = [
+  { id: 'this_month', label: 'This Month' },
+  { id: 'last_month', label: 'Last Month' },
+  { id: 'last_3_months', label: 'Last 3 Months' },
+  { id: 'last_6_months', label: 'Last 6 Months' },
+  { id: 'last_12_months', label: 'Last 12 Months' },
+  { id: 'ytd', label: 'Year to Date' },
+  { id: 'all_time', label: 'All Time' },
+  { id: 'custom', label: 'Custom Range…' },
+]
+
 // ─── Monthly bar chart (pure CSS) ─────────────────────────────────────────────
 
 function MonthlyChart({ months }) {
@@ -154,13 +197,25 @@ export default function SalesAnalytics() {
   const [showAdd, setShowAdd] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [periodPreset, setPeriodPreset] = useState('this_month')
+  const [customFrom, setCustomFrom] = useState(isoDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)))
+  const [customTo, setCustomTo] = useState(todayLocal())
+
+  // Compute current date range from preset or custom
+  const range = periodPreset === 'custom'
+    ? { from: customFrom, to: customTo, label: 'Custom Range' }
+    : rangeForPreset(periodPreset)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const [s, e] = await Promise.all([
-        fetchSalesSummary(),
-        fetchRevenueEntries({ source: filterSource || undefined, limit: 100 }),
+        fetchSalesSummary({ from: range.from, to: range.to }),
+        fetchRevenueEntries({
+          source: filterSource || undefined,
+          from: range.from, to: range.to,
+          limit: 200,
+        }),
       ])
       setSummary(s)
       setEntries(e)
@@ -168,7 +223,7 @@ export default function SalesAnalytics() {
       setSyncMsg(`Error: ${err.message}`)
     }
     setLoading(false)
-  }, [filterSource])
+  }, [filterSource, range.from, range.to])
 
   useEffect(() => { load() }, [load])
 
@@ -232,9 +287,39 @@ export default function SalesAnalytics() {
         <div className="sa-toolbar">
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillKajabi} disabled={syncing}>Backfill Kajabi</button>
-          <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (90d)</button>
+          <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
+        </div>
+
+        {/* Period selector */}
+        <div className="sa-period-bar">
+          <label className="sa-period-label">Period:</label>
+          <select className="sa-filter" value={periodPreset} onChange={(e) => setPeriodPreset(e.target.value)}>
+            {PERIOD_OPTIONS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+          {periodPreset === 'custom' && (
+            <>
+              <input
+                type="date"
+                className="sa-filter"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+              />
+              <span className="sa-period-dash">to</span>
+              <input
+                type="date"
+                className="sa-filter"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+              />
+            </>
+          )}
+          <span className="sa-period-range">
+            {formatDate(range.from)} – {formatDate(range.to)}
+          </span>
         </div>
 
         {loading && !summary && <div className="sa-loading"><div className="sa-spinner" /></div>}
@@ -242,15 +327,20 @@ export default function SalesAnalytics() {
         {summary && (
           <>
             <div className="sa-stat-grid">
+              <div className="sa-stat sa-stat--primary">
+                <div className="sa-stat-label">{range.label}</div>
+                <div className="sa-stat-value">{formatMoney(summary.period_total_cents || 0)}</div>
+                <div className="sa-stat-sub">{summary.period_entries || 0} entries</div>
+              </div>
               <div className="sa-stat">
                 <div className="sa-stat-label">Month to Date</div>
-                <div className="sa-stat-value">{formatMoney(summary.mtd_cents)}</div>
+                <div className="sa-stat-value">{formatMoney(summary.mtd_cents || 0)}</div>
                 <div className="sa-stat-sub">{new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })}</div>
               </div>
               <div className="sa-stat">
                 <div className="sa-stat-label">Last 12 Months</div>
                 <div className="sa-stat-value">{formatMoney((summary.monthly || []).reduce((sum, m) => sum + (m.cents || 0), 0))}</div>
-                <div className="sa-stat-sub">{summary.total_entries} entries</div>
+                <div className="sa-stat-sub">{summary.total_entries || 0} entries total</div>
               </div>
             </div>
 
@@ -261,7 +351,7 @@ export default function SalesAnalytics() {
 
             <div className="sa-card">
               <div className="sa-card-title-row">
-                <div className="sa-card-title">Recent Entries</div>
+                <div className="sa-card-title">Entries — {range.label}</div>
                 <select className="sa-filter" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}>
                   <option value="">All sources</option>
                   {Object.keys(SOURCE_LABELS).map((s) => (
@@ -271,7 +361,7 @@ export default function SalesAnalytics() {
               </div>
 
               {entries.length === 0 && (
-                <div className="sa-empty">No entries{filterSource ? ' for this source' : ' yet'}. Add one or backfill.</div>
+                <div className="sa-empty">No entries{filterSource ? ' for this source' : ''} in this period.</div>
               )}
 
               {entries.length > 0 && (

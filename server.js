@@ -5207,20 +5207,30 @@ app.post('/api/stripe/webhook', async (req, res) => {
 
 // ─── Sales Analytics API routes ──────────────────────────────────────────────
 
-app.get('/api/sales/summary', requireAuth, async (_req, res) => {
-  if (!supabase) return res.json({ mtd_cents: 0, monthly: [], total_entries: 0 })
+app.get('/api/sales/summary', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ mtd_cents: 0, period_total_cents: 0, monthly: [], total_entries: 0 })
 
-  // Last 12 months including current
   const now = new Date()
-  const yearAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1)
-  const startIso = yearAgo.toISOString().slice(0, 10)
+  // Selected period (defaults to month-to-date)
+  const periodFrom = req.query.from || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+  const periodTo = req.query.to || now.toISOString().slice(0, 10)
+
+  // Always-12-months window for the chart
+  const yearAgoStart = new Date(now.getFullYear(), now.getMonth() - 11, 1)
+  const chartStartIso = yearAgoStart.toISOString().slice(0, 10)
+
+  // Cast a wide enough net to cover both the chart AND any selected period
+  // (period may be older than 12 months for "All Time")
+  const earliest = periodFrom < chartStartIso ? periodFrom : chartStartIso
 
   const { data: rows } = await supabase.from('revenue_entries')
     .select('amount_cents, received_at, source')
-    .gte('received_at', startIso)
+    .gte('received_at', earliest)
     .order('received_at', { ascending: true })
 
   const monthly = new Map()
+  let periodCents = 0
+  let periodEntries = 0
   let mtdCents = 0
   const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   const currentMonthKey = monthKey(now)
@@ -5236,10 +5246,19 @@ app.get('/api/sales/summary', requireAuth, async (_req, res) => {
     const k = monthKey(d)
     if (monthly.has(k)) monthly.get(k).cents += r.amount_cents || 0
     if (k === currentMonthKey) mtdCents += r.amount_cents || 0
+    // Period totals — inclusive on both ends
+    if (r.received_at >= periodFrom && r.received_at <= periodTo) {
+      periodCents += r.amount_cents || 0
+      periodEntries++
+    }
   }
 
   res.json({
     mtd_cents: mtdCents,
+    period_total_cents: periodCents,
+    period_entries: periodEntries,
+    period_from: periodFrom,
+    period_to: periodTo,
     monthly: [...monthly.values()],
     total_entries: (rows || []).length,
   })
@@ -5249,8 +5268,12 @@ app.get('/api/sales/entries', requireAuth, async (req, res) => {
   if (!supabase) return res.json({ entries: [] })
   const limit = parseInt(req.query.limit || '50')
   const source = req.query.source
+  const from = req.query.from
+  const to = req.query.to
   let q = supabase.from('revenue_entries').select('*').order('received_at', { ascending: false }).limit(limit)
   if (source) q = q.eq('source', source)
+  if (from) q = q.gte('received_at', from)
+  if (to) q = q.lte('received_at', to)
   const { data, error } = await q
   if (error) return res.status(500).json({ error: error.message })
   res.json({ entries: data || [] })
@@ -5286,7 +5309,7 @@ app.post('/api/sales/backfill-kajabi', requireAuth, async (_req, res) => {
 })
 
 app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
-  const days = parseInt(req.body?.days || '90')
+  const days = parseInt(req.body?.days || '365')
   const result = await backfillStripeRevenue(days)
   if (result.error) return res.status(500).json({ error: result.error, ...result })
   res.json({ success: true, ...result, days })
