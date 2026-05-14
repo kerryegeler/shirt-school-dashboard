@@ -336,9 +336,9 @@ export default function SalesAnalytics() {
                 <div className="sa-stat-sub">{summary.period_entries || 0} entries</div>
               </div>
               <div className="sa-stat">
-                <div className="sa-stat-label">Month to Date</div>
-                <div className="sa-stat-value">{formatMoney(summary.mtd_cents || 0)}</div>
-                <div className="sa-stat-sub">{new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })}</div>
+                <div className="sa-stat-label">Year to Date</div>
+                <div className="sa-stat-value">{formatMoney(summary.ytd_cents || 0)}</div>
+                <div className="sa-stat-sub">{new Date().getFullYear()}</div>
               </div>
               <div className="sa-stat">
                 <div className="sa-stat-label">Last 12 Months</div>

@@ -5273,8 +5273,11 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
   let periodCents = 0
   let periodEntries = 0
   let mtdCents = 0
+  let ytdCents = 0
   const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   const currentMonthKey = monthKey(now)
+  const currentYear = now.getFullYear()
+  const ytdStart = `${currentYear}-01-01`
 
   // Seed 12 months with 0 so the chart always has full bars
   for (let i = 11; i >= 0; i--) {
@@ -5287,6 +5290,7 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
     const k = monthKey(d)
     if (monthly.has(k)) monthly.get(k).cents += r.amount_cents || 0
     if (k === currentMonthKey) mtdCents += r.amount_cents || 0
+    if (r.received_at >= ytdStart) ytdCents += r.amount_cents || 0
     // Period totals — inclusive on both ends
     if (r.received_at >= periodFrom && r.received_at <= periodTo) {
       periodCents += r.amount_cents || 0
@@ -5296,6 +5300,7 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
 
   res.json({
     mtd_cents: mtdCents,
+    ytd_cents: ytdCents,
     period_total_cents: periodCents,
     period_entries: periodEntries,
     period_from: periodFrom,
