@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   fetchSalesSummary, fetchRevenueEntries, addRevenueEntry,
-  deleteRevenueEntry, backfillKajabi, backfillStripe,
+  deleteRevenueEntry, backfillKajabi, backfillStripe, cleanupStripeDuplicates,
 } from '../../services/api.js'
 import './SalesAnalytics.css'
 
@@ -243,6 +243,20 @@ export default function SalesAnalytics() {
     setTimeout(() => setSyncMsg(''), 12000)
   }
 
+  async function handleCleanupDuplicates() {
+    if (!confirm('Remove duplicate Stripe entries? This keeps one entry per payment and deletes the rest.')) return
+    setSyncing(true); setSyncMsg('Scanning for Stripe duplicates…')
+    try {
+      const r = await cleanupStripeDuplicates()
+      setSyncMsg(`Kept ${r.kept}, deleted ${r.deleted} duplicate(s).`)
+      await load()
+    } catch (err) {
+      setSyncMsg(`Error: ${err.message}`)
+    }
+    setSyncing(false)
+    setTimeout(() => setSyncMsg(''), 10000)
+  }
+
   async function handleBackfillStripe() {
     setSyncing(true); setSyncMsg('Pulling last 12 months from Stripe… this can take 30-60 seconds')
     console.log('[Stripe Sync] Starting backfill (365 days)…')
@@ -291,6 +305,7 @@ export default function SalesAnalytics() {
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillKajabi} disabled={syncing}>Backfill Kajabi</button>
           <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
+          <button className="btn btn-ghost" onClick={handleCleanupDuplicates} disabled={syncing}>Dedupe Stripe</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
         </div>

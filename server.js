@@ -5220,30 +5220,83 @@ async function backfillStripeRevenue(daysBack = 90) {
 }
 
 // Stripe webhook (signature-less for now; enable signing later if you set STRIPE_WEBHOOK_SECRET)
+// IMPORTANT: We only process `charge.succeeded` because Stripe fires multiple
+// events for one payment (charge.succeeded + invoice.payment_succeeded +
+// payment_intent.succeeded). Each has a different ID so deduplication by ID
+// alone isn't enough — we must filter at the event level. charge.succeeded is
+// the single source of truth and matches what the /v1/charges backfill imports.
 app.post('/api/stripe/webhook', async (req, res) => {
   res.status(200).send()
   if (!supabase) return
   const event = req.body || {}
   const type = (event.type || '').toLowerCase()
-  // Successful charge or invoice payment
-  if (type === 'charge.succeeded' || type === 'invoice.payment_succeeded' || type === 'payment_intent.succeeded') {
-    const obj = event.data?.object || {}
-    const amount = obj.amount_received || obj.amount_paid || obj.amount || 0
-    const externalId = obj.id || event.id
-    if (amount && externalId) {
-      await insertRevenueEntry({
-        source: 'stripe',
-        source_external_id: externalId,
-        amount_cents: amount,
-        currency: (obj.currency || 'usd').toUpperCase(),
-        received_at: new Date((obj.created || event.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10),
-        description: obj.description || obj.statement_descriptor || 'Stripe payment',
-        customer_email: obj.receipt_email || obj.customer_email || null,
-        raw_data: event,
-      })
-      console.log(`[Stripe Webhook] ✓ Recorded ${type} ${amount} cents`)
-    }
+  if (type !== 'charge.succeeded') {
+    console.log(`[Stripe Webhook] Ignoring ${type} (only charge.succeeded is processed to avoid duplicates)`)
+    return
   }
+  const charge = event.data?.object || {}
+  const amount = charge.amount_captured || charge.amount || 0
+  const externalId = charge.id
+  if (!amount || !externalId) return
+
+  await insertRevenueEntry({
+    source: 'stripe',
+    source_external_id: externalId,
+    amount_cents: amount,
+    currency: (charge.currency || 'usd').toUpperCase(),
+    received_at: new Date((charge.created || event.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10),
+    description: charge.description || charge.statement_descriptor || 'Stripe charge',
+    customer_email: charge.receipt_email || charge.billing_details?.email || null,
+    raw_data: charge,
+  })
+  console.log(`[Stripe Webhook] ✓ Recorded charge.succeeded ${externalId} (${amount} cents)`)
+})
+
+// One-time cleanup: remove duplicate Stripe entries created before the webhook
+// was narrowed down to only charge.succeeded. Groups by (customer_email,
+// amount_cents, received_at) and keeps the one whose external_id starts with
+// "ch_" (a charge ID) — that one matches the /v1/charges backfill and is
+// considered canonical. Deletes pi_xxx and in_xxx duplicates.
+async function cleanupStripeDuplicates() {
+  if (!supabase) return { error: 'No database' }
+  const { data: rows } = await supabase.from('revenue_entries')
+    .select('id, source_external_id, customer_email, amount_cents, received_at')
+    .eq('source', 'stripe')
+  if (!rows?.length) return { kept: 0, deleted: 0 }
+
+  // Group by customer + amount + date
+  const groups = new Map()
+  for (const r of rows) {
+    const key = `${r.customer_email || ''}|${r.amount_cents}|${r.received_at}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(r)
+  }
+
+  const idsToDelete = []
+  let kept = 0
+  for (const groupRows of groups.values()) {
+    if (groupRows.length === 1) { kept++; continue }
+    // Sort so the ch_ one wins; fall back to first by id
+    groupRows.sort((a, b) => {
+      const ac = (a.source_external_id || '').startsWith('ch_') ? 0 : 1
+      const bc = (b.source_external_id || '').startsWith('ch_') ? 0 : 1
+      return ac - bc
+    })
+    kept++ // keep the first one (now the ch_ if present)
+    for (let i = 1; i < groupRows.length; i++) idsToDelete.push(groupRows[i].id)
+  }
+
+  if (idsToDelete.length) {
+    const { error } = await supabase.from('revenue_entries').delete().in('id', idsToDelete)
+    if (error) return { error: error.message }
+  }
+  return { kept, deleted: idsToDelete.length, totalGroups: groups.size }
+}
+
+app.post('/api/sales/cleanup-stripe-duplicates', requireAuth, async (_req, res) => {
+  const result = await cleanupStripeDuplicates()
+  if (result.error) return res.status(500).json({ error: result.error })
+  res.json({ success: true, ...result })
 })
 
 // ─── Sales Analytics API routes ──────────────────────────────────────────────

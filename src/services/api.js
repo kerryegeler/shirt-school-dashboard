@@ -678,3 +678,10 @@ export async function backfillStripe(days = 90) {
   if (!r.ok) throw new Error(d.error || 'Stripe backfill failed')
   return d
 }
+
+export async function cleanupStripeDuplicates() {
+  const r = await fetch('/api/sales/cleanup-stripe-duplicates', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Cleanup failed')
+  return d
+}
