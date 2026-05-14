@@ -5029,8 +5029,10 @@ const REVENUE_SOURCES = [
   'bank_deposit', 'adsense', 'affiliate_other', 'other',
 ]
 
-// Insert (or upsert) a revenue entry. Used by Kajabi/Stripe sync helpers and
-// the manual-entry endpoint.
+// Insert (or update if already present) a revenue entry. Used by Kajabi/Stripe
+// sync helpers and the manual-entry endpoint. We avoid upsert+onConflict because
+// it requires a non-partial UNIQUE constraint; instead we do a manual
+// "check then insert or update" so the code works with our partial index.
 async function insertRevenueEntry(entry) {
   if (!supabase) return { error: 'No database' }
   const row = {
@@ -5045,12 +5047,21 @@ async function insertRevenueEntry(entry) {
     entered_manually: !!entry.entered_manually,
     raw_data: entry.raw_data || null,
   }
-  // Use upsert when there's an external id so re-syncs are idempotent
+
+  // If there's an external id, check for an existing record first so we update
+  // rather than create a duplicate
   if (row.source_external_id) {
-    const { data, error } = await supabase.from('revenue_entries')
-      .upsert(row, { onConflict: 'source,source_external_id' }).select().single()
-    return error ? { error: error.message } : { entry: data }
+    const { data: existing, error: lookupErr } = await supabase.from('revenue_entries')
+      .select('id').eq('source', row.source).eq('source_external_id', row.source_external_id)
+      .maybeSingle()
+    if (lookupErr) return { error: lookupErr.message }
+    if (existing) {
+      const { data, error } = await supabase.from('revenue_entries')
+        .update(row).eq('id', existing.id).select().single()
+      return error ? { error: error.message } : { entry: data }
+    }
   }
+
   const { data, error } = await supabase.from('revenue_entries').insert(row).select().single()
   return error ? { error: error.message } : { entry: data }
 }
