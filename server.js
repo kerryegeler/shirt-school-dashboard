@@ -5253,10 +5253,12 @@ app.post('/api/stripe/webhook', async (req, res) => {
 })
 
 // One-time cleanup: remove duplicate Stripe entries created before the webhook
-// was narrowed down to only charge.succeeded. Groups by (customer_email,
-// amount_cents, received_at) and keeps the one whose external_id starts with
-// "ch_" (a charge ID) — that one matches the /v1/charges backfill and is
-// considered canonical. Deletes pi_xxx and in_xxx duplicates.
+// was narrowed down to only charge.succeeded. Groups by (amount_cents,
+// received_at) — i.e. any two Stripe entries with the same amount on the same
+// day are treated as duplicates. This is more aggressive than matching on
+// customer_email because Stripe's invoice/charge events populate that field
+// inconsistently. Keeps the entry whose external_id starts with "ch_" (the
+// canonical charge) when one is present.
 async function cleanupStripeDuplicates() {
   if (!supabase) return { error: 'No database' }
   const { data: rows } = await supabase.from('revenue_entries')
@@ -5264,10 +5266,10 @@ async function cleanupStripeDuplicates() {
     .eq('source', 'stripe')
   if (!rows?.length) return { kept: 0, deleted: 0 }
 
-  // Group by customer + amount + date
+  // Group by amount + date only
   const groups = new Map()
   for (const r of rows) {
-    const key = `${r.customer_email || ''}|${r.amount_cents}|${r.received_at}`
+    const key = `${r.amount_cents}|${r.received_at}`
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(r)
   }
@@ -5276,13 +5278,16 @@ async function cleanupStripeDuplicates() {
   let kept = 0
   for (const groupRows of groups.values()) {
     if (groupRows.length === 1) { kept++; continue }
-    // Sort so the ch_ one wins; fall back to first by id
+    // Sort: prefer ch_ (canonical charge ID), then prefer rows that have a customer_email
     groupRows.sort((a, b) => {
       const ac = (a.source_external_id || '').startsWith('ch_') ? 0 : 1
       const bc = (b.source_external_id || '').startsWith('ch_') ? 0 : 1
-      return ac - bc
+      if (ac !== bc) return ac - bc
+      const ae = a.customer_email ? 0 : 1
+      const be = b.customer_email ? 0 : 1
+      return ae - be
     })
-    kept++ // keep the first one (now the ch_ if present)
+    kept++
     for (let i = 1; i < groupRows.length; i++) idsToDelete.push(groupRows[i].id)
   }
 
