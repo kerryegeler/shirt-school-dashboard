@@ -176,26 +176,31 @@ export default function SalesAnalytics() {
     setSyncing(true); setSyncMsg('Backfilling Kajabi…')
     try {
       const r = await backfillKajabi()
-      setSyncMsg(`Imported ${r.inserted} Kajabi entries.`)
+      const parts = [`Scanned ${r.scanned || 0} successful Kajabi payments`, `imported ${r.inserted}`]
+      if (r.skipped) parts.push(`skipped ${r.skipped} (no amount)`)
+      if (r.errors?.length) parts.push(`errors: ${r.errors.join('; ')}`)
+      setSyncMsg(parts.join(' · '))
       await load()
     } catch (err) {
       setSyncMsg(`Error: ${err.message}`)
     }
     setSyncing(false)
-    setTimeout(() => setSyncMsg(''), 4000)
+    setTimeout(() => setSyncMsg(''), 12000)
   }
 
   async function handleBackfillStripe() {
     setSyncing(true); setSyncMsg('Pulling last 90 days from Stripe…')
     try {
       const r = await backfillStripe(90)
-      setSyncMsg(`Imported ${r.inserted} Stripe entries.`)
+      const parts = [`Scanned ${r.scanned || 0} Stripe charges`, `imported ${r.inserted}`]
+      if (r.errors?.length) parts.push(`errors: ${r.errors.join('; ')}`)
+      setSyncMsg(parts.join(' · '))
       await load()
     } catch (err) {
       setSyncMsg(`Error: ${err.message}`)
     }
     setSyncing(false)
-    setTimeout(() => setSyncMsg(''), 6000)
+    setTimeout(() => setSyncMsg(''), 12000)
   }
 
   async function handleDelete(id) {

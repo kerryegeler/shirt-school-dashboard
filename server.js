@@ -5058,16 +5058,30 @@ async function insertRevenueEntry(entry) {
 // One-time backfill: walk kajabi_payments where status='success' and copy them
 // into revenue_entries. Idempotent (uses external_id = kajabi_id).
 async function backfillKajabiRevenue() {
-  if (!supabase) return 0
-  const { data: payments } = await supabase.from('kajabi_payments')
+  if (!supabase) return { inserted: 0, error: 'No database' }
+  const { data: payments, error: queryErr } = await supabase.from('kajabi_payments')
     .select('*').eq('status', 'success')
-  if (!payments?.length) return 0
+  if (queryErr) {
+    console.error('[Backfill Kajabi] query error:', queryErr.message)
+    return { inserted: 0, error: queryErr.message, scanned: 0 }
+  }
+  const scanned = payments?.length || 0
+  console.log(`[Backfill Kajabi] Found ${scanned} successful payment(s) in kajabi_payments`)
+  if (!scanned) return { inserted: 0, scanned: 0 }
+
   let inserted = 0
+  let skipped = 0
+  const errors = []
   for (const p of payments) {
+    if (!p.amount_cents) {
+      skipped++
+      console.log(`[Backfill Kajabi] Skipping payment ${p.kajabi_id} (no amount_cents)`)
+      continue
+    }
     const result = await insertRevenueEntry({
       source: 'kajabi',
       source_external_id: p.kajabi_id,
-      amount_cents: p.amount_cents || 0,
+      amount_cents: p.amount_cents,
       currency: p.currency || 'USD',
       received_at: (p.synced_at || new Date().toISOString()).slice(0, 10),
       description: p.product_name || 'Kajabi payment',
@@ -5075,55 +5089,82 @@ async function backfillKajabiRevenue() {
       product_name: p.product_name,
       raw_data: { kajabi_payment_id: p.id },
     })
-    if (!result.error) inserted++
+    if (result.error) {
+      errors.push(`${p.kajabi_id}: ${result.error}`)
+      console.error(`[Backfill Kajabi] Insert error for ${p.kajabi_id}:`, result.error)
+    } else {
+      inserted++
+    }
   }
-  return inserted
+  console.log(`[Backfill Kajabi] ✓ Inserted ${inserted}, skipped ${skipped}, errors ${errors.length}`)
+  return { inserted, scanned, skipped, errors: errors.slice(0, 3) }
 }
 
-// Stripe API: list balance transactions over the last `daysBack` days and
-// upsert each as a revenue entry. Requires STRIPE_API_KEY in env.
+// Stripe API: list charges over the last `daysBack` days and upsert each as a
+// revenue entry. Requires STRIPE_API_KEY in env. Uses /v1/charges (not
+// balance_transactions) which returns succeeded charges directly.
 async function backfillStripeRevenue(daysBack = 90) {
   if (!supabase) return { error: 'No database' }
   if (!process.env.STRIPE_API_KEY) return { error: 'STRIPE_API_KEY not set in Railway env' }
 
+  console.log(`[Backfill Stripe] Starting, daysBack=${daysBack}`)
   const since = Math.floor((Date.now() - daysBack * 24 * 60 * 60 * 1000) / 1000)
   let inserted = 0
+  let scanned = 0
   let startingAfter = null
-  // Stripe paginates 100 per page; loop until we run out
+  const errors = []
+
   for (let page = 0; page < 50; page++) {
     const qs = new URLSearchParams({
       limit: '100',
       'created[gte]': String(since),
-      type: 'charge',
     })
     if (startingAfter) qs.set('starting_after', startingAfter)
-    const res = await fetch(`https://api.stripe.com/v1/balance_transactions?${qs.toString()}`, {
+    const url = `https://api.stripe.com/v1/charges?${qs.toString()}`
+    console.log(`[Backfill Stripe] page=${page} fetching ${url}`)
+    const res = await fetch(url, {
       headers: { Authorization: `Bearer ${process.env.STRIPE_API_KEY}` },
     })
     if (!res.ok) {
       const text = await res.text()
+      console.error(`[Backfill Stripe] API error: ${res.status} ${text.slice(0, 400)}`)
       return { error: `Stripe API ${res.status}: ${text.slice(0, 200)}` }
     }
     const data = await res.json()
     const items = data.data || []
-    for (const tx of items) {
-      // Only count successful charges (net positive after fees)
-      if (tx.type !== 'charge') continue
+    console.log(`[Backfill Stripe] page=${page} got ${items.length} charges (has_more=${data.has_more})`)
+    scanned += items.length
+
+    for (const charge of items) {
+      // Only count successful, paid charges (not refunded fully)
+      if (charge.status !== 'succeeded') continue
+      if (!charge.paid) continue
+      if (!charge.amount) continue
+      // Use amount_captured if present (post-refund), else amount
+      const amount = charge.amount_captured || charge.amount
+
       const result = await insertRevenueEntry({
         source: 'stripe',
-        source_external_id: tx.id,
-        amount_cents: tx.amount, // gross amount in cents
-        currency: (tx.currency || 'usd').toUpperCase(),
-        received_at: new Date(tx.created * 1000).toISOString().slice(0, 10),
-        description: tx.description || 'Stripe charge',
-        raw_data: tx,
+        source_external_id: charge.id,
+        amount_cents: amount,
+        currency: (charge.currency || 'usd').toUpperCase(),
+        received_at: new Date(charge.created * 1000).toISOString().slice(0, 10),
+        description: charge.description || charge.statement_descriptor || 'Stripe charge',
+        customer_email: charge.receipt_email || charge.billing_details?.email || null,
+        raw_data: charge,
       })
-      if (!result.error) inserted++
+      if (result.error) {
+        errors.push(`${charge.id}: ${result.error}`)
+        console.error(`[Backfill Stripe] Insert error for ${charge.id}:`, result.error)
+      } else {
+        inserted++
+      }
     }
     if (!data.has_more || items.length === 0) break
     startingAfter = items[items.length - 1].id
   }
-  return { inserted }
+  console.log(`[Backfill Stripe] ✓ Scanned ${scanned}, inserted ${inserted}, errors ${errors.length}`)
+  return { inserted, scanned, errors: errors.slice(0, 3) }
 }
 
 // Stripe webhook (signature-less for now; enable signing later if you set STRIPE_WEBHOOK_SECRET)
@@ -5228,15 +5269,16 @@ app.delete('/api/sales/entries/:id', requireAuth, async (req, res) => {
 })
 
 app.post('/api/sales/backfill-kajabi', requireAuth, async (_req, res) => {
-  const inserted = await backfillKajabiRevenue()
-  res.json({ success: true, inserted })
+  const result = await backfillKajabiRevenue()
+  if (result.error) return res.status(500).json({ error: result.error, ...result })
+  res.json({ success: true, ...result })
 })
 
 app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
   const days = parseInt(req.body?.days || '90')
   const result = await backfillStripeRevenue(days)
-  if (result.error) return res.status(500).json({ error: result.error })
-  res.json({ success: true, inserted: result.inserted, days })
+  if (result.error) return res.status(500).json({ error: result.error, ...result })
+  res.json({ success: true, ...result, days })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────
