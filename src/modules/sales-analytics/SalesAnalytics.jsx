@@ -244,18 +244,21 @@ export default function SalesAnalytics() {
   }
 
   async function handleBackfillStripe() {
-    setSyncing(true); setSyncMsg('Pulling last 90 days from Stripe…')
+    setSyncing(true); setSyncMsg('Pulling last 12 months from Stripe… this can take 30-60 seconds')
+    console.log('[Stripe Sync] Starting backfill (365 days)…')
     try {
-      const r = await backfillStripe(90)
+      const r = await backfillStripe(365)
+      console.log('[Stripe Sync] Result:', r)
       const parts = [`Scanned ${r.scanned || 0} Stripe charges`, `imported ${r.inserted}`]
       if (r.errors?.length) parts.push(`errors: ${r.errors.join('; ')}`)
       setSyncMsg(parts.join(' · '))
       await load()
     } catch (err) {
+      console.error('[Stripe Sync] Error:', err)
       setSyncMsg(`Error: ${err.message}`)
     }
     setSyncing(false)
-    setTimeout(() => setSyncMsg(''), 12000)
+    setTimeout(() => setSyncMsg(''), 15000)
   }
 
   async function handleDelete(id) {

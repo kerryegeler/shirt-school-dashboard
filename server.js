@@ -5112,8 +5112,8 @@ async function backfillKajabiRevenue() {
 }
 
 // Stripe API: list charges over the last `daysBack` days and upsert each as a
-// revenue entry. Requires STRIPE_API_KEY in env. Uses /v1/charges (not
-// balance_transactions) which returns succeeded charges directly.
+// revenue entry. Requires STRIPE_API_KEY in env. Uses /v1/charges directly.
+// Batches existence checks for performance on large backfills.
 async function backfillStripeRevenue(daysBack = 90) {
   if (!supabase) return { error: 'No database' }
   if (!process.env.STRIPE_API_KEY) return { error: 'STRIPE_API_KEY not set in Railway env' }
@@ -5121,10 +5121,13 @@ async function backfillStripeRevenue(daysBack = 90) {
   console.log(`[Backfill Stripe] Starting, daysBack=${daysBack}`)
   const since = Math.floor((Date.now() - daysBack * 24 * 60 * 60 * 1000) / 1000)
   let inserted = 0
+  let updated = 0
   let scanned = 0
   let startingAfter = null
   const errors = []
 
+  // Step 1: collect all charges from Stripe
+  const allCharges = []
   for (let page = 0; page < 50; page++) {
     const qs = new URLSearchParams({
       limit: '100',
@@ -5145,37 +5148,75 @@ async function backfillStripeRevenue(daysBack = 90) {
     const items = data.data || []
     console.log(`[Backfill Stripe] page=${page} got ${items.length} charges (has_more=${data.has_more})`)
     scanned += items.length
-
-    for (const charge of items) {
-      // Only count successful, paid charges (not refunded fully)
-      if (charge.status !== 'succeeded') continue
-      if (!charge.paid) continue
-      if (!charge.amount) continue
-      // Use amount_captured if present (post-refund), else amount
-      const amount = charge.amount_captured || charge.amount
-
-      const result = await insertRevenueEntry({
-        source: 'stripe',
-        source_external_id: charge.id,
-        amount_cents: amount,
-        currency: (charge.currency || 'usd').toUpperCase(),
-        received_at: new Date(charge.created * 1000).toISOString().slice(0, 10),
-        description: charge.description || charge.statement_descriptor || 'Stripe charge',
-        customer_email: charge.receipt_email || charge.billing_details?.email || null,
-        raw_data: charge,
-      })
-      if (result.error) {
-        errors.push(`${charge.id}: ${result.error}`)
-        console.error(`[Backfill Stripe] Insert error for ${charge.id}:`, result.error)
-      } else {
-        inserted++
-      }
-    }
+    allCharges.push(...items)
     if (!data.has_more || items.length === 0) break
     startingAfter = items[items.length - 1].id
   }
-  console.log(`[Backfill Stripe] ✓ Scanned ${scanned}, inserted ${inserted}, errors ${errors.length}`)
-  return { inserted, scanned, errors: errors.slice(0, 3) }
+
+  // Step 2: filter to valid succeeded paid charges
+  const validCharges = allCharges.filter((c) => c.status === 'succeeded' && c.paid && c.amount)
+  console.log(`[Backfill Stripe] ${validCharges.length} valid succeeded+paid charges`)
+
+  if (validCharges.length === 0) {
+    return { scanned, inserted: 0, errors: [] }
+  }
+
+  // Step 3: one query to find which ones already exist
+  const ids = validCharges.map((c) => c.id)
+  const { data: existing } = await supabase.from('revenue_entries')
+    .select('id, source_external_id').eq('source', 'stripe').in('source_external_id', ids)
+  const existingMap = new Map((existing || []).map((r) => [r.source_external_id, r.id]))
+  console.log(`[Backfill Stripe] ${existingMap.size} already in db, ${validCharges.length - existingMap.size} new`)
+
+  // Step 4: split into inserts vs updates and run in bulk
+  const toInsert = []
+  const toUpdate = []
+  for (const c of validCharges) {
+    const amount = c.amount_captured || c.amount
+    const row = {
+      source: 'stripe',
+      source_external_id: c.id,
+      amount_cents: amount,
+      currency: (c.currency || 'usd').toUpperCase(),
+      received_at: new Date(c.created * 1000).toISOString().slice(0, 10),
+      description: c.description || c.statement_descriptor || 'Stripe charge',
+      customer_email: c.receipt_email || c.billing_details?.email || null,
+      product_name: null,
+      entered_manually: false,
+      raw_data: c,
+    }
+    if (existingMap.has(c.id)) {
+      toUpdate.push({ id: existingMap.get(c.id), ...row })
+    } else {
+      toInsert.push(row)
+    }
+  }
+
+  // Bulk insert (chunked at 500 to be safe)
+  for (let i = 0; i < toInsert.length; i += 500) {
+    const chunk = toInsert.slice(i, i + 500)
+    const { error } = await supabase.from('revenue_entries').insert(chunk)
+    if (error) {
+      console.error('[Backfill Stripe] bulk insert error:', error.message)
+      errors.push(`bulk insert: ${error.message}`)
+    } else {
+      inserted += chunk.length
+    }
+  }
+
+  // Updates have to be one-by-one (Supabase doesn't bulk-update)
+  for (const u of toUpdate) {
+    const { id, ...row } = u
+    const { error } = await supabase.from('revenue_entries').update(row).eq('id', id)
+    if (error) {
+      errors.push(`${u.source_external_id}: ${error.message}`)
+    } else {
+      updated++
+    }
+  }
+
+  console.log(`[Backfill Stripe] ✓ Scanned ${scanned}, inserted ${inserted}, updated ${updated}, errors ${errors.length}`)
+  return { inserted, updated, scanned, errors: errors.slice(0, 3) }
 }
 
 // Stripe webhook (signature-less for now; enable signing later if you set STRIPE_WEBHOOK_SECRET)
