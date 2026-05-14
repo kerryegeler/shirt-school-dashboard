@@ -91,6 +91,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/slack/actions',  // Called by Slack, not the dashboard user
   '/api/slack/events',   // Slack Event Subscriptions
   '/api/kajabi/webhook', // Called by Kajabi, not the dashboard user
+  '/api/stripe/webhook', // Called by Stripe, not the dashboard user
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -4823,6 +4824,21 @@ app.post('/api/kajabi/webhook', async (req, res) => {
         synced_at: new Date().toISOString(),
       }, { onConflict: 'kajabi_id' })
       console.log(`[Kajabi Webhook] ✓ Recorded successful payment for ${customerEmail}`)
+
+      // Also record into the revenue ledger so it shows up in Sales Analytics
+      if (amountCents) {
+        await insertRevenueEntry({
+          source: 'kajabi',
+          source_external_id: eventId,
+          amount_cents: amountCents,
+          currency,
+          received_at: (occurredAt || new Date().toISOString()).slice(0, 10),
+          description: productName || 'Kajabi payment',
+          customer_email: customerEmail,
+          product_name: productName,
+          raw_data: { event_id: eventId },
+        })
+      }
     } catch (err) {
       console.error('[Kajabi Webhook] Failed to record success:', err.message)
     }
@@ -5004,6 +5020,223 @@ app.get('/api/payment-recovery/sequences', requireAuth, async (req, res) => {
   const { data, error } = await q
   if (error) return res.status(500).json({ error: error.message })
   res.json({ sequences: data || [] })
+})
+
+// ─── Sales Analytics (revenue ledger) ────────────────────────────────────────
+
+const REVENUE_SOURCES = [
+  'kajabi', 'stripe', 'paypal', 'partnerstack', 'impact',
+  'bank_deposit', 'adsense', 'affiliate_other', 'other',
+]
+
+// Insert (or upsert) a revenue entry. Used by Kajabi/Stripe sync helpers and
+// the manual-entry endpoint.
+async function insertRevenueEntry(entry) {
+  if (!supabase) return { error: 'No database' }
+  const row = {
+    source: entry.source,
+    source_external_id: entry.source_external_id || null,
+    amount_cents: entry.amount_cents,
+    currency: entry.currency || 'USD',
+    received_at: entry.received_at,
+    description: entry.description || null,
+    customer_email: entry.customer_email || null,
+    product_name: entry.product_name || null,
+    entered_manually: !!entry.entered_manually,
+    raw_data: entry.raw_data || null,
+  }
+  // Use upsert when there's an external id so re-syncs are idempotent
+  if (row.source_external_id) {
+    const { data, error } = await supabase.from('revenue_entries')
+      .upsert(row, { onConflict: 'source,source_external_id' }).select().single()
+    return error ? { error: error.message } : { entry: data }
+  }
+  const { data, error } = await supabase.from('revenue_entries').insert(row).select().single()
+  return error ? { error: error.message } : { entry: data }
+}
+
+// One-time backfill: walk kajabi_payments where status='success' and copy them
+// into revenue_entries. Idempotent (uses external_id = kajabi_id).
+async function backfillKajabiRevenue() {
+  if (!supabase) return 0
+  const { data: payments } = await supabase.from('kajabi_payments')
+    .select('*').eq('status', 'success')
+  if (!payments?.length) return 0
+  let inserted = 0
+  for (const p of payments) {
+    const result = await insertRevenueEntry({
+      source: 'kajabi',
+      source_external_id: p.kajabi_id,
+      amount_cents: p.amount_cents || 0,
+      currency: p.currency || 'USD',
+      received_at: (p.synced_at || new Date().toISOString()).slice(0, 10),
+      description: p.product_name || 'Kajabi payment',
+      customer_email: p.customer_email,
+      product_name: p.product_name,
+      raw_data: { kajabi_payment_id: p.id },
+    })
+    if (!result.error) inserted++
+  }
+  return inserted
+}
+
+// Stripe API: list balance transactions over the last `daysBack` days and
+// upsert each as a revenue entry. Requires STRIPE_API_KEY in env.
+async function backfillStripeRevenue(daysBack = 90) {
+  if (!supabase) return { error: 'No database' }
+  if (!process.env.STRIPE_API_KEY) return { error: 'STRIPE_API_KEY not set in Railway env' }
+
+  const since = Math.floor((Date.now() - daysBack * 24 * 60 * 60 * 1000) / 1000)
+  let inserted = 0
+  let startingAfter = null
+  // Stripe paginates 100 per page; loop until we run out
+  for (let page = 0; page < 50; page++) {
+    const qs = new URLSearchParams({
+      limit: '100',
+      'created[gte]': String(since),
+      type: 'charge',
+    })
+    if (startingAfter) qs.set('starting_after', startingAfter)
+    const res = await fetch(`https://api.stripe.com/v1/balance_transactions?${qs.toString()}`, {
+      headers: { Authorization: `Bearer ${process.env.STRIPE_API_KEY}` },
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      return { error: `Stripe API ${res.status}: ${text.slice(0, 200)}` }
+    }
+    const data = await res.json()
+    const items = data.data || []
+    for (const tx of items) {
+      // Only count successful charges (net positive after fees)
+      if (tx.type !== 'charge') continue
+      const result = await insertRevenueEntry({
+        source: 'stripe',
+        source_external_id: tx.id,
+        amount_cents: tx.amount, // gross amount in cents
+        currency: (tx.currency || 'usd').toUpperCase(),
+        received_at: new Date(tx.created * 1000).toISOString().slice(0, 10),
+        description: tx.description || 'Stripe charge',
+        raw_data: tx,
+      })
+      if (!result.error) inserted++
+    }
+    if (!data.has_more || items.length === 0) break
+    startingAfter = items[items.length - 1].id
+  }
+  return { inserted }
+}
+
+// Stripe webhook (signature-less for now; enable signing later if you set STRIPE_WEBHOOK_SECRET)
+app.post('/api/stripe/webhook', async (req, res) => {
+  res.status(200).send()
+  if (!supabase) return
+  const event = req.body || {}
+  const type = (event.type || '').toLowerCase()
+  // Successful charge or invoice payment
+  if (type === 'charge.succeeded' || type === 'invoice.payment_succeeded' || type === 'payment_intent.succeeded') {
+    const obj = event.data?.object || {}
+    const amount = obj.amount_received || obj.amount_paid || obj.amount || 0
+    const externalId = obj.id || event.id
+    if (amount && externalId) {
+      await insertRevenueEntry({
+        source: 'stripe',
+        source_external_id: externalId,
+        amount_cents: amount,
+        currency: (obj.currency || 'usd').toUpperCase(),
+        received_at: new Date((obj.created || event.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10),
+        description: obj.description || obj.statement_descriptor || 'Stripe payment',
+        customer_email: obj.receipt_email || obj.customer_email || null,
+        raw_data: event,
+      })
+      console.log(`[Stripe Webhook] ✓ Recorded ${type} ${amount} cents`)
+    }
+  }
+})
+
+// ─── Sales Analytics API routes ──────────────────────────────────────────────
+
+app.get('/api/sales/summary', requireAuth, async (_req, res) => {
+  if (!supabase) return res.json({ mtd_cents: 0, monthly: [], total_entries: 0 })
+
+  // Last 12 months including current
+  const now = new Date()
+  const yearAgo = new Date(now.getFullYear() - 1, now.getMonth(), 1)
+  const startIso = yearAgo.toISOString().slice(0, 10)
+
+  const { data: rows } = await supabase.from('revenue_entries')
+    .select('amount_cents, received_at, source')
+    .gte('received_at', startIso)
+    .order('received_at', { ascending: true })
+
+  const monthly = new Map()
+  let mtdCents = 0
+  const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  const currentMonthKey = monthKey(now)
+
+  // Seed 12 months with 0 so the chart always has full bars
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    monthly.set(monthKey(d), { month: monthKey(d), label: d.toLocaleString('en-US', { month: 'short', year: '2-digit' }), cents: 0 })
+  }
+
+  for (const r of rows || []) {
+    const d = new Date(r.received_at + 'T00:00:00')
+    const k = monthKey(d)
+    if (monthly.has(k)) monthly.get(k).cents += r.amount_cents || 0
+    if (k === currentMonthKey) mtdCents += r.amount_cents || 0
+  }
+
+  res.json({
+    mtd_cents: mtdCents,
+    monthly: [...monthly.values()],
+    total_entries: (rows || []).length,
+  })
+})
+
+app.get('/api/sales/entries', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ entries: [] })
+  const limit = parseInt(req.query.limit || '50')
+  const source = req.query.source
+  let q = supabase.from('revenue_entries').select('*').order('received_at', { ascending: false }).limit(limit)
+  if (source) q = q.eq('source', source)
+  const { data, error } = await q
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ entries: data || [] })
+})
+
+app.post('/api/sales/entries', requireAuth, async (req, res) => {
+  const { source, amount, received_at, description, customer_email, product_name } = req.body
+  if (!REVENUE_SOURCES.includes(source)) return res.status(400).json({ error: 'Invalid source' })
+  if (!amount || isNaN(parseFloat(amount))) return res.status(400).json({ error: 'Amount required' })
+  if (!received_at) return res.status(400).json({ error: 'Date required' })
+
+  const amountCents = Math.round(parseFloat(amount) * 100)
+  const result = await insertRevenueEntry({
+    source, amount_cents: amountCents,
+    received_at, description, customer_email, product_name,
+    entered_manually: true,
+  })
+  if (result.error) return res.status(500).json({ error: result.error })
+  res.json({ entry: result.entry })
+})
+
+app.delete('/api/sales/entries/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('revenue_entries').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.post('/api/sales/backfill-kajabi', requireAuth, async (_req, res) => {
+  const inserted = await backfillKajabiRevenue()
+  res.json({ success: true, inserted })
+})
+
+app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
+  const days = parseInt(req.body?.days || '90')
+  const result = await backfillStripeRevenue(days)
+  if (result.error) return res.status(500).json({ error: result.error })
+  res.json({ success: true, inserted: result.inserted, days })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

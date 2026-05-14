@@ -43,6 +43,16 @@ const IconCard = () => (
   </svg>
 )
 
+const IconChartBar = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 14V8" />
+    <path d="M6 14V5" />
+    <path d="M10 14v-3" />
+    <path d="M14 14V3" />
+    <path d="M1 14h14" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
@@ -50,6 +60,7 @@ const modules = [
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'challenge-launcher', label: 'Challenge Launcher', icon: IconRocket, comingSoon: false },
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
+  { id: 'sales-analytics', label: 'Sales Analytics', icon: IconChartBar, comingSoon: false },
 ]
 
 export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect }) {

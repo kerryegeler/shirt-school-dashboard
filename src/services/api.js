@@ -621,3 +621,55 @@ export async function fetchRecoverySequences(status) {
   if (!r.ok) throw new Error(d.error || 'Failed to fetch sequences')
   return d.sequences
 }
+
+// ─── Sales Analytics ──────────────────────────────────────────────────────────
+
+export async function fetchSalesSummary() {
+  const r = await fetch('/api/sales/summary')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch summary')
+  return d
+}
+
+export async function fetchRevenueEntries({ source, limit = 50 } = {}) {
+  const qs = new URLSearchParams()
+  if (source) qs.set('source', source)
+  if (limit) qs.set('limit', String(limit))
+  const r = await fetch(`/api/sales/entries?${qs.toString()}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch entries')
+  return d.entries
+}
+
+export async function addRevenueEntry(entry) {
+  const r = await fetch('/api/sales/entries', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(entry),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to add entry')
+  return d.entry
+}
+
+export async function deleteRevenueEntry(id) {
+  const r = await fetch(`/api/sales/entries/${id}`, { method: 'DELETE' })
+  const d = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(d.error || 'Failed to delete entry')
+}
+
+export async function backfillKajabi() {
+  const r = await fetch('/api/sales/backfill-kajabi', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Backfill failed')
+  return d
+}
+
+export async function backfillStripe(days = 90) {
+  const r = await fetch('/api/sales/backfill-stripe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Stripe backfill failed')
+  return d
+}

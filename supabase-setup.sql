@@ -237,6 +237,27 @@ alter table kajabi_payments add column if not exists ignored boolean not null de
 alter table kajabi_payments add column if not exists slack_message_ts text;
 alter table kajabi_payments add column if not exists slack_channel_id text;
 
+-- ─── Sales Analytics: unified revenue ledger ───────────────────────────────
+
+create table if not exists revenue_entries (
+  id uuid primary key default gen_random_uuid(),
+  source text not null,                 -- 'kajabi', 'stripe', 'paypal', 'partnerstack', 'impact', 'bank_deposit', 'adsense', 'affiliate_other', 'other'
+  source_external_id text,              -- e.g. Stripe charge ID, Kajabi payment ID. Used for dedup on automated syncs.
+  amount_cents integer not null,
+  currency text default 'USD',
+  received_at date not null,
+  description text,
+  customer_email text,
+  product_name text,
+  entered_manually boolean not null default false,
+  raw_data jsonb,
+  created_at timestamptz not null default now()
+);
+alter table revenue_entries disable row level security;
+create index if not exists idx_revenue_received on revenue_entries(received_at desc);
+create index if not exists idx_revenue_source on revenue_entries(source);
+create unique index if not exists idx_revenue_source_external on revenue_entries(source, source_external_id) where source_external_id is not null;
+
 -- Debug log of every Kajabi webhook payload we receive, so we can inspect what
 -- Kajabi actually sends and adjust extraction logic without losing data.
 create table if not exists kajabi_webhook_log (
