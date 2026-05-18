@@ -5313,19 +5313,21 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
   // Selected period (defaults to month-to-date)
   const periodFrom = req.query.from || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
   const periodTo = req.query.to || now.toISOString().slice(0, 10)
+  const productFilter = req.query.product || null
 
   // Always-12-months window for the chart
   const yearAgoStart = new Date(now.getFullYear(), now.getMonth() - 11, 1)
   const chartStartIso = yearAgoStart.toISOString().slice(0, 10)
 
   // Cast a wide enough net to cover both the chart AND any selected period
-  // (period may be older than 12 months for "All Time")
   const earliest = periodFrom < chartStartIso ? periodFrom : chartStartIso
 
-  const { data: rows } = await supabase.from('revenue_entries')
-    .select('amount_cents, received_at, source')
+  let q = supabase.from('revenue_entries')
+    .select('amount_cents, received_at, source, product_name')
     .gte('received_at', earliest)
     .order('received_at', { ascending: true })
+  if (productFilter) q = q.eq('product_name', productFilter)
+  const { data: rows } = await q
 
   const monthly = new Map()
   let periodCents = 0
@@ -5374,13 +5376,26 @@ app.get('/api/sales/entries', requireAuth, async (req, res) => {
   const source = req.query.source
   const from = req.query.from
   const to = req.query.to
+  const product = req.query.product
   let q = supabase.from('revenue_entries').select('*').order('received_at', { ascending: false }).limit(limit)
   if (source) q = q.eq('source', source)
+  if (product) q = q.eq('product_name', product)
   if (from) q = q.gte('received_at', from)
   if (to) q = q.lte('received_at', to)
   const { data, error } = await q
   if (error) return res.status(500).json({ error: error.message })
   res.json({ entries: data || [] })
+})
+
+// Distinct list of product names that have ever been entered — populates the
+// product dropdown on the Sales Analytics page.
+app.get('/api/sales/products', requireAuth, async (_req, res) => {
+  if (!supabase) return res.json({ products: [] })
+  const { data, error } = await supabase.from('revenue_entries')
+    .select('product_name').not('product_name', 'is', null).limit(5000)
+  if (error) return res.status(500).json({ error: error.message })
+  const unique = [...new Set((data || []).map((r) => r.product_name).filter(Boolean))].sort()
+  res.json({ products: unique })
 })
 
 app.post('/api/sales/entries', requireAuth, async (req, res) => {

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   fetchSalesSummary, fetchRevenueEntries, addRevenueEntry,
   deleteRevenueEntry, backfillKajabi, backfillStripe, cleanupStripeDuplicates,
+  fetchSalesProducts,
 } from '../../services/api.js'
 import './SalesAnalytics.css'
 
@@ -192,8 +193,10 @@ function AddEntryModal({ onClose, onAdded }) {
 export default function SalesAnalytics() {
   const [summary, setSummary] = useState(null)
   const [entries, setEntries] = useState([])
+  const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [filterSource, setFilterSource] = useState('')
+  const [filterProduct, setFilterProduct] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [syncing, setSyncing] = useState(false)
@@ -209,21 +212,24 @@ export default function SalesAnalytics() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [s, e] = await Promise.all([
-        fetchSalesSummary({ from: range.from, to: range.to }),
+      const [s, e, p] = await Promise.all([
+        fetchSalesSummary({ from: range.from, to: range.to, product: filterProduct || undefined }),
         fetchRevenueEntries({
           source: filterSource || undefined,
+          product: filterProduct || undefined,
           from: range.from, to: range.to,
           limit: 200,
         }),
+        fetchSalesProducts().catch(() => []),
       ])
       setSummary(s)
       setEntries(e)
+      setProducts(p)
     } catch (err) {
       setSyncMsg(`Error: ${err.message}`)
     }
     setLoading(false)
-  }, [filterSource, range.from, range.to])
+  }, [filterSource, filterProduct, range.from, range.to])
 
   useEffect(() => { load() }, [load])
 
@@ -344,9 +350,9 @@ export default function SalesAnalytics() {
           <>
             <div className="sa-stat-grid">
               <div className="sa-stat sa-stat--primary">
-                <div className="sa-stat-label">{range.label}</div>
+                <div className="sa-stat-label">{range.label}{filterProduct ? ` · ${filterProduct}` : ''}</div>
                 <div className="sa-stat-value">{formatMoney(summary.period_total_cents || 0)}</div>
-                <div className="sa-stat-sub">{summary.period_entries || 0} entries</div>
+                <div className="sa-stat-count">{summary.period_entries || 0} {summary.period_entries === 1 ? 'sale' : 'sales'}</div>
               </div>
               <div className="sa-stat">
                 <div className="sa-stat-label">Year to Date</div>
@@ -356,7 +362,7 @@ export default function SalesAnalytics() {
               <div className="sa-stat">
                 <div className="sa-stat-label">Last 12 Months</div>
                 <div className="sa-stat-value">{formatMoney((summary.monthly || []).reduce((sum, m) => sum + (m.cents || 0), 0))}</div>
-                <div className="sa-stat-sub">{summary.total_entries || 0} entries total</div>
+                <div className="sa-stat-count">{summary.total_entries || 0} {summary.total_entries === 1 ? 'sale' : 'sales'} total</div>
               </div>
             </div>
 
@@ -367,13 +373,24 @@ export default function SalesAnalytics() {
 
             <div className="sa-card">
               <div className="sa-card-title-row">
-                <div className="sa-card-title">Entries — {range.label}</div>
-                <select className="sa-filter" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}>
-                  <option value="">All sources</option>
-                  {Object.keys(SOURCE_LABELS).map((s) => (
-                    <option key={s} value={s}>{SOURCE_LABELS[s]}</option>
-                  ))}
-                </select>
+                <div className="sa-card-title">
+                  Entries — {range.label}
+                  <span className="sa-card-title-count"> · {entries.length} {entries.length === 1 ? 'sale' : 'sales'}</span>
+                </div>
+                <div className="sa-filters-row">
+                  <select className="sa-filter" value={filterProduct} onChange={(e) => setFilterProduct(e.target.value)}>
+                    <option value="">All products</option>
+                    {products.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                  <select className="sa-filter" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}>
+                    <option value="">All sources</option>
+                    {Object.keys(SOURCE_LABELS).map((s) => (
+                      <option key={s} value={s}>{SOURCE_LABELS[s]}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {entries.length === 0 && (

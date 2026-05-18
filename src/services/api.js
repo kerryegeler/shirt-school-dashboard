@@ -624,26 +624,35 @@ export async function fetchRecoverySequences(status) {
 
 // ─── Sales Analytics ──────────────────────────────────────────────────────────
 
-export async function fetchSalesSummary({ from, to } = {}) {
+export async function fetchSalesSummary({ from, to, product } = {}) {
   const qs = new URLSearchParams()
   if (from) qs.set('from', from)
   if (to) qs.set('to', to)
+  if (product) qs.set('product', product)
   const r = await fetch(`/api/sales/summary?${qs.toString()}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch summary')
   return d
 }
 
-export async function fetchRevenueEntries({ source, from, to, limit = 100 } = {}) {
+export async function fetchRevenueEntries({ source, from, to, product, limit = 100 } = {}) {
   const qs = new URLSearchParams()
   if (source) qs.set('source', source)
   if (from) qs.set('from', from)
   if (to) qs.set('to', to)
+  if (product) qs.set('product', product)
   if (limit) qs.set('limit', String(limit))
   const r = await fetch(`/api/sales/entries?${qs.toString()}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch entries')
   return d.entries
+}
+
+export async function fetchSalesProducts() {
+  const r = await fetch('/api/sales/products')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch products')
+  return d.products
 }
 
 export async function addRevenueEntry(entry) {
