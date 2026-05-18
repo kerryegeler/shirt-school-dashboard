@@ -2499,6 +2499,31 @@ app.post('/api/slack/events', async (req, res) => {
   if (event.type !== 'message') { console.log(`[Slack Events] Ignoring: not a message event`); return }
   if (event.subtype) { console.log(`[Slack Events] Ignoring: has subtype=${event.subtype}`); return }
   if (event.bot_id) { console.log(`[Slack Events] Ignoring: bot message`); return }
+
+  // Sales report query: in the sales channel, a top-level message that contains
+  // "sales" (with optional today/yesterday/week/month) triggers a quick report.
+  const eventText = (event.text || '').trim().toLowerCase()
+  const isInSalesChannel = process.env.SLACK_SALES_CHANNEL_ID && event.channel === process.env.SLACK_SALES_CHANNEL_ID
+  const isTopLevel = !event.thread_ts || event.thread_ts === event.ts
+  if (isInSalesChannel && isTopLevel && /\bsales?\b|\breport\b/.test(eventText)) {
+    const { from, to, label } = rangeForKeyword(eventText)
+    console.log(`[Sales Query] Matched "${eventText.slice(0, 60)}" → ${label} (${from}..${to})`)
+    try {
+      const report = await buildSalesReport(from, to, `Sales Report — ${label}`)
+      if (report) {
+        await slackClient.chat.postMessage({
+          channel: event.channel,
+          thread_ts: event.ts,
+          text: `${label}: ${report.totalSales} sales`,
+          blocks: report.blocks,
+        })
+      }
+    } catch (err) {
+      console.error('[Sales Query] Error:', err.message)
+    }
+    return
+  }
+
   if (!event.thread_ts) { console.log(`[Slack Events] Ignoring: not a thread reply`); return }
   if (event.thread_ts === event.ts) { console.log(`[Slack Events] Ignoring: top-level message`); return }
 
@@ -4839,6 +4864,11 @@ app.post('/api/kajabi/webhook', async (req, res) => {
           raw_data: { event_id: eventId },
         })
       }
+
+      // Fire a Slack alert for high-value/configured products
+      if (isAlertProduct(productName)) {
+        await postVipSaleAlert({ customerName, customerEmail, productName, amountCents, currency })
+      }
     } catch (err) {
       console.error('[Kajabi Webhook] Failed to record success:', err.message)
     }
@@ -5304,6 +5334,209 @@ app.post('/api/sales/cleanup-stripe-duplicates', requireAuth, async (_req, res) 
   res.json({ success: true, ...result })
 })
 
+// ─── Sales Slack notifications & reports ─────────────────────────────────────
+
+// Channel for sales-specific posts. Falls back to the main channel if not set.
+function salesChannelId() {
+  return process.env.SLACK_SALES_CHANNEL_ID || process.env.SLACK_CHANNEL_ID
+}
+
+// Products that fire a real-time Slack alert when they sell. Add more here later
+// if you want to be pinged on other high-value products too.
+const SALES_ALERT_PRODUCTS = [
+  'Launch Your Brand Challenge VIP Experience',
+]
+
+function isAlertProduct(productName) {
+  if (!productName) return false
+  const norm = productName.toLowerCase().trim()
+  return SALES_ALERT_PRODUCTS.some((p) => norm.includes(p.toLowerCase()))
+}
+
+async function postVipSaleAlert({ customerName, customerEmail, productName, amountCents, currency }) {
+  if (!slackClient) return
+  const channel = salesChannelId()
+  if (!channel) return
+  const amount = amountCents != null
+    ? `${currency === 'USD' || !currency ? '$' : currency + ' '}${(amountCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+    : 'unknown amount'
+  try {
+    await slackClient.chat.postMessage({
+      channel,
+      text: `💎 New ${productName} sale: ${customerEmail || 'unknown'}`,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: '💎 VIP Experience Sale!' } },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: [
+              `*Customer:* ${customerName || 'Unknown'}`,
+              `*Email:* ${customerEmail || 'Unknown'}`,
+              `*Product:* ${productName}`,
+              `*Amount:* ${amount}`,
+            ].join('\n'),
+          },
+        },
+      ],
+    })
+    console.log(`[Sales Alert] ✓ Posted VIP sale notification for ${customerEmail}`)
+  } catch (err) {
+    console.error('[Sales Alert] post error:', err.message)
+  }
+}
+
+// Build a sales report for a date range. Returns Slack blocks.
+async function buildSalesReport(fromIso, toIso, title) {
+  if (!supabase) return null
+  const { data: rows } = await supabase.from('revenue_entries')
+    .select('amount_cents, product_name, source, received_at')
+    .gte('received_at', fromIso).lte('received_at', toIso)
+
+  const totalCents = (rows || []).reduce((s, r) => s + (r.amount_cents || 0), 0)
+  const totalSales = (rows || []).length
+
+  // Group by product
+  const byProduct = new Map()
+  for (const r of rows || []) {
+    const key = r.product_name || `(${r.source || 'unknown'})`
+    if (!byProduct.has(key)) byProduct.set(key, { count: 0, cents: 0 })
+    const e = byProduct.get(key)
+    e.count++
+    e.cents += r.amount_cents || 0
+  }
+  const products = [...byProduct.entries()].sort((a, b) => b[1].cents - a[1].cents)
+
+  const fmt = (c) => `$${(c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `📊 ${title}` } },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*💰 Total Revenue:* ${fmt(totalCents)}\n*🛒 Total Sales:* ${totalSales}`,
+      },
+    },
+  ]
+
+  if (products.length) {
+    blocks.push({ type: 'divider' })
+    const productLines = products.map(([name, { count, cents }]) =>
+      `• *${name}* — ${count} ${count === 1 ? 'sale' : 'sales'} · ${fmt(cents)}`
+    ).join('\n')
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*By Product:*\n${productLines}` },
+    })
+  } else {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '_No sales recorded in this period._' },
+    })
+  }
+
+  return { blocks, totalCents, totalSales }
+}
+
+// Daily report scheduler — fires at 8 AM Chicago time, reports on the previous day
+function msUntilNext8amCT() {
+  const now = new Date()
+  // Build a candidate date for "today 8am CT" and "tomorrow 8am CT" by UTC
+  // Note: 8am CT = 13:00 UTC (CDT) or 14:00 UTC (CST). Use Intl to verify hour.
+  for (let dayOffset = 0; dayOffset <= 2; dayOffset++) {
+    for (const utcHour of [13, 14]) {
+      const candidate = new Date(now)
+      candidate.setUTCDate(candidate.getUTCDate() + dayOffset)
+      candidate.setUTCHours(utcHour, 0, 0, 0)
+      if (candidate <= now) continue
+      const parts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: 'America/Chicago', hour: 'numeric', hour12: false,
+        }).formatToParts(candidate).map(({ type, value }) => [type, value])
+      )
+      if (parseInt(parts.hour || '0') === 8) {
+        return candidate.getTime() - now.getTime()
+      }
+    }
+  }
+  return 24 * 60 * 60 * 1000
+}
+
+async function postDailySalesReport() {
+  if (!slackClient || !salesChannelId()) return
+  // "Yesterday" in Chicago time
+  const ctDateParts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date()).map(({ type, value }) => [type, value])
+  )
+  const todayCT = new Date(`${ctDateParts.year}-${ctDateParts.month}-${ctDateParts.day}T00:00:00`)
+  const yesterdayCT = new Date(todayCT.getTime() - 24 * 60 * 60 * 1000)
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const dateStr = ymd(yesterdayCT)
+  const label = yesterdayCT.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+
+  const report = await buildSalesReport(dateStr, dateStr, `Daily Sales Report — ${label}`)
+  if (!report) return
+  try {
+    await slackClient.chat.postMessage({
+      channel: salesChannelId(),
+      text: `📊 Daily Sales Report — ${label}: ${report.totalSales} sales`,
+      blocks: report.blocks,
+    })
+    console.log(`[Daily Sales] ✓ Posted report for ${dateStr}: ${report.totalSales} sales, $${report.totalCents / 100}`)
+  } catch (err) {
+    console.error('[Daily Sales] post error:', err.message)
+  }
+}
+
+function startDailySalesReportScheduler() {
+  if (!slackClient || !salesChannelId()) {
+    console.log('  Daily Sales Report: not configured (set SLACK_SALES_CHANNEL_ID or SLACK_CHANNEL_ID to enable)')
+    return
+  }
+  const scheduleNext = () => {
+    const delay = msUntilNext8amCT()
+    const target = new Date(Date.now() + delay)
+    console.log(`  Daily Sales Report: next at ${target.toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT`)
+    setTimeout(async () => {
+      try { await postDailySalesReport() } catch (err) { console.error('[Daily Sales] tick error:', err.message) }
+      try { scheduleNext() } catch (err) { console.error('[Daily Sales] schedule error:', err.message) }
+    }, delay)
+  }
+  scheduleNext()
+}
+
+// Ad-hoc sales report endpoint (callable by the Slack events handler)
+// Returns the appropriate range for a keyword like "today", "yesterday", "week", "month"
+function rangeForKeyword(text) {
+  const t = text.toLowerCase()
+  const ctDateParts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date()).map(({ type, value }) => [type, value])
+  )
+  const today = `${ctDateParts.year}-${ctDateParts.month}-${ctDateParts.day}`
+  const todayDate = new Date(`${today}T00:00:00`)
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+  if (t.includes('yesterday')) {
+    const y = new Date(todayDate.getTime() - 86400000)
+    return { from: ymd(y), to: ymd(y), label: 'Yesterday' }
+  }
+  if (t.includes('week')) {
+    const start = new Date(todayDate.getTime() - 6 * 86400000)
+    return { from: ymd(start), to: today, label: 'Last 7 Days' }
+  }
+  if (t.includes('month')) {
+    const start = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1)
+    return { from: ymd(start), to: today, label: 'This Month' }
+  }
+  // Default: today
+  return { from: today, to: today, label: 'Today' }
+}
+
 // ─── Sales Analytics API routes ──────────────────────────────────────────────
 
 app.get('/api/sales/summary', requireAuth, async (req, res) => {
@@ -5564,6 +5797,7 @@ async function init() {
   startSlackPolling()
   startContentBriefScheduler()
   startPaymentRecoveryWorkers()
+  startDailySalesReportScheduler()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)
