@@ -46,30 +46,39 @@ function rangeForPreset(preset) {
   const now = new Date()
   const y = now.getFullYear()
   const m = now.getMonth()
+  const todayIso = isoDate(now)
   switch (preset) {
+    case 'today':
+      return { from: todayIso, to: todayIso, label: 'Today' }
+    case 'yesterday': {
+      const y1 = new Date(now.getTime() - 86400000)
+      return { from: isoDate(y1), to: isoDate(y1), label: 'Yesterday' }
+    }
     case 'this_month':
-      return { from: isoDate(new Date(y, m, 1)), to: isoDate(now), label: 'This Month' }
+      return { from: isoDate(new Date(y, m, 1)), to: todayIso, label: 'This Month' }
     case 'last_month': {
       const lastFirst = new Date(y, m - 1, 1)
-      const lastEnd = new Date(y, m, 0) // day 0 of current = last day of last
+      const lastEnd = new Date(y, m, 0)
       return { from: isoDate(lastFirst), to: isoDate(lastEnd), label: 'Last Month' }
     }
     case 'last_3_months':
-      return { from: isoDate(new Date(now.getTime() - 90 * 86400000)), to: isoDate(now), label: 'Last 3 Months' }
+      return { from: isoDate(new Date(now.getTime() - 90 * 86400000)), to: todayIso, label: 'Last 3 Months' }
     case 'last_6_months':
-      return { from: isoDate(new Date(now.getTime() - 180 * 86400000)), to: isoDate(now), label: 'Last 6 Months' }
+      return { from: isoDate(new Date(now.getTime() - 180 * 86400000)), to: todayIso, label: 'Last 6 Months' }
     case 'last_12_months':
-      return { from: isoDate(new Date(y - 1, m, now.getDate())), to: isoDate(now), label: 'Last 12 Months' }
+      return { from: isoDate(new Date(y - 1, m, now.getDate())), to: todayIso, label: 'Last 12 Months' }
     case 'ytd':
-      return { from: isoDate(new Date(y, 0, 1)), to: isoDate(now), label: 'Year to Date' }
+      return { from: isoDate(new Date(y, 0, 1)), to: todayIso, label: 'Year to Date' }
     case 'all_time':
-      return { from: '2000-01-01', to: isoDate(now), label: 'All Time' }
+      return { from: '2000-01-01', to: todayIso, label: 'All Time' }
     default:
-      return { from: isoDate(new Date(y, m, 1)), to: isoDate(now), label: 'This Month' }
+      return { from: todayIso, to: todayIso, label: 'Today' }
   }
 }
 
 const PERIOD_OPTIONS = [
+  { id: 'today', label: 'Today' },
+  { id: 'yesterday', label: 'Yesterday' },
   { id: 'this_month', label: 'This Month' },
   { id: 'last_month', label: 'Last Month' },
   { id: 'last_3_months', label: 'Last 3 Months' },
@@ -200,7 +209,7 @@ export default function SalesAnalytics() {
   const [showAdd, setShowAdd] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [syncing, setSyncing] = useState(false)
-  const [periodPreset, setPeriodPreset] = useState('this_month')
+  const [periodPreset, setPeriodPreset] = useState('today')
   const [customFrom, setCustomFrom] = useState(isoDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)))
   const [customTo, setCustomTo] = useState(todayLocal())
 
