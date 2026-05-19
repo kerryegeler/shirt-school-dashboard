@@ -694,3 +694,10 @@ export async function cleanupStripeDuplicates() {
   if (!r.ok) throw new Error(d.error || 'Cleanup failed')
   return d
 }
+
+export async function repairKajabi() {
+  const r = await fetch('/api/sales/repair-kajabi', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Kajabi repair failed')
+  return d
+}

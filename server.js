@@ -4783,7 +4783,14 @@ app.post('/api/kajabi/webhook', async (req, res) => {
   const offerType = (offerObj?.type || findScalarByKeys(body, ['payment_type', 'subscription_type']) || '').toString().toLowerCase()
   const isSubscription = offerType.includes('subscription') || offerType.includes('recurring') || eventType.includes('subscription')
 
-  const eventId = String(body.id || findScalarByKeys(body, ['id']) || `${eventType || 'event'}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  // Use a TRULY unique id per webhook event. Previously we used findScalarByKeys
+  // to dig for an "id" anywhere in the payload — that was a bug: it would match
+  // a nested offer.id or customer.id (which is constant across all sales of the
+  // same product) and cause every new sale of the same offer to overwrite the
+  // previous row instead of inserting a new one. Now we only trust body.id if
+  // it's a scalar at the top level; otherwise generate a fresh UUID.
+  const topLevelId = (typeof body.id === 'string' || typeof body.id === 'number') ? String(body.id) : null
+  const eventId = topLevelId || crypto.randomUUID()
 
   // Classify by event type field, OR by keywords found anywhere in the payload.
   // Some Kajabi setups don't include an explicit event field; the URL alone tells
@@ -5331,6 +5338,74 @@ async function cleanupStripeDuplicates() {
 app.post('/api/sales/cleanup-stripe-duplicates', requireAuth, async (_req, res) => {
   const result = await cleanupStripeDuplicates()
   if (result.error) return res.status(500).json({ error: result.error })
+  res.json({ success: true, ...result })
+})
+
+// Repair Kajabi data: wipes all source='kajabi' revenue entries and rebuilds
+// them from kajabi_webhook_log, using the log row's UUID as the source_external_id
+// (guaranteed unique per webhook event). Use this once after fixing the
+// duplicate-overwrite bug to recover lost Kajabi sales data.
+async function rebuildKajabiFromWebhookLog() {
+  if (!supabase) return { error: 'No database' }
+
+  // Step 1: delete existing kajabi revenue entries (they were corrupted by the
+  // duplicate-overwrite bug — better to start fresh from the logs)
+  const { error: delErr } = await supabase.from('revenue_entries')
+    .delete().eq('source', 'kajabi')
+  if (delErr) return { error: `Failed to clear old entries: ${delErr.message}` }
+
+  // Step 2: pull every successful Kajabi webhook event we logged
+  const { data: logs } = await supabase.from('kajabi_webhook_log')
+    .select('*').eq('classification', 'success').order('received_at', { ascending: true })
+  if (!logs?.length) return { reprocessed: 0, inserted: 0 }
+
+  let inserted = 0
+  const errors = []
+  for (const log of logs) {
+    const payload = log.payload || {}
+    const email = log.parsed_email
+    if (!email) continue
+
+    // Re-extract amount with the same logic the webhook uses
+    const amountCents = (() => {
+      const cents = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents', 'total_in_cents'])
+      if (cents != null && cents !== '') return parseInt(cents, 10)
+      const amt = findScalarByKeys(payload, ['amount', 'total_amount', 'subtotal', 'price', 'total'])
+      if (amt == null || amt === '') return null
+      const num = typeof amt === 'string' ? parseFloat(amt) : amt
+      if (Number.isNaN(num)) return null
+      if (Number.isInteger(num) && num > 0) return num
+      return Math.round(num * 100)
+    })()
+    if (!amountCents) continue
+
+    const customerName = findScalarByKeys(payload, ['name', 'customer_name', 'user_name', 'member_name', 'full_name', 'contact_name'])
+      || [findScalarByKeys(payload, ['first_name']), findScalarByKeys(payload, ['last_name'])].filter(Boolean).join(' ').trim() || null
+
+    const result = await insertRevenueEntry({
+      source: 'kajabi',
+      source_external_id: `log-${log.id}`, // unique per webhook event
+      amount_cents: amountCents,
+      currency: findScalarByKeys(payload, ['currency']) || 'USD',
+      received_at: (log.received_at || new Date().toISOString()).slice(0, 10),
+      description: log.parsed_product || 'Kajabi payment',
+      customer_email: email,
+      customer_name: customerName,
+      product_name: log.parsed_product,
+      raw_data: { webhook_log_id: log.id },
+    })
+    if (result.error) {
+      errors.push(`${log.id}: ${result.error}`)
+    } else {
+      inserted++
+    }
+  }
+  return { reprocessed: logs.length, inserted, errors: errors.slice(0, 3) }
+}
+
+app.post('/api/sales/repair-kajabi', requireAuth, async (_req, res) => {
+  const result = await rebuildKajabiFromWebhookLog()
+  if (result.error) return res.status(500).json({ error: result.error, ...result })
   res.json({ success: true, ...result })
 })
 

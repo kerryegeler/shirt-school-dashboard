@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   fetchSalesSummary, fetchRevenueEntries, addRevenueEntry,
   deleteRevenueEntry, backfillKajabi, backfillStripe, cleanupStripeDuplicates,
-  fetchSalesProducts,
+  fetchSalesProducts, repairKajabi,
 } from '../../services/api.js'
 import './SalesAnalytics.css'
 
@@ -272,6 +272,20 @@ export default function SalesAnalytics() {
     setTimeout(() => setSyncMsg(''), 10000)
   }
 
+  async function handleRepairKajabi() {
+    if (!confirm('This will WIPE all Kajabi revenue entries and rebuild them from the webhook log. Continue?')) return
+    setSyncing(true); setSyncMsg('Rebuilding Kajabi entries from webhook log…')
+    try {
+      const r = await repairKajabi()
+      setSyncMsg(`Reprocessed ${r.reprocessed || 0} webhook events · inserted ${r.inserted || 0} entries${r.errors?.length ? ` · errors: ${r.errors.join('; ')}` : ''}`)
+      await load()
+    } catch (err) {
+      setSyncMsg(`Error: ${err.message}`)
+    }
+    setSyncing(false)
+    setTimeout(() => setSyncMsg(''), 12000)
+  }
+
   async function handleBackfillStripe() {
     setSyncing(true); setSyncMsg('Pulling last 12 months from Stripe… this can take 30-60 seconds')
     console.log('[Stripe Sync] Starting backfill (365 days)…')
@@ -319,6 +333,7 @@ export default function SalesAnalytics() {
         <div className="sa-toolbar">
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
+          <button className="btn btn-ghost" onClick={handleRepairKajabi} disabled={syncing}>Repair Kajabi</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
         </div>
