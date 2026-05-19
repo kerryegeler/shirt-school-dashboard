@@ -4797,7 +4797,9 @@ app.post('/api/kajabi/webhook', async (req, res) => {
   // them apart. Falling back to keyword matching lets us still classify those.
   const haystack = (eventType + ' ' + flattenForKeywords(body)).toLowerCase()
   const isFailure = /(\bfail\b|failed|declin|past[_\s]?due|insufficient|unable to collect)/i.test(haystack)
-  const isSuccessRaw = /(succeed|succes|paid|completed|charged|payment_succeeded|invoice\.paid)/i.test(haystack)
+  // Kajabi fires events with various names — be lenient. Anything that looks
+  // like a successful payment, purchase, or transaction counts as success.
+  const isSuccessRaw = /(succeed|succes|paid|completed|charged|payment_succeeded|invoice\.paid|\bpurchase\b|\btransaction\b|\bsale\b|offer\.purchased|enrollment\.created)/i.test(haystack)
   const isCancel = /(\bcancel|deactiv|terminat|refund)/i.test(haystack)
   // Avoid double-counting: failure trumps success in keyword matches because
   // failure emails sometimes contain the word "successful" in unrelated places.
@@ -5354,17 +5356,22 @@ async function rebuildKajabiFromWebhookLog() {
     .delete().eq('source', 'kajabi')
   if (delErr) return { error: `Failed to clear old entries: ${delErr.message}` }
 
-  // Step 2: pull every successful Kajabi webhook event we logged
+  // Step 2: pull EVERY non-failure webhook event (success + unknown).
+  // Some real sales were misclassified as "unknown" when the keyword regex
+  // didn't catch the event name — we still want to count them.
   const { data: logs } = await supabase.from('kajabi_webhook_log')
-    .select('*').eq('classification', 'success').order('received_at', { ascending: true })
+    .select('*').neq('classification', 'failure').order('received_at', { ascending: true })
   if (!logs?.length) return { reprocessed: 0, inserted: 0 }
 
   let inserted = 0
+  let skippedNoEmail = 0
+  let skippedNoAmount = 0
   const errors = []
   for (const log of logs) {
     const payload = log.payload || {}
     const email = log.parsed_email
-    if (!email) continue
+      || findScalarByKeys(payload, ['email', 'customer_email', 'user_email', 'member_email', 'contact_email', 'buyer_email'])
+      || findEmailRecursive(payload)
 
     // Re-extract amount with the same logic the webhook uses
     const amountCents = (() => {
@@ -5377,7 +5384,16 @@ async function rebuildKajabiFromWebhookLog() {
       if (Number.isInteger(num) && num > 0) return num
       return Math.round(num * 100)
     })()
-    if (!amountCents) continue
+
+    if (!email) { skippedNoEmail++; continue }
+    if (!amountCents) { skippedNoAmount++; continue }
+
+    let productName = log.parsed_product
+      || findScalarByKeys(payload, ['offer_name', 'product_name', 'plan_name', 'subscription_name', 'offer_title', 'product_title'])
+    if (!productName) {
+      const offerObj = findObjectByKeys(payload, ['offer', 'product', 'subscription', 'plan'])
+      if (offerObj) productName = offerObj.title || offerObj.name || offerObj.internal_title || null
+    }
 
     const customerName = findScalarByKeys(payload, ['name', 'customer_name', 'user_name', 'member_name', 'full_name', 'contact_name'])
       || [findScalarByKeys(payload, ['first_name']), findScalarByKeys(payload, ['last_name'])].filter(Boolean).join(' ').trim() || null
@@ -5388,10 +5404,10 @@ async function rebuildKajabiFromWebhookLog() {
       amount_cents: amountCents,
       currency: findScalarByKeys(payload, ['currency']) || 'USD',
       received_at: (log.received_at || new Date().toISOString()).slice(0, 10),
-      description: log.parsed_product || 'Kajabi payment',
+      description: productName || 'Kajabi payment',
       customer_email: email,
       customer_name: customerName,
-      product_name: log.parsed_product,
+      product_name: productName,
       raw_data: { webhook_log_id: log.id },
     })
     if (result.error) {
@@ -5400,8 +5416,60 @@ async function rebuildKajabiFromWebhookLog() {
       inserted++
     }
   }
-  return { reprocessed: logs.length, inserted, errors: errors.slice(0, 3) }
+  return { reprocessed: logs.length, inserted, skippedNoEmail, skippedNoAmount, errors: errors.slice(0, 3) }
 }
+
+// Diagnostic: counts by classification + counts of how many have email/amount
+app.get('/api/sales/diagnose-kajabi', requireAuth, async (_req, res) => {
+  if (!supabase) return res.json({ error: 'No database' })
+  const { data: logs } = await supabase.from('kajabi_webhook_log')
+    .select('classification, parsed_email, parsed_product, event_type, received_at, payload')
+    .order('received_at', { ascending: false })
+
+  const total = logs?.length || 0
+  const byClassification = {}
+  let successCount = 0, missingEmail = 0, missingAmount = 0
+  const recentUnknown = []
+  const eventTypes = {}
+
+  for (const l of logs || []) {
+    byClassification[l.classification] = (byClassification[l.classification] || 0) + 1
+    if (l.event_type) eventTypes[l.event_type] = (eventTypes[l.event_type] || 0) + 1
+    if (l.classification === 'success' || l.classification === 'unknown') {
+      const hasAmount = (() => {
+        const cents = findScalarByKeys(l.payload || {}, ['amount_in_cents', 'amount_cents'])
+        if (cents != null && cents !== '') return true
+        const amt = findScalarByKeys(l.payload || {}, ['amount', 'total_amount', 'subtotal', 'price'])
+        return amt != null && amt !== ''
+      })()
+      if (!l.parsed_email) missingEmail++
+      if (!hasAmount) missingAmount++
+      if (l.classification === 'success') successCount++
+      if (l.classification === 'unknown' && recentUnknown.length < 5) {
+        recentUnknown.push({
+          event_type: l.event_type,
+          received_at: l.received_at,
+          parsed_email: l.parsed_email,
+          payload_keys: Object.keys(l.payload || {}).slice(0, 10),
+        })
+      }
+    }
+  }
+
+  const { count: revenueKajabiCount } = await supabase.from('revenue_entries')
+    .select('*', { count: 'exact', head: true }).eq('source', 'kajabi')
+
+  res.json({
+    total_webhook_logs: total,
+    by_classification: byClassification,
+    success_count: successCount,
+    success_or_unknown_missing_email: missingEmail,
+    success_or_unknown_missing_amount: missingAmount,
+    revenue_entries_kajabi: revenueKajabiCount || 0,
+    event_types: eventTypes,
+    recent_unknown_samples: recentUnknown,
+  })
+})
 
 app.post('/api/sales/repair-kajabi', requireAuth, async (_req, res) => {
   const result = await rebuildKajabiFromWebhookLog()
