@@ -5434,57 +5434,6 @@ async function rebuildKajabiFromWebhookLog() {
   return { reprocessed: logs.length, inserted, skippedNoEmail, skippedNoAmount, errors: errors.slice(0, 3) }
 }
 
-// Diagnostic: counts by classification + counts of how many have email/amount
-app.get('/api/sales/diagnose-kajabi', requireAuth, async (_req, res) => {
-  if (!supabase) return res.json({ error: 'No database' })
-  const { data: logs } = await supabase.from('kajabi_webhook_log')
-    .select('classification, parsed_email, parsed_product, event_type, received_at, payload')
-    .order('received_at', { ascending: false })
-
-  const total = logs?.length || 0
-  const byClassification = {}
-  let successCount = 0, missingEmail = 0, missingAmount = 0
-  const recentUnknown = []
-  const eventTypes = {}
-
-  for (const l of logs || []) {
-    byClassification[l.classification] = (byClassification[l.classification] || 0) + 1
-    if (l.event_type) eventTypes[l.event_type] = (eventTypes[l.event_type] || 0) + 1
-    if (l.classification === 'success' || l.classification === 'unknown') {
-      const hasAmount = (() => {
-        const cents = findScalarByKeys(l.payload || {}, ['amount_in_cents', 'amount_cents'])
-        if (cents != null && cents !== '') return true
-        const amt = findScalarByKeys(l.payload || {}, ['amount', 'total_amount', 'subtotal', 'price'])
-        return amt != null && amt !== ''
-      })()
-      if (!l.parsed_email) missingEmail++
-      if (!hasAmount) missingAmount++
-      if (l.classification === 'success') successCount++
-      if (l.classification === 'unknown' && recentUnknown.length < 5) {
-        recentUnknown.push({
-          event_type: l.event_type,
-          received_at: l.received_at,
-          parsed_email: l.parsed_email,
-          payload_keys: Object.keys(l.payload || {}).slice(0, 10),
-        })
-      }
-    }
-  }
-
-  const { count: revenueKajabiCount } = await supabase.from('revenue_entries')
-    .select('*', { count: 'exact', head: true }).eq('source', 'kajabi')
-
-  res.json({
-    total_webhook_logs: total,
-    by_classification: byClassification,
-    success_count: successCount,
-    success_or_unknown_missing_email: missingEmail,
-    success_or_unknown_missing_amount: missingAmount,
-    revenue_entries_kajabi: revenueKajabiCount || 0,
-    event_types: eventTypes,
-    recent_unknown_samples: recentUnknown,
-  })
-})
 
 app.post('/api/sales/repair-kajabi', requireAuth, async (_req, res) => {
   const result = await rebuildKajabiFromWebhookLog()

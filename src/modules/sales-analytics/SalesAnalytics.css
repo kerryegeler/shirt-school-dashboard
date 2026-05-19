@@ -440,23 +440,83 @@
 /* ─── Mobile ─────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .sa-content { padding: 12px; }
-  .sa-stat-grid { grid-template-columns: 1fr; }
-  .sa-stat-value { font-size: 22px; }
-  .sa-stat--primary .sa-stat-value { font-size: 26px; }
-  .sa-period-bar { padding: 10px 12px; }
-  .sa-period-range { margin-left: 0; flex-basis: 100%; }
-  .sa-chart { height: 180px; }
+  .sa-stat-grid { grid-template-columns: 1fr; gap: 10px; }
+  .sa-stat { padding: 14px 16px; }
+  .sa-stat-value { font-size: 24px; }
+  .sa-stat--primary .sa-stat-value { font-size: 28px; }
+  .sa-stat-count { font-size: 13px; }
+
+  /* Period bar: stack vertically so date inputs don't overflow */
+  .sa-period-bar { padding: 12px; gap: 8px; }
+  .sa-period-bar .sa-filter { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+  .sa-period-range {
+    margin-left: 0;
+    flex-basis: 100%;
+    font-size: 11px;
+    order: 99;
+  }
+  .sa-period-dash { display: none; }
+
+  /* Stack card-title-row so filters get their own line, full width */
+  .sa-card-title-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .sa-card-title-count { display: block; font-size: 11px; margin-top: 2px; }
+
+  /* Filters fill the row and wrap; never overflow */
+  .sa-filters-row {
+    width: 100%;
+    gap: 8px;
+  }
+  .sa-filters-row .sa-filter {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 9px 10px;
+    font-size: 13px;
+  }
+
+  /* Toolbar buttons take full row each on tiny screens */
+  .sa-toolbar { gap: 6px; }
+
+  /* Bar chart slimmer on mobile */
+  .sa-chart { height: 160px; gap: 3px; }
   .sa-bar-value { display: none; }
-  .sa-bar-label { font-size: 9px; }
+  .sa-bar-label { font-size: 9px; line-height: 1; }
+
+  /* Entries: stack cleanly */
   .sa-entry, .sa-entry--header {
     grid-template-columns: 1fr;
-    gap: 4px;
+    gap: 6px;
   }
   .sa-entry--header { display: none; }
   .sa-entry {
-    padding: 12px 14px;
+    padding: 14px;
   }
-  .sa-amount { text-align: left; }
+  .sa-amount { text-align: left; font-size: 16px; }
+  .sa-row-actions { justify-content: flex-start; }
+  .sa-desc { white-space: normal; }
+
   .sa-modal { max-width: 100%; max-height: 100vh; height: 100%; border-radius: 0; }
   .sa-modal-overlay { padding: 0; align-items: stretch; }
+}
+
+/* Very narrow screens: tighten further */
+@media (max-width: 480px) {
+  .sa-filters-row {
+    flex-direction: column;
+  }
+  .sa-filters-row .sa-filter {
+    width: 100%;
+  }
+  .sa-chart { height: 140px; }
+  .sa-bar-label {
+    transform: rotate(-45deg);
+    transform-origin: top right;
+    white-space: nowrap;
+    margin-top: 4px;
+  }
 }

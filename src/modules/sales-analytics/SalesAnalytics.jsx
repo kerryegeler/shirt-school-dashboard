@@ -344,7 +344,6 @@ export default function SalesAnalytics() {
         <div className="sa-toolbar">
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
-          <button className="btn btn-ghost" onClick={handleRepairKajabi} disabled={syncing}>Repair Kajabi</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
         </div>
