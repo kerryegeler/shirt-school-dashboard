@@ -4866,7 +4866,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
           source_external_id: eventId,
           amount_cents: amountCents,
           currency,
-          received_at: (occurredAt || new Date().toISOString()).slice(0, 10),
+          received_at: chicagoDate(occurredAt),
           description: productName || 'Kajabi payment',
           customer_email: customerEmail,
           product_name: productName,
@@ -5068,6 +5068,21 @@ const REVENUE_SOURCES = [
   'bank_deposit', 'adsense', 'affiliate_other', 'other',
 ]
 
+// Return YYYY-MM-DD for the given date input, in Chicago timezone (CT).
+// This is what we use for revenue_entries.received_at so that "Today" / "Yesterday"
+// filters in the dashboard line up with the user's actual day instead of UTC.
+function chicagoDate(dateInput) {
+  const d = dateInput ? new Date(dateInput) : new Date()
+  if (isNaN(d.getTime())) return new Date().toISOString().slice(0, 10)
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(d).map(({ type, value }) => [type, value])
+  )
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+
 // Insert (or update if already present) a revenue entry. Used by Kajabi/Stripe
 // sync helpers and the manual-entry endpoint. We avoid upsert+onConflict because
 // it requires a non-partial UNIQUE constraint; instead we do a manual
@@ -5133,7 +5148,7 @@ async function backfillKajabiRevenue() {
       source_external_id: p.kajabi_id,
       amount_cents: p.amount_cents,
       currency: p.currency || 'USD',
-      received_at: (p.synced_at || new Date().toISOString()).slice(0, 10),
+      received_at: chicagoDate(p.synced_at),
       description: p.product_name || 'Kajabi payment',
       customer_email: p.customer_email,
       product_name: p.product_name,
@@ -5217,7 +5232,7 @@ async function backfillStripeRevenue(daysBack = 90) {
       source_external_id: c.id,
       amount_cents: amount,
       currency: (c.currency || 'usd').toUpperCase(),
-      received_at: new Date(c.created * 1000).toISOString().slice(0, 10),
+      received_at: chicagoDate(c.created * 1000),
       description: c.description || c.statement_descriptor || 'Stripe charge',
       customer_email: c.receipt_email || c.billing_details?.email || null,
       product_name: null,
@@ -5283,7 +5298,7 @@ app.post('/api/stripe/webhook', async (req, res) => {
     source_external_id: externalId,
     amount_cents: amount,
     currency: (charge.currency || 'usd').toUpperCase(),
-    received_at: new Date((charge.created || event.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10),
+    received_at: chicagoDate((charge.created || event.created || Date.now() / 1000) * 1000),
     description: charge.description || charge.statement_descriptor || 'Stripe charge',
     customer_email: charge.receipt_email || charge.billing_details?.email || null,
     raw_data: charge,
@@ -5403,7 +5418,7 @@ async function rebuildKajabiFromWebhookLog() {
       source_external_id: `log-${log.id}`, // unique per webhook event
       amount_cents: amountCents,
       currency: findScalarByKeys(payload, ['currency']) || 'USD',
-      received_at: (log.received_at || new Date().toISOString()).slice(0, 10),
+      received_at: chicagoDate(log.received_at),
       description: productName || 'Kajabi payment',
       customer_email: email,
       customer_name: customerName,
