@@ -662,7 +662,7 @@ export async function addRevenueEntry(entry) {
   })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to add entry')
-  return d.entry
+  return d
 }
 
 export async function deleteRevenueEntry(id) {

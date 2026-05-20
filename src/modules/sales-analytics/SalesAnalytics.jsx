@@ -18,7 +18,10 @@ const SOURCE_LABELS = {
   other: 'Other',
 }
 
-const MANUAL_SOURCES = ['paypal', 'partnerstack', 'impact', 'bank_deposit', 'adsense', 'affiliate_other', 'other']
+// Sources available in the manual-entry dropdown. Kajabi/Stripe are normally
+// automatic, but they're included here so you can manually log sales that were
+// missed (e.g. webhooks lost during an outage).
+const MANUAL_SOURCES = ['kajabi', 'stripe', 'paypal', 'partnerstack', 'impact', 'bank_deposit', 'adsense', 'affiliate_other', 'other']
 const AUTO_SOURCES = ['kajabi', 'stripe']
 
 function formatMoney(cents, currency = 'USD') {
@@ -130,8 +133,13 @@ function AddEntryModal({ onClose, onAdded }) {
   const [amount, setAmount] = useState('')
   const [receivedAt, setReceivedAt] = useState(todayLocal())
   const [description, setDescription] = useState('')
+  const [productName, setProductName] = useState('')
+  const [quantity, setQuantity] = useState('1')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+
+  // Show the product field for sources where it matters (Kajabi/Stripe sales)
+  const showProductField = source === 'kajabi' || source === 'stripe'
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -140,6 +148,8 @@ function AddEntryModal({ onClose, onAdded }) {
     try {
       await addRevenueEntry({
         source, amount: parseFloat(amount), received_at: receivedAt, description,
+        product_name: productName || undefined,
+        quantity: parseInt(quantity, 10) || 1,
       })
       onAdded()
       onClose()
@@ -164,7 +174,7 @@ function AddEntryModal({ onClose, onAdded }) {
             ))}
           </select>
 
-          <label className="sa-label">Amount (USD)</label>
+          <label className="sa-label">Amount (USD) — per sale</label>
           <input
             className="sa-input"
             type="number"
@@ -177,6 +187,22 @@ function AddEntryModal({ onClose, onAdded }) {
             autoFocus
           />
 
+          <label className="sa-label">Quantity (number of identical sales)</label>
+          <input
+            className="sa-input"
+            type="number"
+            step="1"
+            min="1"
+            max="200"
+            value={quantity}
+            onChange={(e) => setQuantity(e.target.value)}
+          />
+          {parseInt(quantity, 10) > 1 && amount && (
+            <div className="sa-qty-hint">
+              Adds {quantity} entries · {formatMoney(Math.round(parseFloat(amount || 0) * 100) * (parseInt(quantity, 10) || 1))} total
+            </div>
+          )}
+
           <label className="sa-label">Date received</label>
           <input
             className="sa-input"
@@ -185,6 +211,19 @@ function AddEntryModal({ onClose, onAdded }) {
             onChange={(e) => setReceivedAt(e.target.value)}
             required
           />
+
+          {showProductField && (
+            <>
+              <label className="sa-label">Product / Offer</label>
+              <input
+                className="sa-input"
+                type="text"
+                value={productName}
+                onChange={(e) => setProductName(e.target.value)}
+                placeholder="e.g. Launch Your Brand Challenge VIP Experience"
+              />
+            </>
+          )}
 
           <label className="sa-label">Description (optional)</label>
           <input

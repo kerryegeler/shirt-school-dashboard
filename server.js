@@ -5740,18 +5740,25 @@ app.get('/api/sales/products', requireAuth, async (_req, res) => {
 
 app.post('/api/sales/entries', requireAuth, async (req, res) => {
   const { source, amount, received_at, description, customer_email, product_name } = req.body
+  const quantity = Math.min(Math.max(parseInt(req.body.quantity || '1', 10) || 1, 1), 200) // 1..200
   if (!REVENUE_SOURCES.includes(source)) return res.status(400).json({ error: 'Invalid source' })
   if (!amount || isNaN(parseFloat(amount))) return res.status(400).json({ error: 'Amount required' })
   if (!received_at) return res.status(400).json({ error: 'Date required' })
 
   const amountCents = Math.round(parseFloat(amount) * 100)
-  const result = await insertRevenueEntry({
-    source, amount_cents: amountCents,
-    received_at, description, customer_email, product_name,
-    entered_manually: true,
-  })
-  if (result.error) return res.status(500).json({ error: result.error })
-  res.json({ entry: result.entry })
+  let inserted = 0
+  const errors = []
+  for (let i = 0; i < quantity; i++) {
+    const result = await insertRevenueEntry({
+      source, amount_cents: amountCents,
+      received_at, description, customer_email, product_name,
+      entered_manually: true,
+    })
+    if (result.error) errors.push(result.error)
+    else inserted++
+  }
+  if (inserted === 0) return res.status(500).json({ error: errors[0] || 'Insert failed' })
+  res.json({ inserted, requested: quantity })
 })
 
 app.delete('/api/sales/entries/:id', requireAuth, async (req, res) => {

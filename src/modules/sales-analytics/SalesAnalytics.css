@@ -405,6 +405,13 @@
   border-color: var(--orange, #f5a623);
 }
 
+.sa-qty-hint {
+  font-size: 12px;
+  color: var(--orange, #f5a623);
+  font-weight: 600;
+  margin-top: -2px;
+}
+
 .sa-error {
   color: #ff6b6b;
   font-size: 13px;
