@@ -4355,10 +4355,14 @@ async function syncKajabiFailureEmails() {
   for (const account of accounts) {
     const gmail = google.gmail({ version: 'v1', auth: clients[account] })
     try {
+      // Broad search: match by subject OR body OR sender. Kajabi's failure emails
+      // have subject "Customer subscription payment failed" and body "unable to
+      // collect ...". Forwarded copies can vary, so cast a wide net, then
+      // confirm with the body/subject check below.
       const listRes = await gmail.users.messages.list({
         userId: 'me',
-        q: '"unable to collect" newer_than:30d',
-        maxResults: 50,
+        q: 'newer_than:30d (subject:"payment failed" OR "unable to collect" OR from:kajabimail.net)',
+        maxResults: 80,
       })
       const msgs = listRes.data.messages || []
       if (!msgs.length) continue
@@ -4367,19 +4371,30 @@ async function syncKajabiFailureEmails() {
       for (const m of msgs) {
         try {
           const msgRes = await gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' })
-          const body = extractTextBody(msgRes.data.payload) || ''
-          if (!body.includes('unable to collect')) continue
+          const headers = msgRes.data.payload?.headers || []
+          const subject = (headers.find((h) => h.name.toLowerCase() === 'subject')?.value || '')
+          // Combine plain text + stripped HTML so the labelled fields are found
+          // regardless of which MIME part Kajabi put them in.
+          const textBody = extractTextBody(msgRes.data.payload) || ''
+          const htmlBody = extractHtmlBody(msgRes.data.payload) || ''
+          const body = `${textBody}\n${stripHtml(htmlBody)}`
 
-          const customerName = (body.match(/Customer name:\s*([^\n\r]+)/) || [])[1]?.trim()
-          const customerEmail = (body.match(/Customer email:\s*([^\s\n\r]+)/) || [])[1]?.trim()
-          const offer = (body.match(/Offer:\s*([^\n\r]+)/) || [])[1]?.trim()
-          const attemptMatch = body.match(/Attempt number:\s*(\d+)\s*of\s*(\d+)/)
+          const looksLikeFailure =
+            /unable to collect/i.test(body) ||
+            /payment failed/i.test(subject) ||
+            /kajabi payments was unable/i.test(body)
+          if (!looksLikeFailure) continue
+
+          const customerName = (body.match(/Customer name:\s*([^\n\r]+)/i) || [])[1]?.trim()
+          const customerEmail = (body.match(/Customer email:\s*([^\s\n\r]+)/i) || [])[1]?.trim()
+          const offer = (body.match(/Offer:\s*([^\n\r]+)/i) || [])[1]?.trim()
+          const attemptMatch = body.match(/Attempt number:\s*(\d+)\s*of\s*(\d+)/i)
           const attemptNumber = attemptMatch ? parseInt(attemptMatch[1]) : null
           const totalAttempts = attemptMatch ? parseInt(attemptMatch[2]) : null
-          const nextAttempt = (body.match(/Next attempt:\s*([^\n\r]+)/) || [])[1]?.trim()
+          const nextAttempt = (body.match(/Next attempt:\s*([^\n\r]+)/i) || [])[1]?.trim()
 
           if (!customerEmail || !offer) {
-            console.log(`[Kajabi Email] Skipped msg ${m.id}: missing email or offer`)
+            console.log(`[Kajabi Email] Skipped msg ${m.id} (subject="${subject.slice(0, 50)}"): missing email or offer. bodyLen=${body.length}`)
             continue
           }
 
