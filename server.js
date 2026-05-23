@@ -682,7 +682,7 @@ function isKajabiNotificationThread(thread) {
     const from = (m.from || '').toLowerCase()
     if (from.includes('kajabimail.net')) return true
     const body = (m.bodyText || '').toLowerCase()
-    if (body.includes('unable to collect a recent subscription payment')) return true
+    if (body.includes('unable to collect')) return true
     if (body.includes('kajabi payments was unable')) return true
   }
   return false
@@ -4357,7 +4357,7 @@ async function syncKajabiFailureEmails() {
     try {
       const listRes = await gmail.users.messages.list({
         userId: 'me',
-        q: '"unable to collect a recent subscription payment" newer_than:30d',
+        q: '"unable to collect" newer_than:30d',
         maxResults: 50,
       })
       const msgs = listRes.data.messages || []
