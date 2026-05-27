@@ -701,3 +701,35 @@ export async function repairKajabi() {
   if (!r.ok) throw new Error(d.error || 'Kajabi repair failed')
   return d
 }
+
+// ─── Business Reminders ───────────────────────────────────────────────────────
+
+export async function fetchReminders(includeDone = false) {
+  const r = await fetch(`/api/reminders${includeDone ? '?includeDone=true' : ''}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch reminders')
+  return d.reminders
+}
+
+export async function createReminder({ title, notes, due_date }) {
+  const r = await fetch('/api/reminders', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, notes, due_date }),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create reminder')
+  return d.reminder
+}
+
+export async function updateReminder(id, updates) {
+  const r = await fetch(`/api/reminders/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update reminder') }
+}
+
+export async function deleteReminder(id) {
+  const r = await fetch(`/api/reminders/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete reminder') }
+}

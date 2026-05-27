@@ -2469,6 +2469,29 @@ app.post('/api/slack/actions', async (req, res) => {
         .update({ ignored: true }).eq('id', paymentId)
       console.log(`[Slack Action] ✕ Ignored failed payment for ${payment.customer_email}`)
       await updateFailedPaymentSlack(channelId, slackTs, payment, 'ignored')
+
+    } else if (actionId === 'reminder_done') {
+      // Slack "Mark Done" button on a reminder notification
+      const reminderId = threadId
+      if (!supabase) return
+      const { data: reminder } = await supabase.from('business_reminders')
+        .select('*').eq('id', reminderId).single()
+      await supabase.from('business_reminders')
+        .update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', reminderId)
+      console.log(`[Slack Action] ✅ Reminder marked done: ${reminder?.title || reminderId}`)
+      if (slackClient && channelId && slackTs && reminder) {
+        const dueLabel = new Date(reminder.due_date + 'T00:00:00').toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric', year: 'numeric',
+        })
+        await slackClient.chat.update({
+          channel: channelId, ts: slackTs,
+          text: `✅ Done: ${reminder.title}`,
+          blocks: [
+            { type: 'header', text: { type: 'plain_text', text: '✅ Reminder Completed' } },
+            { type: 'section', text: { type: 'mrkdwn', text: `~*${reminder.title}*~\n_Was due: ${dueLabel}_` } },
+          ],
+        }).catch(() => {})
+      }
     }
   } catch (err) {
     console.error('[Slack] Action handler error:', err.message)
@@ -5796,6 +5819,128 @@ app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
   res.json({ success: true, ...result, days })
 })
 
+// ─── Business Reminders ──────────────────────────────────────────────────────
+
+// Channel for reminder alerts (falls back to main channel)
+function remindersChannelId() {
+  return process.env.SLACK_REMINDERS_CHANNEL_ID || process.env.SLACK_CHANNEL_ID
+}
+
+async function postReminderToSlack(reminder) {
+  if (!slackClient) return null
+  const channel = remindersChannelId()
+  if (!channel) return null
+  const dueLabel = new Date(reminder.due_date + 'T00:00:00').toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  })
+  try {
+    const msg = await slackClient.chat.postMessage({
+      channel,
+      text: `⏰ Reminder due: ${reminder.title}`,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: '⏰ Reminder Due' } },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${reminder.title}*\n_Due: ${dueLabel}_${reminder.notes ? `\n\n${reminder.notes}` : ''}`,
+          },
+        },
+        {
+          type: 'actions',
+          block_id: `reminder_${reminder.id}`,
+          elements: [
+            {
+              type: 'button', style: 'primary',
+              text: { type: 'plain_text', text: '✅ Mark Done' },
+              action_id: 'reminder_done', value: reminder.id,
+            },
+          ],
+        },
+      ],
+    })
+    return { ts: msg.ts, channel }
+  } catch (err) {
+    console.error('[Reminders] Slack post error:', err.message)
+    return null
+  }
+}
+
+// Check for reminders that are due (due_date <= today CT) and not yet notified.
+async function checkDueReminders() {
+  if (!supabase) return
+  const todayCT = chicagoDate(new Date())
+  const { data: due } = await supabase.from('business_reminders')
+    .select('*')
+    .eq('status', 'pending')
+    .is('notified_at', null)
+    .lte('due_date', todayCT)
+  if (!due?.length) return
+
+  for (const reminder of due) {
+    const slack = await postReminderToSlack(reminder)
+    const update = { notified_at: new Date().toISOString() }
+    if (slack) { update.slack_message_ts = slack.ts; update.slack_channel_id = slack.channel }
+    await supabase.from('business_reminders').update(update).eq('id', reminder.id)
+    console.log(`[Reminders] ✓ Notified: "${reminder.title}" (due ${reminder.due_date})`)
+  }
+}
+
+function startReminderScheduler() {
+  if (!supabase) return
+  console.log('  Business Reminders: enabled (checks hourly)')
+  const tick = () => checkDueReminders().catch((err) => console.error('[Reminders] tick error:', err.message))
+  setTimeout(tick, 90_000)            // first check 90s after startup
+  setInterval(tick, 60 * 60 * 1000)   // then every hour
+}
+
+app.get('/api/reminders', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ reminders: [] })
+  const includeDone = req.query.includeDone === 'true'
+  let q = supabase.from('business_reminders').select('*').order('due_date', { ascending: true })
+  if (!includeDone) q = q.neq('status', 'done')
+  const { data, error } = await q
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ reminders: data || [] })
+})
+
+app.post('/api/reminders', requireAuth, async (req, res) => {
+  const { title, notes, due_date } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title required' })
+  if (!due_date) return res.status(400).json({ error: 'Due date required' })
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const { data, error } = await supabase.from('business_reminders')
+    .insert({ title: title.trim(), notes: notes?.trim() || null, due_date, status: 'pending' })
+    .select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ reminder: data })
+})
+
+app.patch('/api/reminders/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { title, notes, due_date, status } = req.body
+  const updates = {}
+  if (title !== undefined) updates.title = title
+  if (notes !== undefined) updates.notes = notes
+  if (due_date !== undefined) updates.due_date = due_date
+  if (status !== undefined) {
+    updates.status = status
+    updates.completed_at = status === 'done' ? new Date().toISOString() : null
+    // Re-opening a reminder lets it notify again
+    if (status === 'pending') updates.notified_at = null
+  }
+  const { error } = await supabase.from('business_reminders').update(updates).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.delete('/api/reminders/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ success: true })
+  const { error } = await supabase.from('business_reminders').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -5927,6 +6072,7 @@ async function init() {
   startContentBriefScheduler()
   startPaymentRecoveryWorkers()
   startDailySalesReportScheduler()
+  startReminderScheduler()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)

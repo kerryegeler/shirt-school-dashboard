@@ -302,3 +302,20 @@ create table if not exists payment_recovery_emails (
 );
 alter table payment_recovery_emails disable row level security;
 create index if not exists idx_recovery_emails_due on payment_recovery_emails(scheduled_for, status);
+
+-- ─── Business Reminders ─────────────────────────────────────────────────────
+
+create table if not exists business_reminders (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  notes text,
+  due_date date not null,
+  status text not null default 'pending',   -- 'pending' | 'done'
+  notified_at timestamptz,                   -- when the Slack alert fired (null = not yet)
+  slack_message_ts text,
+  slack_channel_id text,
+  created_at timestamptz not null default now(),
+  completed_at timestamptz
+);
+alter table business_reminders disable row level security;
+create index if not exists idx_business_reminders_due on business_reminders(due_date, status);

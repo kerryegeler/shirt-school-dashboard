@@ -7,6 +7,7 @@ import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import ChallengeLauncher from './modules/challenge-launcher/ChallengeLauncher.jsx'
 import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
 import SalesAnalytics from './modules/sales-analytics/SalesAnalytics.jsx'
+import Reminders from './modules/reminders/Reminders.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 
@@ -114,6 +115,7 @@ export default function App() {
           {activeModule === 'challenge-launcher' && <ChallengeLauncher />}
           {activeModule === 'payment-recovery' && <PaymentRecovery />}
           {activeModule === 'sales-analytics' && <SalesAnalytics />}
+          {activeModule === 'reminders' && <Reminders />}
         </main>
       </div>
 
@@ -137,6 +139,7 @@ const MOBILE_SECTIONS = [
   { id: 'challenge-launcher', label: 'Challenge Launcher', short: 'Launch' },
   { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
   { id: 'sales-analytics', label: 'Sales Analytics', short: 'Sales' },
+  { id: 'reminders', label: 'Reminders', short: 'Reminders' },
 ]
 
 function MobileMenu({ activeModule, onSelect, unreadCount }) {
