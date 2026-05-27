@@ -5867,8 +5867,18 @@ async function postReminderToSlack(reminder) {
 }
 
 // Check for reminders that are due (due_date <= today CT) and not yet notified.
+// Only sends during waking hours (8am–9pm CT) so a date rollover at midnight
+// doesn't ping you in the middle of the night.
 async function checkDueReminders() {
   if (!supabase) return
+
+  // Current hour in Chicago time
+  const ctHour = parseInt(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false })
+      .formatToParts(new Date()).find((p) => p.type === 'hour')?.value || '0', 10
+  )
+  if (ctHour < 8 || ctHour >= 21) return // quiet hours: 9pm–8am CT
+
   const todayCT = chicagoDate(new Date())
   const { data: due } = await supabase.from('business_reminders')
     .select('*')
