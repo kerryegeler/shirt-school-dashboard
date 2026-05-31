@@ -4733,6 +4733,30 @@ function findObjectByKeys(obj, keys, depth = 0) {
 // Backwards-compat alias used by older code paths
 const findValueByKeys = findScalarByKeys
 
+// Extract the per-payment amount in cents from a Kajabi webhook payload.
+// IMPORTANT: We intentionally do NOT look at `total_in_cents`, `total_amount`,
+// or `total` fields. For subscriptions and payment plans, Kajabi often includes
+// a "total" representing the cumulative plan value (e.g. 11 payments × $99 +
+// fees), which the recursive search would grab instead of the per-payment
+// amount, causing entries to be recorded at the plan total ($1,094) rather
+// than the actual transaction amount ($99). We only trust per-charge fields.
+function extractKajabiAmountCents(payload) {
+  if (!payload) return null
+  const cents = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents'])
+  if (cents != null && cents !== '') {
+    const n = parseInt(cents, 10)
+    return Number.isNaN(n) ? null : n
+  }
+  const amt = findScalarByKeys(payload, ['amount', 'subtotal', 'price'])
+  if (amt == null || amt === '') return null
+  const num = typeof amt === 'string' ? parseFloat(amt) : amt
+  if (Number.isNaN(num)) return null
+  // Integer with no decimals → already in cents (Kajabi convention: 9900 = $99.00)
+  // Decimal value → in dollars, multiply by 100
+  if (Number.isInteger(num) && num > 0) return num
+  return Math.round(num * 100)
+}
+
 // Find any string value that looks like an email
 function findEmailRecursive(obj, depth = 0) {
   if (depth > 7 || obj == null) return null
@@ -4792,21 +4816,7 @@ app.post('/api/kajabi/webhook', async (req, res) => {
     if (offerObj) productName = offerObj.title || offerObj.name || offerObj.internal_title || null
   }
 
-  // Amount: prefer explicit *_in_cents fields. For a generic 'amount' field, decide
-  // whether it's cents or dollars based on whether it's an integer or has decimals.
-  // Kajabi typically sends integer cents (e.g. 9900 for $99.00).
-  const amountCents = (() => {
-    const cents = findScalarByKeys(body, ['amount_in_cents', 'amount_cents', 'price_in_cents', 'total_in_cents'])
-    if (cents != null && cents !== '') return parseInt(cents, 10)
-    const amt = findScalarByKeys(body, ['amount', 'total_amount', 'subtotal', 'price', 'total'])
-    if (amt == null || amt === '') return null
-    const num = typeof amt === 'string' ? parseFloat(amt) : amt
-    if (Number.isNaN(num)) return null
-    // Integer values without decimals → already in cents (Kajabi convention)
-    // Decimal values → in dollars, multiply by 100
-    if (Number.isInteger(num) && num > 0) return num
-    return Math.round(num * 100)
-  })()
+  const amountCents = extractKajabiAmountCents(body)
 
   const currency = findScalarByKeys(body, ['currency']) || 'USD'
   const occurredAt = findScalarByKeys(body, ['created_at', 'occurred_at', 'failed_at', 'paid_at', 'timestamp']) || new Date().toISOString()
@@ -5426,17 +5436,8 @@ async function rebuildKajabiFromWebhookLog() {
       || findScalarByKeys(payload, ['email', 'customer_email', 'user_email', 'member_email', 'contact_email', 'buyer_email'])
       || findEmailRecursive(payload)
 
-    // Re-extract amount with the same logic the webhook uses
-    const amountCents = (() => {
-      const cents = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents', 'total_in_cents'])
-      if (cents != null && cents !== '') return parseInt(cents, 10)
-      const amt = findScalarByKeys(payload, ['amount', 'total_amount', 'subtotal', 'price', 'total'])
-      if (amt == null || amt === '') return null
-      const num = typeof amt === 'string' ? parseFloat(amt) : amt
-      if (Number.isNaN(num)) return null
-      if (Number.isInteger(num) && num > 0) return num
-      return Math.round(num * 100)
-    })()
+    // Re-extract amount using the shared helper (skips ambiguous total_* fields)
+    const amountCents = extractKajabiAmountCents(payload)
 
     if (!email) { skippedNoEmail++; continue }
     if (!amountCents) { skippedNoAmount++; continue }
