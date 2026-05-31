@@ -5428,10 +5428,12 @@ app.post('/api/sales/cleanup-stripe-duplicates', requireAuth, async (_req, res) 
 async function rebuildKajabiFromWebhookLog() {
   if (!supabase) return { error: 'No database' }
 
-  // Step 1: delete existing kajabi revenue entries (they were corrupted by the
-  // duplicate-overwrite bug — better to start fresh from the logs)
+  // Step 1: delete existing webhook-derived kajabi revenue entries so we can
+  // rebuild them cleanly from the log. We INTENTIONALLY preserve manually-entered
+  // rows (entered_manually = true) so user-added entries — e.g. backfills from an
+  // outage — survive repair runs.
   const { error: delErr } = await supabase.from('revenue_entries')
-    .delete().eq('source', 'kajabi')
+    .delete().eq('source', 'kajabi').eq('entered_manually', false)
   if (delErr) return { error: `Failed to clear old entries: ${delErr.message}` }
 
   // Step 2: pull EVERY non-failure webhook event (success + unknown).
