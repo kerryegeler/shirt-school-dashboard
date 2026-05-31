@@ -4734,27 +4734,36 @@ function findObjectByKeys(obj, keys, depth = 0) {
 const findValueByKeys = findScalarByKeys
 
 // Extract the per-payment amount in cents from a Kajabi webhook payload.
-// IMPORTANT: We intentionally do NOT look at `total_in_cents`, `total_amount`,
-// or `total` fields. For subscriptions and payment plans, Kajabi often includes
-// a "total" representing the cumulative plan value (e.g. 11 payments × $99 +
-// fees), which the recursive search would grab instead of the per-payment
-// amount, causing entries to be recorded at the plan total ($1,094) rather
-// than the actual transaction amount ($99). We only trust per-charge fields.
-function extractKajabiAmountCents(payload) {
-  if (!payload) return null
-  const cents = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents'])
-  if (cents != null && cents !== '') {
-    const n = parseInt(cents, 10)
-    return Number.isNaN(n) ? null : n
-  }
-  const amt = findScalarByKeys(payload, ['amount', 'subtotal', 'price'])
-  if (amt == null || amt === '') return null
-  const num = typeof amt === 'string' ? parseFloat(amt) : amt
+// Strategy: prefer explicit per-payment fields (amount_in_cents, amount).
+// For one-time purchases that ONLY have a total_* field, use that as a fallback
+// (since total = per-payment for one-time charges). For subscriptions, the
+// per-payment fields should exist, so we prefer them over totals.
+function _amtToCents(value) {
+  if (value == null || value === '') return null
+  const num = typeof value === 'string' ? parseFloat(value) : value
   if (Number.isNaN(num)) return null
   // Integer with no decimals → already in cents (Kajabi convention: 9900 = $99.00)
-  // Decimal value → in dollars, multiply by 100
   if (Number.isInteger(num) && num > 0) return num
+  // Decimal value → in dollars, multiply by 100
   return Math.round(num * 100)
+}
+
+function extractKajabiAmountCents(payload) {
+  if (!payload) return null
+  // 1. Per-payment fields (cents)
+  let v = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents'])
+  if (v != null && v !== '') return parseInt(v, 10)
+  // 2. Per-payment fields (dollars or cents — detected by integer/decimal)
+  v = findScalarByKeys(payload, ['amount', 'subtotal', 'price'])
+  let cents = _amtToCents(v)
+  if (cents != null) return cents
+  // 3. Last resort: total_* fields. For one-time charges total == per-payment;
+  //    for subscriptions/plans this MIGHT be the plan total. Better than null.
+  v = findScalarByKeys(payload, ['total_in_cents'])
+  if (v != null && v !== '') return parseInt(v, 10)
+  v = findScalarByKeys(payload, ['total_amount', 'total'])
+  cents = _amtToCents(v)
+  return cents
 }
 
 // Find any string value that looks like an email
@@ -5818,6 +5827,41 @@ app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
   const result = await backfillStripeRevenue(days)
   if (result.error) return res.status(500).json({ error: result.error, ...result })
   res.json({ success: true, ...result, days })
+})
+
+// Diagnostic: inspect raw Kajabi webhook payloads. Filter by ?email= or ?amount_cents=
+// Returns up to 3 recent matching payloads so we can see exactly what fields
+// Kajabi is sending and why amounts come out wrong.
+app.get('/api/sales/inspect-kajabi', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ error: 'No database' })
+  const email = req.query.email
+  const amountCents = req.query.amount_cents ? parseInt(req.query.amount_cents, 10) : null
+  const product = req.query.product
+
+  let q = supabase.from('kajabi_webhook_log')
+    .select('id, received_at, event_type, parsed_email, parsed_product, payload')
+    .order('received_at', { ascending: false }).limit(50)
+  if (email) q = q.eq('parsed_email', email)
+  if (product) q = q.ilike('parsed_product', `%${product}%`)
+  const { data } = await q
+
+  // If amount filter specified, find which payload has that amount via the new helper
+  let filtered = data || []
+  if (amountCents != null) {
+    filtered = filtered.filter((l) => extractKajabiAmountCents(l.payload || {}) === amountCents)
+  }
+  res.json({
+    count: filtered.length,
+    samples: filtered.slice(0, 3).map((l) => ({
+      id: l.id,
+      received_at: l.received_at,
+      event_type: l.event_type,
+      parsed_email: l.parsed_email,
+      parsed_product: l.parsed_product,
+      detected_amount_cents: extractKajabiAmountCents(l.payload || {}),
+      payload: l.payload,
+    })),
+  })
 })
 
 // ─── Business Reminders ──────────────────────────────────────────────────────
