@@ -4750,16 +4750,22 @@ function _amtToCents(value) {
 
 function extractKajabiAmountCents(payload) {
   if (!payload) return null
-  // 1. Per-payment fields (cents)
-  let v = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents'])
+  // 1. Kajabi's authoritative per-transaction fields (in cents). These reflect
+  //    what was ACTUALLY charged on this specific transaction — not the offer
+  //    base price (`subtotal`), not the cumulative plan total (`total_*`).
+  let v = findScalarByKeys(payload, ['amount_paid', 'settlement_amount', 'payment_amount'])
   if (v != null && v !== '') return parseInt(v, 10)
-  // 2. Per-payment fields (dollars or cents — detected by integer/decimal)
-  v = findScalarByKeys(payload, ['amount', 'subtotal', 'price'])
+  // 2. Generic per-payment cents fields
+  v = findScalarByKeys(payload, ['amount_in_cents', 'amount_cents', 'price_in_cents'])
+  if (v != null && v !== '') return parseInt(v, 10)
+  // 3. Per-payment dollar fields (heuristic: integer→cents, decimal→dollars)
+  v = findScalarByKeys(payload, ['amount', 'price'])
   let cents = _amtToCents(v)
   if (cents != null) return cents
-  // 3. Last resort: total_* fields. For one-time charges total == per-payment;
-  //    for subscriptions/plans this MIGHT be the plan total. Better than null.
-  v = findScalarByKeys(payload, ['total_in_cents'])
+  // 4. Last resort: subtotal/total. For one-time charges these equal the
+  //    per-payment amount; for subscriptions they're usually the plan base
+  //    or cumulative total, which is wrong — but better than skipping the entry.
+  v = findScalarByKeys(payload, ['subtotal', 'total_in_cents'])
   if (v != null && v !== '') return parseInt(v, 10)
   v = findScalarByKeys(payload, ['total_amount', 'total'])
   cents = _amtToCents(v)
