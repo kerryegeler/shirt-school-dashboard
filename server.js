@@ -5718,10 +5718,14 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
   // Cast a wide enough net to cover both the chart AND any selected period
   const earliest = periodFrom < chartStartIso ? periodFrom : chartStartIso
 
+  // Override Supabase's default 1000-row cap. Without this, once you have >1000
+  // entries in the 12-month window, the oldest 1000 come back and the newest
+  // (including today's) get silently dropped — making "Today" read $0.00.
   let q = supabase.from('revenue_entries')
     .select('amount_cents, received_at, source, product_name')
     .gte('received_at', earliest)
     .order('received_at', { ascending: true })
+    .limit(50000)
   if (productFilter) q = q.eq('product_name', productFilter)
   const { data: rows } = await q
 
