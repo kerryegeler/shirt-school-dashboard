@@ -5718,16 +5718,27 @@ app.get('/api/sales/summary', requireAuth, async (req, res) => {
   // Cast a wide enough net to cover both the chart AND any selected period
   const earliest = periodFrom < chartStartIso ? periodFrom : chartStartIso
 
-  // Override Supabase's default 1000-row cap. Without this, once you have >1000
-  // entries in the 12-month window, the oldest 1000 come back and the newest
-  // (including today's) get silently dropped — making "Today" read $0.00.
-  let q = supabase.from('revenue_entries')
-    .select('amount_cents, received_at, source, product_name')
-    .gte('received_at', earliest)
-    .order('received_at', { ascending: true })
-    .limit(50000)
-  if (productFilter) q = q.eq('product_name', productFilter)
-  const { data: rows } = await q
+  // Paginate around Supabase's server-side 1000-row cap (db-max-rows).
+  // Client `.limit()` can't override it — must request pages explicitly via
+  // .range(). Without this, once you have >1000 entries in the 12-month window,
+  // the oldest 1000 come back and today's entries get silently dropped, making
+  // "Today" read $0.00.
+  const rows = []
+  const PAGE = 1000
+  const MAX_PAGES = 50 // 50k entries; revisit if scale grows beyond that
+  for (let page = 0; page < MAX_PAGES; page++) {
+    let q = supabase.from('revenue_entries')
+      .select('amount_cents, received_at, source, product_name')
+      .gte('received_at', earliest)
+      .order('received_at', { ascending: true })
+      .range(page * PAGE, (page + 1) * PAGE - 1)
+    if (productFilter) q = q.eq('product_name', productFilter)
+    const { data: pageRows, error } = await q
+    if (error) { console.error('[summary] page fetch error:', error.message); break }
+    if (!pageRows?.length) break
+    rows.push(...pageRows)
+    if (pageRows.length < PAGE) break
+  }
 
   const monthly = new Map()
   let periodCents = 0
