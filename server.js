@@ -4938,8 +4938,9 @@ app.post('/api/kajabi/webhook', async (req, res) => {
       }
 
       // Fire a Slack alert for high-value/configured products
-      if (isAlertProduct(productName)) {
-        await postVipSaleAlert({ customerName, customerEmail, productName, amountCents, currency })
+      const alertConfig = findAlertConfig(productName)
+      if (alertConfig) {
+        await postSaleAlert({ config: alertConfig, customerName, customerEmail, productName, amountCents, currency })
       }
     } catch (err) {
       console.error('[Kajabi Webhook] Failed to record success:', err.message)
@@ -5504,20 +5505,23 @@ function salesChannelId() {
   return process.env.SLACK_SALES_CHANNEL_ID || process.env.SLACK_CHANNEL_ID
 }
 
-// Products that fire a real-time Slack alert when they sell. Add more here later
-// if you want to be pinged on other high-value products too.
+// Products that fire a real-time Slack alert when they sell. Each entry has a
+// case-insensitive substring `match`, plus a custom emoji + label for the alert.
+// Add more entries here to be pinged on additional high-value products.
 const SALES_ALERT_PRODUCTS = [
-  'Launch Your Brand Challenge VIP Experience',
+  { match: 'Launch Your Brand Challenge VIP Experience', emoji: '💎', label: 'VIP Experience' },
+  { match: 'Shirt School Implementation', emoji: '🚀', label: 'Implementation Program' },
+  { match: 'Shirt School + Elite Coaching', emoji: '👑', label: 'Elite Coaching' },
 ]
 
-function isAlertProduct(productName) {
-  if (!productName) return false
+function findAlertConfig(productName) {
+  if (!productName) return null
   const norm = productName.toLowerCase().trim()
-  return SALES_ALERT_PRODUCTS.some((p) => norm.includes(p.toLowerCase()))
+  return SALES_ALERT_PRODUCTS.find((p) => norm.includes(p.match.toLowerCase())) || null
 }
 
-async function postVipSaleAlert({ customerName, customerEmail, productName, amountCents, currency }) {
-  if (!slackClient) return
+async function postSaleAlert({ config, customerName, customerEmail, productName, amountCents, currency }) {
+  if (!slackClient || !config) return
   const channel = salesChannelId()
   if (!channel) return
   const amount = amountCents != null
@@ -5526,9 +5530,9 @@ async function postVipSaleAlert({ customerName, customerEmail, productName, amou
   try {
     await slackClient.chat.postMessage({
       channel,
-      text: `💎 New ${productName} sale: ${customerEmail || 'unknown'}`,
+      text: `${config.emoji} New ${config.label} sale: ${customerEmail || 'unknown'} (${amount})`,
       blocks: [
-        { type: 'header', text: { type: 'plain_text', text: '💎 VIP Experience Sale!' } },
+        { type: 'header', text: { type: 'plain_text', text: `${config.emoji} ${config.label} Sale!` } },
         {
           type: 'section',
           text: {
@@ -5543,7 +5547,7 @@ async function postVipSaleAlert({ customerName, customerEmail, productName, amou
         },
       ],
     })
-    console.log(`[Sales Alert] ✓ Posted VIP sale notification for ${customerEmail}`)
+    console.log(`[Sales Alert] ✓ Posted ${config.label} sale notification for ${customerEmail} (${amount})`)
   } catch (err) {
     console.error('[Sales Alert] post error:', err.message)
   }
