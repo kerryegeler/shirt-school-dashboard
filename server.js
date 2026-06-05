@@ -1615,6 +1615,197 @@ function extractLiveEventUrls(info) {
   return urls
 }
 
+// ─── Customer Memory ─────────────────────────────────────────────────────────
+// "Customer dossier" layer. The AI used to draft replies with zero awareness
+// that john@x.com had emailed three other times that month, bought the
+// challenge, and had a failed Elite payment. This module loads + caches that
+// context so it can be injected into every draft.
+
+function normalizeEmail(raw) {
+  if (!raw) return ''
+  // Extract the email part out of "Name <email@x.com>" if needed.
+  const m = String(raw).match(/<([^>]+)>/)
+  return (m ? m[1] : String(raw)).trim().toLowerCase()
+}
+
+async function loadCustomerProfile(email) {
+  if (!supabase) return null
+  const key = normalizeEmail(email)
+  if (!key) return null
+  try {
+    const { data } = await supabase.from('customer_profiles').select('*').eq('email', key).maybeSingle()
+    return data || null
+  } catch (err) {
+    console.error('[Customer] load error:', err.message)
+    return null
+  }
+}
+
+async function upsertCustomerProfile(email, fields = {}) {
+  if (!supabase) return null
+  const key = normalizeEmail(email)
+  if (!key) return null
+  const row = { email: key, updated_at: new Date().toISOString(), ...fields }
+  try {
+    const { data, error } = await supabase.from('customer_profiles').upsert(row, { onConflict: 'email' }).select().single()
+    if (error) throw error
+    return data
+  } catch (err) {
+    console.error('[Customer] upsert error:', err.message)
+    return null
+  }
+}
+
+// Pull this customer's purchase history from kajabi_payments + revenue_entries.
+// Returns an array of normalized purchase objects, newest first.
+async function lookupCustomerPurchases(email) {
+  if (!supabase) return []
+  const key = normalizeEmail(email)
+  if (!key) return []
+  try {
+    const [kajabi, revenue] = await Promise.all([
+      supabase.from('kajabi_payments').select('product_name, amount_cents, status, type, failed_at, synced_at, currency')
+        .eq('customer_email', key).order('synced_at', { ascending: false }).limit(20),
+      supabase.from('revenue_entries').select('product_name, amount_cents, received_at, source, description, currency')
+        .eq('customer_email', key).order('received_at', { ascending: false }).limit(20),
+    ])
+    const purchases = []
+    for (const r of kajabi.data || []) {
+      purchases.push({
+        source: 'kajabi',
+        product: r.product_name || '(unnamed product)',
+        amountCents: r.amount_cents || 0,
+        currency: r.currency || 'USD',
+        type: r.type || null,
+        status: r.status || null,
+        date: r.failed_at || r.synced_at,
+      })
+    }
+    for (const r of revenue.data || []) {
+      purchases.push({
+        source: r.source || 'revenue',
+        product: r.product_name || r.description || '(revenue entry)',
+        amountCents: r.amount_cents || 0,
+        currency: r.currency || 'USD',
+        type: null,
+        status: null,
+        date: r.received_at,
+      })
+    }
+    purchases.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+    return purchases.slice(0, 15)
+  } catch (err) {
+    console.error('[Customer] purchase lookup error:', err.message)
+    return []
+  }
+}
+
+// Cross-thread Gmail search. Anything from/to this email address across the
+// connected inboxes, deduped by thread id, newest first. Cached 10 minutes so
+// the dossier isn't re-fetching on every Generate click.
+const customerThreadCache = new Map()
+const CUSTOMER_THREAD_TTL_MS = 10 * 60 * 1000
+
+async function lookupRecentThreadsByEmail(email, currentThreadId = null) {
+  const key = normalizeEmail(email)
+  if (!key) return []
+  const cached = customerThreadCache.get(key)
+  if (cached && Date.now() - cached.at < CUSTOMER_THREAD_TTL_MS) {
+    return cached.results.filter((t) => t.threadId !== currentThreadId)
+  }
+  const results = []
+  const seen = new Set()
+  for (const acct of TARGET_ACCOUNTS) {
+    if (!hasTokens(acct)) continue
+    try {
+      const gmail = google.gmail({ version: 'v1', auth: clients[acct] })
+      const listRes = await gmail.users.threads.list({
+        userId: 'me',
+        q: `(from:${key} OR to:${key})`,
+        maxResults: 10,
+      })
+      const threads = listRes.data.threads || []
+      for (const t of threads) {
+        if (seen.has(t.id)) continue
+        seen.add(t.id)
+        try {
+          const meta = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'metadata', metadataHeaders: ['Subject', 'From', 'Date'] })
+          const msgs = meta.data.messages || []
+          const last = msgs[msgs.length - 1]
+          const headers = last?.payload?.headers || []
+          const getH = (n) => headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value || ''
+          results.push({
+            threadId: t.id,
+            account: acct,
+            subject: getH('Subject') || '(no subject)',
+            from: getH('From'),
+            date: last?.internalDate ? new Date(parseInt(last.internalDate, 10)).toISOString() : null,
+            messageCount: msgs.length,
+          })
+        } catch (err) {
+          console.error(`[Customer] thread meta fetch failed for ${t.id}: ${err.message}`)
+        }
+      }
+    } catch (err) {
+      console.error(`[Customer] Gmail search failed on ${acct}: ${err.message}`)
+    }
+  }
+  results.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+  customerThreadCache.set(key, { at: Date.now(), results })
+  return results.filter((t) => t.threadId !== currentThreadId)
+}
+
+// Render the dossier as a prompt block. Returns empty string when there's
+// genuinely nothing to inject (unknown sender, no profile, no purchases, no
+// past threads) — keeps the system prompt lean for cold leads.
+function formatPurchase(p) {
+  const amt = p.amountCents ? `$${(p.amountCents / 100).toFixed(2)}` : ''
+  const d = p.date ? new Date(p.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : ''
+  const status = p.status && p.status !== 'success' ? ` [${p.status}]` : ''
+  return `${p.product}${amt ? ` (${amt}${d ? `, ${d}` : ''})` : d ? ` (${d})` : ''}${status}`
+}
+
+async function buildCustomerDossier(email, currentThreadId = null) {
+  const key = normalizeEmail(email)
+  if (!key) return ''
+  const [profile, purchases, threads] = await Promise.all([
+    loadCustomerProfile(key),
+    lookupCustomerPurchases(key),
+    lookupRecentThreadsByEmail(key, currentThreadId),
+  ])
+  if (!profile && !purchases.length && !threads.length) return ''
+
+  const lines = ['─── CUSTOMER CONTEXT ───']
+  lines.push(`Email: ${key}`)
+  if (profile?.first_name || profile?.last_name) {
+    lines.push(`Name on file: ${[profile.first_name, profile.last_name].filter(Boolean).join(' ')}`)
+  }
+  if (profile?.tags?.length) {
+    lines.push(`Tags: ${profile.tags.join(', ')}`)
+  }
+  if (profile?.notes) {
+    lines.push(`Kerry's notes: ${profile.notes}`)
+  }
+  if (purchases.length) {
+    lines.push('Purchases (most recent first):')
+    for (const p of purchases.slice(0, 8)) lines.push(`  - ${formatPurchase(p)}`)
+    const failed = purchases.filter((p) => p.status === 'failed')
+    if (failed.length) lines.push(`  ⚠ ${failed.length} failed payment(s) on file — be aware before promising access.`)
+  } else {
+    lines.push('Purchases: none on file (this person has not bought from us yet, or bought under a different email).')
+  }
+  if (threads.length) {
+    lines.push(`Past email threads with this address (${threads.length} total, last ${Math.min(threads.length, 5)} shown):`)
+    for (const t of threads.slice(0, 5)) {
+      const when = t.date ? new Date(t.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'unknown date'
+      lines.push(`  - ${when}: "${t.subject.slice(0, 80)}" (${t.messageCount} msg)`)
+    }
+    lines.push('Use these as context. Do NOT re-introduce yourself or re-state things this person already knows.')
+  }
+  lines.push('───────────────────────')
+  return '\n' + lines.join('\n') + '\n'
+}
+
 // Validate a draft against the HARD RULES. Returns an array of violation
 // strings (empty if the draft is clean). Used by the draft endpoints so they
 // can re-prompt the model with the specific complaint, or surface the issues
@@ -1952,8 +2143,12 @@ async function generateDraftForSlack(thread) {
   const linksLib = loadLinks()
   const liveEvent = await loadLiveEventInfo()
   const eventBlock = buildLiveEventBlock(liveEvent)
+  // Customer dossier: who is this sender, what have they bought, what threads
+  // do we already have with them. Empty string for cold leads.
+  const senderEmail = normalizeEmail(thread.from)
+  const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, thread.threadId) : ''
   const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}${eventBlock}${buildHardRulesBlock(linksLib)}
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib)}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
 
@@ -2506,11 +2701,14 @@ app.post('/api/generate-reply', async (req, res) => {
   const linksLib = loadLinks()
   const liveEvent = await loadLiveEventInfo()
   const eventBlock = buildLiveEventBlock(liveEvent)
+  // Customer dossier for the dashboard Generate button. Same as Slack flow.
+  const senderEmail = normalizeEmail(email.from)
+  const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, email.threadId || email.id) : ''
   const systemPrompt = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
 ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}
 The email you are replying to is categorized as: ${category}
-${feedbackContext}
+${feedbackContext}${customerBlock}
 ${eventBlock}${buildHardRulesBlock(linksLib)}
 Write only the email body. No subject line, no "From:", no metadata. Start directly with the greeting.`
 
@@ -2941,7 +3139,12 @@ app.post('/api/slack/events', async (req, res) => {
     const linksLib = loadLinks()
     const liveEvent = await loadLiveEventInfo()
     const eventBlock = buildLiveEventBlock(liveEvent)
-    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${eventBlock}${buildHardRulesBlock(linksLib)}`
+    // Customer dossier for the Edit-in-Slack regen. Pulls the sender from
+    // the original notification's thread_meta so the regen still knows who
+    // this person is and what they've bought.
+    const senderEmail = normalizeEmail(meta.from)
+    const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, notif.thread_id) : ''
+    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib)}`
     const regenUserContent = `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nKerry's edit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`
     const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
@@ -6427,6 +6630,42 @@ app.put('/api/live-event', requireAuth, async (req, res) => {
   const { data, error } = await supabase.from('live_event_info').upsert(row, { onConflict: 'id' }).select().single()
   if (error) return res.status(500).json({ error: error.message })
   res.json({ info: data, phase: getLiveEventPhase(data) })
+})
+
+// ─── Customer Profile endpoints ───────────────────────────────────────────────
+// Returns everything we know about the sender: profile row (tags + notes),
+// purchase history, and past Gmail threads. Used by the EmailDetail panel
+// so Kerry can see context inline and edit notes without leaving the email.
+app.get('/api/customer-profile/:email', requireAuth, async (req, res) => {
+  const email = normalizeEmail(req.params.email)
+  if (!email) return res.status(400).json({ error: 'Invalid email' })
+  const currentThreadId = req.query.threadId || null
+  const [profile, purchases, threads] = await Promise.all([
+    loadCustomerProfile(email),
+    lookupCustomerPurchases(email),
+    lookupRecentThreadsByEmail(email, currentThreadId),
+  ])
+  res.json({ email, profile, purchases, threads })
+})
+
+app.put('/api/customer-profile/:email', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const email = normalizeEmail(req.params.email)
+  if (!email) return res.status(400).json({ error: 'Invalid email' })
+  const allowed = ['first_name', 'last_name', 'tags', 'notes']
+  const fields = {}
+  for (const f of allowed) {
+    if (req.body[f] !== undefined) {
+      if (f === 'tags') {
+        fields[f] = Array.isArray(req.body[f]) ? req.body[f].map((s) => String(s).trim()).filter(Boolean) : []
+      } else {
+        fields[f] = req.body[f] === '' ? null : req.body[f]
+      }
+    }
+  }
+  const profile = await upsertCustomerProfile(email, fields)
+  if (!profile) return res.status(500).json({ error: 'Save failed' })
+  res.json({ profile })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

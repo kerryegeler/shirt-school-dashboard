@@ -340,3 +340,22 @@ create table if not exists live_event_info (
   updated_at timestamptz not null default now()
 );
 alter table live_event_info disable row level security;
+
+-- ─── Customer Profiles ───────────────────────────────────────────────────────
+-- One row per customer email. Used by the email agent's "customer dossier"
+-- which gets injected into every draft so the AI knows who this person is,
+-- what they've bought, and any context Kerry has added.
+
+create table if not exists customer_profiles (
+  email          text primary key,                       -- lowercased
+  first_name     text,
+  last_name      text,
+  tags           text[] not null default '{}',           -- 'VIP', 'Affiliate', 'Refund Risk', 'Sponsor', etc.
+  notes          text,                                    -- Kerry's free-form scratchpad
+  first_seen_at  timestamptz,
+  last_email_at  timestamptz,
+  total_emails   integer not null default 0,
+  updated_at     timestamptz not null default now()
+);
+alter table customer_profiles disable row level security;
+create index if not exists idx_customer_profiles_updated on customer_profiles(updated_at desc);

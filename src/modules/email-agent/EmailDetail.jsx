@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback, forwardEmail } from '../../services/api.js'
+import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback, forwardEmail, fetchCustomerProfile, saveCustomerProfile } from '../../services/api.js'
 
 const CATEGORY_LABELS = {
   student_support: 'Student Support',
@@ -288,6 +288,169 @@ function ThreadMessage({ message, defaultExpanded = true }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
+// ─── Customer Panel ──────────────────────────────────────────────────────────
+// Shows who this customer is, what they've bought, past threads, and Kerry's
+// notes. The same dossier that gets injected into the AI's prompt — surfaced
+// here so Kerry can see and edit it inline.
+function CustomerPanel({ email, threadId }) {
+  const [data, setData] = useState(null)          // { profile, purchases, threads }
+  const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [tagsText, setTagsText] = useState('')
+  const [notesText, setNotesText] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true); setErr('')
+    fetchCustomerProfile(email, threadId)
+      .then((d) => {
+        if (cancelled) return
+        setData(d)
+        setTagsText((d.profile?.tags || []).join(', '))
+        setNotesText(d.profile?.notes || '')
+      })
+      .catch((e) => { if (!cancelled) setErr(e.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [email, threadId])
+
+  async function handleSave() {
+    setSaving(true); setErr('')
+    try {
+      const tags = tagsText.split(',').map((s) => s.trim()).filter(Boolean)
+      const profile = await saveCustomerProfile(email, { tags, notes: notesText })
+      setData((prev) => ({ ...(prev || {}), profile }))
+      setEditing(false)
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return <div className="customer-panel customer-panel-loading">Loading customer info…</div>
+  if (err) return <div className="customer-panel customer-panel-error">Could not load customer info: {err}</div>
+  if (!data) return null
+
+  const tags = data.profile?.tags || []
+  const purchases = data.purchases || []
+  const threads = data.threads || []
+  const hasAnything = tags.length || data.profile?.notes || purchases.length || threads.length
+
+  return (
+    <div className="customer-panel">
+      <div className="customer-panel-summary" onClick={() => setExpanded((v) => !v)}>
+        <span className="customer-panel-icon">👤</span>
+        <span className="customer-panel-label">Customer</span>
+        {tags.length > 0 && (
+          <span className="customer-panel-tags">
+            {tags.map((t) => <span key={t} className="customer-tag-chip">{t}</span>)}
+          </span>
+        )}
+        <span className="customer-panel-counts">
+          {purchases.length > 0 && <span>{purchases.length} purchase{purchases.length === 1 ? '' : 's'}</span>}
+          {threads.length > 0 && <span>{threads.length} past thread{threads.length === 1 ? '' : 's'}</span>}
+          {!hasAnything && <span className="customer-panel-empty">No profile yet</span>}
+        </span>
+        <span className="customer-panel-toggle">{expanded ? '▾' : '▸'}</span>
+      </div>
+
+      {data.profile?.notes && !expanded && (
+        <div className="customer-panel-notes-preview">📝 {data.profile.notes}</div>
+      )}
+
+      {expanded && (
+        <div className="customer-panel-body">
+          {!editing ? (
+            <>
+              <div className="customer-panel-section">
+                <div className="customer-panel-section-header">
+                  <span className="customer-panel-section-title">Tags & Notes</span>
+                  <button className="customer-panel-edit-btn" onClick={() => setEditing(true)}>Edit</button>
+                </div>
+                <div className="customer-panel-tags-display">
+                  {tags.length > 0
+                    ? tags.map((t) => <span key={t} className="customer-tag-chip">{t}</span>)
+                    : <span className="customer-panel-empty">No tags</span>}
+                </div>
+                <div className="customer-panel-notes-display">
+                  {data.profile?.notes
+                    ? data.profile.notes
+                    : <span className="customer-panel-empty">No notes yet. Click Edit to add context the AI should know about this customer.</span>}
+                </div>
+              </div>
+
+              {purchases.length > 0 && (
+                <div className="customer-panel-section">
+                  <div className="customer-panel-section-title">Purchases</div>
+                  <ul className="customer-panel-list">
+                    {purchases.slice(0, 10).map((p, i) => (
+                      <li key={i}>
+                        <span className="customer-list-primary">{p.product}</span>
+                        {p.amountCents > 0 && <span className="customer-list-meta"> · ${(p.amountCents / 100).toFixed(2)}</span>}
+                        {p.date && <span className="customer-list-meta"> · {new Date(p.date).toLocaleDateString()}</span>}
+                        {p.status && p.status !== 'success' && <span className={`customer-status status-${p.status}`}>{p.status}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {threads.length > 0 && (
+                <div className="customer-panel-section">
+                  <div className="customer-panel-section-title">Past email threads</div>
+                  <ul className="customer-panel-list">
+                    {threads.slice(0, 8).map((t) => (
+                      <li key={t.threadId}>
+                        <span className="customer-list-primary">{t.subject}</span>
+                        {t.date && <span className="customer-list-meta"> · {new Date(t.date).toLocaleDateString()}</span>}
+                        <span className="customer-list-meta"> · {t.messageCount} msg</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="customer-panel-edit">
+              <label className="customer-panel-edit-label">Tags (comma-separated)</label>
+              <input
+                type="text"
+                className="customer-panel-input"
+                placeholder="e.g. VIP, Affiliate, Refund Risk"
+                value={tagsText}
+                onChange={(e) => setTagsText(e.target.value)}
+              />
+              <label className="customer-panel-edit-label">Notes (the AI will see this on every draft for this customer)</label>
+              <textarea
+                className="customer-panel-textarea"
+                rows={4}
+                placeholder="e.g. Husband passed away May 2026, be gentle. Always asks long questions, prefers short replies."
+                value={notesText}
+                onChange={(e) => setNotesText(e.target.value)}
+              />
+              <div className="customer-panel-edit-actions">
+                <button className="btn btn-secondary" onClick={() => {
+                  setEditing(false)
+                  setTagsText((data.profile?.tags || []).join(', '))
+                  setNotesText(data.profile?.notes || '')
+                }} disabled={saving}>Cancel</button>
+                <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              {err && <div className="customer-panel-error">{err}</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, onUnarchive, viewMode, onDraftSaved, onDraftDeleted, onSent }) {
   const [draft, setDraft] = useState('')
   const [manualMode, setManualMode] = useState(false)
@@ -530,6 +693,10 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
             <span className="meta-value">{formatFullDate(email.timestamp)}</span>
           </div>
         </div>
+
+        {email.from && email.category !== 'general' && viewMode !== 'sent' && (
+          <CustomerPanel email={email.from} threadId={email.threadId || email.id} />
+        )}
       </div>
 
       {/* ── Thread Messages ── */}

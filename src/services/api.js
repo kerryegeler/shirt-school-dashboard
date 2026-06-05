@@ -752,3 +752,23 @@ export async function saveLiveEvent(fields) {
   if (!r.ok) throw new Error(d.error || 'Failed to save live event info')
   return d // { info, phase }
 }
+
+// ─── Customer Profiles ────────────────────────────────────────────────────────
+
+export async function fetchCustomerProfile(email, threadId) {
+  const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : ''
+  const r = await fetch(`/api/customer-profile/${encodeURIComponent(email)}${qs}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load customer profile')
+  return d // { email, profile, purchases, threads }
+}
+
+export async function saveCustomerProfile(email, fields) {
+  const r = await fetch(`/api/customer-profile/${encodeURIComponent(email)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to save customer profile')
+  return d.profile
+}
