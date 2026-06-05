@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js'
 import { WebClient as SlackWebClient } from '@slack/web-api'
 import fs from 'fs'
 import path from 'path'
+import sharp from 'sharp'
 
 // ─── Global error guards — prevent a single failed call from crashing the server ─
 process.on('uncaughtException', (err) => {
@@ -370,7 +371,6 @@ async function fetchAttachmentBytes(messageId, attachmentId, account) {
 // reliably shrinks anything reasonable under 1MB while preserving enough
 // detail for vision to read it. PDFs still have a hard cap since they can't
 // be losslessly compressed and over-cap PDFs typically blow the request.
-const sharp = require('sharp')
 const VISION_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif'])
 const VISION_DOC_TYPES = new Set(['application/pdf'])
 const VISION_MAX_ATTACHMENTS = 5
