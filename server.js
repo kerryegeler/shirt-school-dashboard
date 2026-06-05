@@ -2330,13 +2330,276 @@ const AGENT_TOOLS = [
       required: ['email'],
     },
   },
+  // ── Write tools (Phase 2.5) ──
+  // These do NOT execute when the AI calls them. They CREATE A PROPOSAL that
+  // Kerry approves/rejects in Slack. The tool_result tells the AI "proposed"
+  // and the AI should mention in the draft that the action is flagged for
+  // Kerry's review. Nothing mutates Kit / Supabase / etc. without a click.
+  {
+    name: 'tag_kit_subscriber',
+    description: 'PROPOSE adding a Kit tag to a subscriber (e.g. add them to a sequence or list). This does NOT execute immediately — Kerry approves the action via Slack first. Use when you discover a subscriber is missing a tag they should have (e.g. they paid for the challenge but aren\'t tagged for it). In the draft, mention that you\'ve flagged this for Kerry to apply.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Subscriber email to tag' },
+        tag: { type: 'string', description: 'Exact name of the Kit tag to add' },
+        reason: { type: 'string', description: 'One-sentence explanation of why this tag should be added — shown to Kerry in the Slack approval message' },
+      },
+      required: ['email', 'tag', 'reason'],
+    },
+  },
+  {
+    name: 'remove_kit_tag',
+    description: 'PROPOSE removing a Kit tag from a subscriber (e.g. unsubscribe them from a sequence). Does NOT execute — requires Kerry\'s Slack approval. Use when a customer asks to be removed from a specific list or sequence. Mention in the draft that the action is flagged for Kerry.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Subscriber email' },
+        tag: { type: 'string', description: 'Exact name of the Kit tag to remove' },
+        reason: { type: 'string', description: 'One-sentence explanation' },
+      },
+      required: ['email', 'tag', 'reason'],
+    },
+  },
+  {
+    name: 'update_kit_subscriber_email',
+    description: 'PROPOSE updating a Kit subscriber\'s email address (e.g. fix a typo). Does NOT execute — requires Kerry\'s Slack approval. Use when a subscriber is in Kit under what looks like a typo (jonny@x.com but they sign emails as Johnny). Mention in the draft that you\'ve flagged it for Kerry.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        old_email: { type: 'string', description: 'Current email in Kit' },
+        new_email: { type: 'string', description: 'Corrected email' },
+        reason: { type: 'string', description: 'One-sentence explanation' },
+      },
+      required: ['old_email', 'new_email', 'reason'],
+    },
+  },
+  {
+    name: 'propose_followup_reminder',
+    description: 'PROPOSE creating a follow-up reminder in Kerry\'s reminders list (e.g. "check on Sarah\'s refund in 7 days"). Does NOT execute — requires Kerry\'s Slack approval. Use when a situation requires re-checking on something after time has passed. In the draft, you don\'t need to mention this to the customer.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short reminder title, e.g. "Check on Sarah\'s refund request"' },
+        days_from_now: { type: 'integer', description: 'How many days from today the reminder should fire' },
+        notes: { type: 'string', description: 'Optional longer context for the reminder' },
+      },
+      required: ['title', 'days_from_now'],
+    },
+  },
 ]
+
+// ─── Phase 2.5: Action proposals (write-tool plumbing) ───────────────────────
+// When the AI calls a write tool, we DON'T execute. We:
+//   1. Insert a row in agent_action_proposals with status='pending'
+//   2. Post a Slack message with Apply/Skip buttons
+//   3. Return to the AI: "proposed for Kerry's approval"
+// The actual execution happens later, in /api/slack/actions, when Kerry clicks.
+
+function buildProposalSlackBlocks(proposal) {
+  const subj = proposal.thread_meta?.subject ? `_Re: ${proposal.thread_meta.subject}_` : ''
+  return [
+    { type: 'header', text: { type: 'plain_text', text: '🤖 AI proposed action', emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${proposal.description}*${subj ? `\n${subj}` : ''}` } },
+    proposal.reason ? { type: 'context', elements: [{ type: 'mrkdwn', text: `_Why:_ ${proposal.reason}` }] } : null,
+    { type: 'actions', elements: [
+      { type: 'button', action_id: 'apply_proposal', value: proposal.id,
+        text: { type: 'plain_text', text: '✅ Apply' }, style: 'primary' },
+      { type: 'button', action_id: 'skip_proposal', value: proposal.id,
+        text: { type: 'plain_text', text: '✕ Skip' } },
+    ] },
+  ].filter(Boolean)
+}
+
+async function postProposalToSlack(proposal) {
+  if (!slackClient || !process.env.SLACK_CHANNEL_ID) return null
+  try {
+    const msg = await slackClient.chat.postMessage({
+      channel: process.env.SLACK_CHANNEL_ID,
+      text: `🤖 AI proposed action: ${proposal.description}`,
+      blocks: buildProposalSlackBlocks(proposal),
+    })
+    return { slack_ts: msg.ts, channel_id: process.env.SLACK_CHANNEL_ID }
+  } catch (err) {
+    console.error('[Proposal] Slack post failed:', err.message)
+    return null
+  }
+}
+
+async function updateProposalSlackMessage(proposal, newStatus, resultText) {
+  if (!slackClient || !proposal.slack_ts || !proposal.slack_channel_id) return
+  const icon = newStatus === 'applied' ? '✅' : newStatus === 'skipped' ? '⏭' : '❌'
+  const header = newStatus === 'applied' ? 'Applied' : newStatus === 'skipped' ? 'Skipped' : 'Failed'
+  try {
+    await slackClient.chat.update({
+      channel: proposal.slack_channel_id, ts: proposal.slack_ts,
+      text: `${icon} ${header}: ${proposal.description}`,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: `${icon} Action ${header}`, emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `~*${proposal.description}*~${resultText ? `\n${resultText}` : ''}` } },
+      ],
+    })
+  } catch (err) {
+    console.error('[Proposal] Slack update failed:', err.message)
+  }
+}
+
+async function createActionProposal({ threadId, toolName, toolInput, description, reason }) {
+  if (!supabase) return { error: 'Database not configured — cannot record proposal' }
+  try {
+    const { data: row, error } = await supabase.from('agent_action_proposals').insert({
+      thread_id: threadId || null,
+      tool_name: toolName,
+      tool_input: toolInput,
+      description,
+      status: 'pending',
+    }).select().single()
+    if (error) throw error
+    const slackInfo = await postProposalToSlack({ ...row, reason, thread_meta: null })
+    if (slackInfo) {
+      await supabase.from('agent_action_proposals')
+        .update({ slack_ts: slackInfo.slack_ts, slack_channel_id: slackInfo.channel_id })
+        .eq('id', row.id)
+    }
+    console.log(`[Proposal] Created ${toolName} proposal ${row.id.slice(0, 8)} — "${description}"`)
+    return {
+      proposed: true,
+      proposal_id: row.id,
+      description,
+      message: slackInfo
+        ? "Action proposed for Kerry's Slack approval. Mention in your draft that you've flagged this for him to apply."
+        : "Action recorded as proposal. Slack is not configured — Kerry will see it next time he reviews proposals. Mention in your draft that you've flagged it for him.",
+    }
+  } catch (err) {
+    console.error('[Proposal] create error:', err.message)
+    return { error: err.message }
+  }
+}
+
+// ─── Kit write executors ─────────────────────────────────────────────────────
+// These run only when Kerry clicks Apply in Slack. Each looks up by name
+// (email → subscriber, tag name → tag id) and calls the Kit V4 API.
+
+async function kitFindSubscriberId(email) {
+  const sub = await kitLookupSubscriber(email)
+  if (sub.error) throw new Error(sub.error)
+  if (!sub.found) throw new Error(`No Kit subscriber found for ${email}`)
+  return { id: sub.id, sub }
+}
+
+async function kitFindTagIdByName(tagName) {
+  const data = await kitApiGet('/tags')
+  const tags = data?.tags || data?.data || []
+  const match = tags.find((t) => {
+    const n = t.name || t.attributes?.name
+    return n && n.toLowerCase() === tagName.toLowerCase()
+  })
+  if (!match) throw new Error(`No Kit tag named "${tagName}"`)
+  return match.id
+}
+
+async function kitTagSubscriber({ email, tag }) {
+  const tagId = await kitFindTagIdByName(tag)
+  // Kit V4: POST /tags/{tag_id}/subscribers with { email_address }
+  const res = await kitApiPost(`/tags/${tagId}/subscribers`, { email_address: normalizeEmail(email) })
+  return `Tagged ${email} with "${tag}" (tag id ${tagId}); subscriber id ${res?.subscriber?.id || res?.data?.id || 'unknown'}`
+}
+
+async function kitRemoveTagFromSubscriber({ email, tag }) {
+  const [tagId, { id: subId }] = await Promise.all([
+    kitFindTagIdByName(tag),
+    kitFindSubscriberId(email),
+  ])
+  // Kit V4: DELETE /tags/{tag_id}/subscribers/{subscriber_id}
+  if (!process.env.KIT_API_KEY) throw new Error('KIT_API_KEY not configured')
+  const resp = await fetch(`https://api.kit.com/v4/tags/${tagId}/subscribers/${subId}`, {
+    method: 'DELETE',
+    headers: { 'X-Kit-Api-Key': process.env.KIT_API_KEY },
+  })
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '')
+    throw new Error(`Kit DELETE failed (${resp.status}): ${t}`)
+  }
+  return `Removed tag "${tag}" from ${email}`
+}
+
+async function kitUpdateSubscriberEmailExec({ old_email, new_email }) {
+  const { id: subId } = await kitFindSubscriberId(old_email)
+  // Kit V4: PUT /subscribers/{id} accepts email_address change
+  if (!process.env.KIT_API_KEY) throw new Error('KIT_API_KEY not configured')
+  const resp = await fetch(`https://api.kit.com/v4/subscribers/${subId}`, {
+    method: 'PUT',
+    headers: { 'X-Kit-Api-Key': process.env.KIT_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email_address: normalizeEmail(new_email) }),
+  })
+  const data = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(`Kit PUT /subscribers/${subId} failed (${resp.status}): ${JSON.stringify(data)}`)
+  return `Updated subscriber ${old_email} → ${new_email}`
+}
+
+async function createBusinessReminderRow({ title, days_from_now, notes }) {
+  if (!supabase) throw new Error('Database not configured')
+  const due = new Date()
+  due.setDate(due.getDate() + Math.max(0, parseInt(days_from_now, 10) || 0))
+  const dueDate = due.toISOString().slice(0, 10) // YYYY-MM-DD
+  const { data, error } = await supabase.from('business_reminders').insert({
+    title, notes: notes || null, due_date: dueDate, status: 'pending',
+  }).select().single()
+  if (error) throw error
+  return `Reminder created: "${title}" due ${dueDate} (id ${data.id.slice(0, 8)})`
+}
+
+// ── Apply a proposal: dispatch to the right executor, update status. ──
+async function applyActionProposal(proposalId) {
+  if (!supabase) return { error: 'Database not configured' }
+  const { data: proposal } = await supabase.from('agent_action_proposals')
+    .select('*').eq('id', proposalId).single()
+  if (!proposal) return { error: 'Proposal not found' }
+  if (proposal.status !== 'pending') return { error: `Proposal already ${proposal.status}` }
+
+  let result, status, errorMsg
+  try {
+    const input = proposal.tool_input || {}
+    switch (proposal.tool_name) {
+      case 'tag_kit_subscriber':           result = await kitTagSubscriber(input); break
+      case 'remove_kit_tag':               result = await kitRemoveTagFromSubscriber(input); break
+      case 'update_kit_subscriber_email':  result = await kitUpdateSubscriberEmailExec(input); break
+      case 'propose_followup_reminder':    result = await createBusinessReminderRow(input); break
+      default: throw new Error(`Unknown tool: ${proposal.tool_name}`)
+    }
+    status = 'applied'
+  } catch (err) {
+    status = 'failed'
+    errorMsg = err.message
+    console.error(`[Proposal Apply] ${proposal.tool_name} failed:`, err.message)
+  }
+  await supabase.from('agent_action_proposals').update({
+    status, apply_result: result || errorMsg, applied_at: new Date().toISOString(),
+  }).eq('id', proposalId)
+  await updateProposalSlackMessage(proposal, status, result || `Error: ${errorMsg}`)
+  return { status, result, error: errorMsg }
+}
+
+async function skipActionProposal(proposalId) {
+  if (!supabase) return { error: 'Database not configured' }
+  const { data: proposal } = await supabase.from('agent_action_proposals')
+    .select('*').eq('id', proposalId).single()
+  if (!proposal) return { error: 'Proposal not found' }
+  if (proposal.status !== 'pending') return { error: `Proposal already ${proposal.status}` }
+  await supabase.from('agent_action_proposals').update({
+    status: 'skipped', applied_at: new Date().toISOString(),
+  }).eq('id', proposalId)
+  await updateProposalSlackMessage(proposal, 'skipped')
+  return { status: 'skipped' }
+}
 
 // ── Dispatcher: maps a tool name + input → result. Always returns a value
 // (never throws); errors are wrapped so the model sees them and adapts.
-async function executeAgentTool(name, input) {
+// Write tools route to createActionProposal instead of executing directly.
+async function executeAgentTool(name, input, ctx = {}) {
   try {
     switch (name) {
+      // READ tools
       case 'lookup_customer_purchases': {
         const purchases = await lookupCustomerPurchases(input.email)
         return { email: normalizeEmail(input.email), purchases }
@@ -2351,6 +2614,31 @@ async function executeAgentTool(name, input) {
         const threads = await lookupRecentThreadsByEmail(input.email)
         return { email: normalizeEmail(input.email), threads }
       }
+      // WRITE tools — propose only, never execute here
+      case 'tag_kit_subscriber':
+        return await createActionProposal({
+          threadId: ctx.threadId, toolName: name, toolInput: { email: input.email, tag: input.tag },
+          description: `Add Kit tag "${input.tag}" to ${input.email}`, reason: input.reason,
+        })
+      case 'remove_kit_tag':
+        return await createActionProposal({
+          threadId: ctx.threadId, toolName: name, toolInput: { email: input.email, tag: input.tag },
+          description: `Remove Kit tag "${input.tag}" from ${input.email}`, reason: input.reason,
+        })
+      case 'update_kit_subscriber_email':
+        return await createActionProposal({
+          threadId: ctx.threadId, toolName: name,
+          toolInput: { old_email: input.old_email, new_email: input.new_email },
+          description: `Update Kit subscriber email: ${input.old_email} → ${input.new_email}`,
+          reason: input.reason,
+        })
+      case 'propose_followup_reminder':
+        return await createActionProposal({
+          threadId: ctx.threadId, toolName: name,
+          toolInput: { title: input.title, days_from_now: input.days_from_now, notes: input.notes },
+          description: `Reminder in ${input.days_from_now} day(s): "${input.title}"`,
+          reason: input.notes,
+        })
       default:
         return { error: `Unknown tool: ${name}` }
     }
@@ -2363,7 +2651,7 @@ async function executeAgentTool(name, input) {
 // ── Agent loop: send → if tool_use, execute → loop. Caches across iterations
 // because the system + tools array stay identical (Anthropic key is the
 // prefix bytes). Returns { finalText, conversation, usage }.
-async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, label = 'agent' }) {
+async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, label = 'agent', threadId = null }) {
   const conversation = [{ role: 'user', content: userContent }]
   let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheCreate = 0
   let finalText = ''
@@ -2400,7 +2688,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, 
     const toolUses = response.content.filter((b) => b.type === 'tool_use')
     const results = await Promise.all(toolUses.map(async (tu) => {
       console.log(`[Agent Tool] ${label} iter ${iterations}: ${tu.name}(${JSON.stringify(tu.input).slice(0, 120)})`)
-      const out = await executeAgentTool(tu.name, tu.input || {})
+      const out = await executeAgentTool(tu.name, tu.input || {}, { threadId })
       return {
         type: 'tool_result',
         tool_use_id: tu.id,
@@ -2524,7 +2812,8 @@ Return JSON only.`
   // Phase 2: agent tool loop. The model may call lookup_kit_subscriber,
   // lookup_payment_status, etc. before drafting. Loop caps at 5 iterations.
   const { finalText: text, conversation } = await draftWithToolLoop({
-    systemBlocks, userContent, maxTokens: 1500, label: `slack/${thread.threadId?.slice(-8) || 'unknown'}`,
+    systemBlocks, userContent, maxTokens: 1500, threadId: thread.threadId,
+    label: `slack/${thread.threadId?.slice(-8) || 'unknown'}`,
   })
 
   const clean = text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
@@ -3084,7 +3373,8 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
 
     // Phase 2: agent tool loop. Same tools available as the Slack flow.
     const { finalText: initialDraft, conversation } = await draftWithToolLoop({
-      systemBlocks, userContent, maxTokens: 1024, label: `dashboard/${(email.threadId || email.id || '').slice(-8)}`,
+      systemBlocks, userContent, maxTokens: 1024, threadId: email.threadId || email.id,
+      label: `dashboard/${(email.threadId || email.id || '').slice(-8)}`,
     })
     let draft = initialDraft
 
@@ -3384,6 +3674,16 @@ app.post('/api/slack/actions', async (req, res) => {
           ],
         }).catch(() => {})
       }
+    } else if (actionId === 'apply_proposal') {
+      // Phase 2.5: Kerry approved an AI-proposed write action
+      const proposalId = threadId // button value carries the proposal UUID
+      console.log(`[Slack Action] Apply proposal ${proposalId}`)
+      const result = await applyActionProposal(proposalId)
+      if (result.error) console.error(`[Slack Action] apply_proposal failed: ${result.error}`)
+    } else if (actionId === 'skip_proposal') {
+      const proposalId = threadId
+      console.log(`[Slack Action] Skip proposal ${proposalId}`)
+      await skipActionProposal(proposalId)
     }
   } catch (err) {
     console.error('[Slack] Action handler error:', err.message)

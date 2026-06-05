@@ -359,3 +359,25 @@ create table if not exists customer_profiles (
 );
 alter table customer_profiles disable row level security;
 create index if not exists idx_customer_profiles_updated on customer_profiles(updated_at desc);
+
+-- ─── Agent Action Proposals (Phase 2.5 write tools) ─────────────────────────
+-- The email AI can propose actions like "tag this subscriber" or "fix this
+-- typo'd email" — each proposal lands here pending Kerry's Slack approval.
+-- Nothing executes until Kerry clicks Apply.
+
+create table if not exists agent_action_proposals (
+  id               uuid primary key default gen_random_uuid(),
+  thread_id        text,                                -- which email thread spawned it (nullable for standalone proposals)
+  tool_name        text not null,                       -- 'tag_kit_subscriber', 'update_kit_subscriber_email', etc.
+  tool_input       jsonb not null,                      -- exact tool input the AI chose
+  description      text not null,                       -- human-readable, e.g. "Add tag 'challenge_2026_06' to john@x.com"
+  status           text not null default 'pending',     -- 'pending' | 'applied' | 'skipped' | 'failed'
+  slack_ts         text,
+  slack_channel_id text,
+  applied_at       timestamptz,
+  apply_result     text,                                -- API response or error message
+  created_at       timestamptz not null default now()
+);
+alter table agent_action_proposals disable row level security;
+create index if not exists idx_action_proposals_status on agent_action_proposals(status, created_at desc);
+create index if not exists idx_action_proposals_thread on agent_action_proposals(thread_id);
