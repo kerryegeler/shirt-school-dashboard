@@ -2208,10 +2208,23 @@ async function generateDraftForSlack(thread) {
   // do we already have with them. Empty string for cold leads.
   const senderEmail = normalizeEmail(thread.from)
   const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, thread.threadId) : ''
-  const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib)}
+
+  // Split system prompt for Anthropic prompt caching:
+  //   staticSystem  — kerry-brain + learned-behaviors + hard-rules + links
+  //                   (changes rarely, gets cached for ~5 min)
+  //   dynamicSystem — feedback examples, customer dossier, live event, JSON instr
+  //                   (changes per request or per customer; not cached)
+  // Same shape used on the initial call AND the validator retry so both share
+  // the cache hit.
+  const staticSystem = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib)}`
+  const dynamicSystem = `${feedbackContext}${customerBlock}${eventBlock}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
+  const systemBlocks = [
+    { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: dynamicSystem },
+  ]
 
   // Build conversation-aware prompt: separate prior messages from the latest reply
   const msgs = thread.messages || []
@@ -2253,9 +2266,10 @@ Return JSON only.`
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1500,
-    system: systemPrompt,
+    system: systemBlocks,
     messages: [{ role: 'user', content: userContent }],
   })
+  if (message.usage) console.log(`[Draft] Slack tokens — in:${message.usage.input_tokens} out:${message.usage.output_tokens} cache_create:${message.usage.cache_creation_input_tokens || 0} cache_read:${message.usage.cache_read_input_tokens || 0}`)
 
   const text = message.content[0].text.trim()
   const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
@@ -2270,8 +2284,9 @@ Return JSON only.`
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
       // Preserve attachment blocks on retry so the model still sees the image/PDF.
+      // Reuse the same systemBlocks so the retry hits the same prompt cache.
       const fixMsg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemPrompt,
+        model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemBlocks,
         messages: [
           { role: 'user', content: userContent },
           { role: 'assistant', content: text },
@@ -2765,13 +2780,20 @@ app.post('/api/generate-reply', async (req, res) => {
   // Customer dossier for the dashboard Generate button. Same as Slack flow.
   const senderEmail = normalizeEmail(email.from)
   const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, email.threadId || email.id) : ''
-  const systemPrompt = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}
+  // Static (cached) vs dynamic split — see generateDraftForSlack for rationale.
+  const staticSystem = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
+
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib)}`
+  const dynamicSystem = `
 The email you are replying to is categorized as: ${category}
 ${feedbackContext}${customerBlock}
-${eventBlock}${buildHardRulesBlock(linksLib)}
+${eventBlock}
 Write only the email body. No subject line, no "From:", no metadata. Start directly with the greeting.`
+  const systemBlocks = [
+    { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: dynamicSystem },
+  ]
 
   // Build conversation-aware prompt: separate prior messages from the latest reply
   const msgs = email.messages || []
@@ -2810,9 +2832,10 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
-      system: systemPrompt,
+      system: systemBlocks,
       messages: [{ role: 'user', content: userContent }],
     })
+    if (message.usage) console.log(`[Draft] Dashboard tokens — in:${message.usage.input_tokens} out:${message.usage.output_tokens} cache_create:${message.usage.cache_creation_input_tokens || 0} cache_read:${message.usage.cache_read_input_tokens || 0}`)
     let draft = message.content[0].text
 
     // Validate against HARD RULES. If violations, re-prompt ONCE with the
@@ -2822,7 +2845,7 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
       console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
       try {
         const fixMsg = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemPrompt,
+          model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemBlocks,
           messages: [
             { role: 'user', content: userContent },
             { role: 'assistant', content: draft },
