@@ -343,6 +343,82 @@ function replaceCidReferences(html, attachments, messageId, account) {
   return html
 }
 
+// ─── Attachment vision ───────────────────────────────────────────────────────
+// Fetch raw bytes for a Gmail attachment and return as standard base64
+// (Anthropic format). Returns null if anything goes wrong; caller treats that
+// as "skipped — note it in the prompt."
+async function fetchAttachmentBytes(messageId, attachmentId, account) {
+  if (!hasTokens(account)) return null
+  try {
+    const gmail = google.gmail({ version: 'v1', auth: clients[account] })
+    const { data } = await gmail.users.messages.attachments.get({
+      userId: 'me', messageId, id: attachmentId,
+    })
+    if (!data?.data) return null
+    // Gmail uses URL-safe base64 (-_); Anthropic expects standard base64 (+/).
+    return data.data.replace(/-/g, '+').replace(/_/g, '/')
+  } catch (err) {
+    console.error(`[Vision] failed to fetch attachment ${attachmentId}: ${err.message}`)
+    return null
+  }
+}
+
+// Build Anthropic multimodal content blocks for the latest inbound message's
+// attachments. Caps total payload + count so a flood of huge files can't
+// blow up the API call. Returns:
+//   { blocks: [...], summary: 'text describing what was attached and what was skipped' }
+const VISION_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+const VISION_DOC_TYPES = new Set(['application/pdf'])
+const VISION_MAX_ATTACHMENTS = 5
+const VISION_MAX_BYTES_TOTAL = 20 * 1024 * 1024 // 20 MB across all attachments
+const VISION_MAX_BYTES_PER_FILE = 5 * 1024 * 1024 // 5 MB per file
+
+async function buildAttachmentContentBlocks(message) {
+  const atts = (message?.attachments || []).slice(0, VISION_MAX_ATTACHMENTS)
+  if (!atts.length) return { blocks: [], summary: '' }
+
+  const blocks = []
+  const notes = []
+  let totalBytes = 0
+
+  for (const att of atts) {
+    const size = att.size || 0
+    const mt = (att.mimeType || '').toLowerCase()
+    const filename = att.filename || '(unnamed)'
+
+    if (!VISION_IMAGE_TYPES.has(mt) && !VISION_DOC_TYPES.has(mt)) {
+      notes.push(`- ${filename} (${mt || 'unknown type'}, ${size} bytes) — file type not viewable; tell the customer what you can if they ask about it`)
+      continue
+    }
+    if (size > VISION_MAX_BYTES_PER_FILE) {
+      notes.push(`- ${filename} (${mt}, ${size} bytes) — skipped, exceeds ${VISION_MAX_BYTES_PER_FILE} byte per-file cap`)
+      continue
+    }
+    if (totalBytes + size > VISION_MAX_BYTES_TOTAL) {
+      notes.push(`- ${filename} (${mt}, ${size} bytes) — skipped, total payload limit reached`)
+      continue
+    }
+
+    const b64 = await fetchAttachmentBytes(message.id, att.attachmentId, message.account)
+    if (!b64) {
+      notes.push(`- ${filename} — could not fetch from Gmail (token issue or transient error)`)
+      continue
+    }
+
+    if (VISION_IMAGE_TYPES.has(mt)) {
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: mt, data: b64 } })
+      notes.push(`- ${filename} (image) — visible in this message`)
+    } else {
+      blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } })
+      notes.push(`- ${filename} (PDF) — visible in this message`)
+    }
+    totalBytes += size
+  }
+
+  const summary = notes.length ? `\n\nAttachments on this email:\n${notes.join('\n')}` : ''
+  return { blocks, summary }
+}
+
 // ─── Email categorization + smart sender ─────────────────────────────────────
 function categorizeEmail({ to, subject, body }) {
   const toLower = (to || '').toLowerCase()
@@ -1910,11 +1986,19 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
 
 Return JSON only.`
 
+  // Attachment vision: if the latest inbound has images/PDFs, fetch them and
+  // attach as Anthropic multimodal blocks. The summary string gets appended
+  // to the text so the model knows what's there even when files were skipped.
+  const { blocks: attachmentBlocks, summary: attachmentSummary } = await buildAttachmentContentBlocks(latestInbound)
+  const userContent = attachmentBlocks.length
+    ? [{ type: 'text', text: userPrompt + attachmentSummary }, ...attachmentBlocks]
+    : (attachmentSummary ? userPrompt + attachmentSummary : userPrompt)
+
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1500,
     system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
+    messages: [{ role: 'user', content: userContent }],
   })
 
   const text = message.content[0].text.trim()
@@ -1929,10 +2013,11 @@ Return JSON only.`
   if (issues.length) {
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
+      // Preserve attachment blocks on retry so the model still sees the image/PDF.
       const fixMsg = await anthropic.messages.create({
         model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemPrompt,
         messages: [
-          { role: 'user', content: userPrompt },
+          { role: 'user', content: userContent },
           { role: 'assistant', content: text },
           { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations.` },
         ],
@@ -2457,11 +2542,17 @@ ${latestBody}
 Draft a reply that directly addresses the LATEST message above. Do not re-answer points that have already been resolved in the prior conversation.`
 
   try {
+    // Attachment vision: pull base64 image/PDF blocks off the latest inbound.
+    const { blocks: attachmentBlocks, summary: attachmentSummary } = await buildAttachmentContentBlocks(latestInbound)
+    const userContent = attachmentBlocks.length
+      ? [{ type: 'text', text: userPrompt + attachmentSummary }, ...attachmentBlocks]
+      : (attachmentSummary ? userPrompt + attachmentSummary : userPrompt)
+
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      messages: [{ role: 'user', content: userContent }],
     })
     let draft = message.content[0].text
 
@@ -2474,7 +2565,7 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
         const fixMsg = await anthropic.messages.create({
           model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemPrompt,
           messages: [
-            { role: 'user', content: userPrompt },
+            { role: 'user', content: userContent },
             { role: 'assistant', content: draft },
             { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations.` },
           ],
