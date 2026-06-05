@@ -319,3 +319,24 @@ create table if not exists business_reminders (
 );
 alter table business_reminders disable row level security;
 create index if not exists idx_business_reminders_due on business_reminders(due_date, status);
+
+-- ─── Live Event Info ─────────────────────────────────────────────────────────
+-- Singleton table: one row representing the current/upcoming live event.
+-- The agent loads this on every draft and uses it for Zoom links, Facebook
+-- group URLs, and day-of-event awareness.
+
+create table if not exists live_event_info (
+  id text primary key default 'current' check (id = 'current'),
+  event_name text,
+  start_date date,
+  end_date date,
+  main_zoom_url text,
+  main_session_time text,
+  vip_zoom_url text,
+  vip_session_time text,
+  main_facebook_url text,
+  vip_facebook_url text,
+  notes text,
+  updated_at timestamptz not null default now()
+);
+alter table live_event_info disable row level security;

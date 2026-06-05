@@ -733,3 +733,22 @@ export async function deleteReminder(id) {
   const r = await fetch(`/api/reminders/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete reminder') }
 }
+
+// ─── Live Event Info ──────────────────────────────────────────────────────────
+
+export async function fetchLiveEvent() {
+  const r = await fetch('/api/live-event')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load live event info')
+  return d // { info, phase }
+}
+
+export async function saveLiveEvent(fields) {
+  const r = await fetch('/api/live-event', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to save live event info')
+  return d // { info, phase }
+}

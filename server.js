@@ -1405,12 +1405,221 @@ app.delete('/api/drafts/:threadId', requireAuth, async (req, res) => {
 
 const KERRY_BRAIN_PATH = path.resolve('kerry-brain.md')
 const LEARNED_BEHAVIORS_PATH = path.resolve('learned-behaviors.md')
+const LINKS_PATH = path.resolve('links.md')
 
 function loadKerryBrain() {
   try {
     if (fs.existsSync(KERRY_BRAIN_PATH)) return fs.readFileSync(KERRY_BRAIN_PATH, 'utf8')
   } catch {}
   return ''
+}
+
+// Approved URL library. Loaded once per request (cheap fs read), so editing
+// links.md takes effect immediately on the next email draft.
+function loadLinks() {
+  try {
+    if (fs.existsSync(LINKS_PATH)) return fs.readFileSync(LINKS_PATH, 'utf8')
+  } catch {}
+  return ''
+}
+
+// Extract the set of approved URLs (https://...) from links.md so the validator
+// can reject any URL the AI invents that isn't on the list.
+function extractApprovedUrls(linksText) {
+  if (!linksText) return new Set()
+  const urls = new Set()
+  const re = /https?:\/\/[^\s)>\]]+/gi
+  let m
+  while ((m = re.exec(linksText)) !== null) {
+    urls.add(m[0].toLowerCase().replace(/[.,;:!?]+$/, ''))
+  }
+  return urls
+}
+
+// Phrases that must never appear in a draft. Each entry pairs the bad phrase
+// with what the AI should do instead. Used both in the system prompt and
+// in the post-generation validator.
+const FORBIDDEN_PHRASES = [
+  { phrase: 'have a blessed day', why: 'Religious sign-off — Kerry does not use it. Sign off with "- Kerry" or "- The Shirt School Support Team" only.' },
+  { phrase: 'blessed day', why: 'See above — sign off with "- Kerry" or "- The Shirt School Support Team" only.' },
+  { phrase: 'best regards', why: 'Too formal. Sign off with "- Kerry" or "- The Shirt School Support Team".' },
+  { phrase: 'sincerely', why: 'Too formal. Sign off with "- Kerry" or "- The Shirt School Support Team".' },
+  { phrase: 'kind regards', why: 'Too formal. Sign off with "- Kerry" or "- The Shirt School Support Team".' },
+  { phrase: 'warm regards', why: 'Too formal. Sign off with "- Kerry" or "- The Shirt School Support Team".' },
+  { phrase: 'i hope this email finds you well', why: 'Banned per Kerry-Brain. Open with "Hey [First Name]," instead.' },
+  { phrase: "please don't hesitate to reach out", why: 'Banned per Kerry-Brain. Use plain language like "Let me know if anything else comes up."' },
+  { phrase: 'to whom it may concern', why: 'Too formal. Use "Hey [First Name]," or "Hey there,".' },
+]
+
+// Load the singleton row from live_event_info. Returns null if Supabase is
+// unconfigured or the row doesn't exist yet (no event has been entered).
+async function loadLiveEventInfo() {
+  if (!supabase) return null
+  try {
+    const { data } = await supabase.from('live_event_info').select('*').eq('id', 'current').maybeSingle()
+    return data || null
+  } catch (err) {
+    console.error('[Live Event] load error:', err.message)
+    return null
+  }
+}
+
+// Compute today (Chicago) and the day-of-event status for a given row.
+// Returns one of: { phase: 'none' } | { phase: 'upcoming', daysAway, startDate }
+//                | { phase: 'in_progress', dayNumber, totalDays }
+//                | { phase: 'past', endDate }
+function getLiveEventPhase(info) {
+  if (!info?.start_date || !info?.end_date) return { phase: 'none' }
+  const today = chicagoDate(new Date())
+  if (today < info.start_date) {
+    const t = new Date(today + 'T00:00:00').getTime()
+    const s = new Date(info.start_date + 'T00:00:00').getTime()
+    const daysAway = Math.round((s - t) / (24 * 60 * 60 * 1000))
+    return { phase: 'upcoming', daysAway, startDate: info.start_date }
+  }
+  if (today > info.end_date) return { phase: 'past', endDate: info.end_date }
+  // In progress: compute day number
+  const s = new Date(info.start_date + 'T00:00:00').getTime()
+  const e = new Date(info.end_date + 'T00:00:00').getTime()
+  const t = new Date(today + 'T00:00:00').getTime()
+  const dayNumber = Math.round((t - s) / (24 * 60 * 60 * 1000)) + 1
+  const totalDays = Math.round((e - s) / (24 * 60 * 60 * 1000)) + 1
+  return { phase: 'in_progress', dayNumber, totalDays }
+}
+
+// Build the LIVE EVENT context block that gets injected into the system prompt.
+// Returns empty string if no event row is configured.
+function buildLiveEventBlock(info) {
+  if (!info || !info.event_name) return ''
+  const phase = getLiveEventPhase(info)
+  const lines = ['─── CURRENT LIVE EVENT ───']
+
+  if (phase.phase === 'none') {
+    lines.push(`Event: ${info.event_name}`)
+    lines.push('(Dates not configured — confirm with Kerry before quoting dates.)')
+  } else if (phase.phase === 'upcoming') {
+    lines.push(`Event: ${info.event_name}`)
+    lines.push(`Status: UPCOMING — starts ${phase.startDate} (${phase.daysAway} day${phase.daysAway === 1 ? '' : 's'} away)`)
+    lines.push('Note: The event has not started yet. Do not tell students to join sessions today.')
+  } else if (phase.phase === 'past') {
+    lines.push(`Event: ${info.event_name}`)
+    lines.push(`Status: PAST — ended ${phase.endDate}`)
+    lines.push('Note: This event is over. The Zoom links and Facebook groups below may no longer be active.')
+    lines.push('If a student asks about the NEXT event, direct them to https://shirtschool.com/challenge.')
+  } else {
+    lines.push(`Event: ${info.event_name}`)
+    lines.push(`Status: IN PROGRESS — Day ${phase.dayNumber} of ${phase.totalDays} (today)`)
+  }
+
+  lines.push(`Dates: ${info.start_date || '?'} to ${info.end_date || '?'}`)
+  if (info.main_session_time) lines.push(`Main session time: ${info.main_session_time}`)
+  if (info.main_zoom_url) lines.push(`Main Zoom link: ${info.main_zoom_url}`)
+  if (info.vip_session_time) lines.push(`VIP session time: ${info.vip_session_time}`)
+  if (info.vip_zoom_url) lines.push(`VIP Zoom link: ${info.vip_zoom_url}`)
+  if (info.main_facebook_url) lines.push(`Main Facebook group: ${info.main_facebook_url}`)
+  if (info.vip_facebook_url) lines.push(`VIP Facebook group (VIP attendees only): ${info.vip_facebook_url}`)
+  if (info.notes) lines.push(`Notes: ${info.notes}`)
+  lines.push('─── END LIVE EVENT ───')
+  lines.push('')
+  return lines.join('\n')
+}
+
+// Extract URLs from the current event so the validator allows them too.
+// (These URLs change monthly so we don't bake them into links.md.)
+function extractLiveEventUrls(info) {
+  if (!info) return new Set()
+  const urls = new Set()
+  for (const field of ['main_zoom_url', 'vip_zoom_url', 'main_facebook_url', 'vip_facebook_url']) {
+    const v = info[field]
+    if (typeof v === 'string') {
+      const m = v.match(/https?:\/\/[^\s)>\]]+/i)
+      if (m) urls.add(m[0].toLowerCase().replace(/[.,;:!?]+$/, ''))
+    }
+  }
+  return urls
+}
+
+// Validate a draft against the HARD RULES. Returns an array of violation
+// strings (empty if the draft is clean). Used by the draft endpoints so they
+// can re-prompt the model with the specific complaint, or surface the issues
+// to Kerry if they want to send the draft anyway.
+function validateDraftAgainstRules(draftText, linksText, eventInfo = null) {
+  if (!draftText) return []
+  const issues = []
+  const lc = draftText.toLowerCase()
+
+  // 1. Forbidden phrases
+  for (const f of FORBIDDEN_PHRASES) {
+    if (lc.includes(f.phrase)) issues.push(`Used banned phrase "${f.phrase}". ${f.why}`)
+  }
+
+  // 2. Em dashes (Unicode em dash U+2014 or " -- " ASCII pair)
+  if (draftText.includes('—')) issues.push('Contains an em dash ("—"). Use commas, periods, or rewrite the sentence.')
+  if (/\s--\s/.test(draftText)) issues.push('Contains "--" used as an em dash. Use commas, periods, or rewrite the sentence.')
+
+  // 3. Sign-off — the LAST non-empty line should be "- Kerry" or
+  //    "- The Shirt School Support Team" (case-insensitive, dash optional).
+  const lines = draftText.trimEnd().split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  const lastLine = lines.length ? lines[lines.length - 1] : ''
+  const validSignoffs = [
+    /^[-–—]?\s*kerry\s*$/i,
+    /^[-–—]?\s*the shirt school support team\s*$/i,
+    /^[-–—]?\s*shirt school support team\s*$/i,
+  ]
+  if (!validSignoffs.some((re) => re.test(lastLine))) {
+    issues.push(`Sign-off "${lastLine.slice(0, 60)}" is not allowed. Must end with exactly "- Kerry" or "- The Shirt School Support Team" on its own line.`)
+  }
+
+  // 4. Any URL must be in the approved set (links.md + live event URLs).
+  //    Case-insensitive, ignoring trailing punctuation.
+  const approved = new Set([
+    ...extractApprovedUrls(linksText),
+    ...extractLiveEventUrls(eventInfo),
+  ])
+  const urlRe = /https?:\/\/[^\s)>\]]+/gi
+  let m
+  while ((m = urlRe.exec(draftText)) !== null) {
+    const url = m[0].toLowerCase().replace(/[.,;:!?]+$/, '')
+    if (!approved.has(url)) {
+      issues.push(`Used URL "${m[0]}" which is not in the APPROVED LINKS LIBRARY (or current event). Either use an approved URL or omit the link.`)
+    }
+  }
+
+  return issues
+}
+
+// Compose the strict, end-of-prompt enforcement block. Placed at the TAIL of
+// the system prompt so the model sees these rules right before it generates.
+// (Tone/policy detail lives in kerry-brain.md; this block is just the rules
+// the model has been violating most often.)
+function buildHardRulesBlock(linksText) {
+  const forbidden = FORBIDDEN_PHRASES.map((f) => `  - "${f.phrase}"`).join('\n')
+  return [
+    '',
+    '──────────── HARD RULES — CHECK BEFORE RETURNING THE DRAFT ────────────',
+    '',
+    'SIGN-OFF: The reply MUST end with EXACTLY one of these on its own line:',
+    '  - Kerry',
+    '  - The Shirt School Support Team',
+    'Do NOT add any other closing phrase before or after it. Never use:',
+    forbidden,
+    '',
+    'OPENER: Start with "Hey [First Name]," or "Hey there," if the name is unknown.',
+    'Vary your phrasing on the second line — do NOT default to "No worries,".',
+    '',
+    'NO EM DASHES: Never use the "—" character anywhere. Use commas, periods,',
+    'or rewrite the sentence.',
+    '',
+    'LINKS: Only use URLs that appear in the APPROVED LINKS LIBRARY below.',
+    'Never invent, guess, or modify a URL. If the situation needs a link that is',
+    'not in the library, ask Kerry to add it (e.g. "I would link to that here',
+    'but I do not have an approved URL — Kerry, please add").',
+    '',
+    '─── APPROVED LINKS LIBRARY ───',
+    linksText || '(no links file loaded)',
+    '─── END APPROVED LINKS LIBRARY ───',
+    '',
+  ].join('\n')
 }
 
 // In-memory cache so loadLearnedBehaviors() stays synchronous everywhere it's called
@@ -1664,8 +1873,11 @@ async function generateDraftForSlack(thread) {
     }
   }
 
+  const linksLib = loadLinks()
+  const liveEvent = await loadLiveEventInfo()
+  const eventBlock = buildLiveEventBlock(liveEvent)
   const systemPrompt = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${feedbackContext}${eventBlock}${buildHardRulesBlock(linksLib)}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
 
@@ -1706,9 +1918,38 @@ Return JSON only.`
   })
 
   const text = message.content[0].text.trim()
-  // Strip any accidental markdown fences
   const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-  return { ...JSON.parse(clean), persona: personaName }
+  let parsed
+  try { parsed = JSON.parse(clean) } catch { parsed = { draft: clean, summary: '', confidence: 'low', confidence_reason: 'Could not parse JSON response' } }
+
+  // Validate the draft against the HARD RULES. If it violates (e.g. banned
+  // phrase, em dash, fabricated URL), do ONE re-prompt with the specific
+  // complaint. Caps at one retry so a bad response can't cause runaway cost.
+  const issues = validateDraftAgainstRules(parsed.draft || '', linksLib, liveEvent)
+  if (issues.length) {
+    console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
+    try {
+      const fixMsg = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemPrompt,
+        messages: [
+          { role: 'user', content: userPrompt },
+          { role: 'assistant', content: text },
+          { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations.` },
+        ],
+      })
+      const fixText = fixMsg.content[0].text.trim()
+      const fixClean = fixText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+      const fixed = JSON.parse(fixClean)
+      const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent)
+      if (fixIssues.length) console.log(`[Draft Validator] Slack flow STILL violating after retry: ${fixIssues.join(' | ')}`)
+      else console.log('[Draft Validator] Slack flow violations corrected on retry')
+      parsed = fixed
+    } catch (err) {
+      console.error('[Draft Validator] retry failed:', err.message)
+    }
+  }
+
+  return { ...parsed, persona: personaName }
 }
 
 function confidenceEmoji(c) {
@@ -2177,13 +2418,16 @@ app.post('/api/generate-reply', async (req, res) => {
     }
   }
 
+  const linksLib = loadLinks()
+  const liveEvent = await loadLiveEventInfo()
+  const eventBlock = buildLiveEventBlock(liveEvent)
   const systemPrompt = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
 ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}
 The email you are replying to is categorized as: ${category}
 ${feedbackContext}
-
-Write only the email body — no subject line, no "From:", no metadata. Start directly with the greeting.`
+${eventBlock}${buildHardRulesBlock(linksLib)}
+Write only the email body. No subject line, no "From:", no metadata. Start directly with the greeting.`
 
   // Build conversation-aware prompt: separate prior messages from the latest reply
   const msgs = email.messages || []
@@ -2219,7 +2463,33 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     })
-    res.json({ draft: message.content[0].text, persona: personaName })
+    let draft = message.content[0].text
+
+    // Validate against HARD RULES. If violations, re-prompt ONCE with the
+    // specific complaint. This is what stops "Have a blessed day" et al.
+    const issues = validateDraftAgainstRules(draft, linksLib, liveEvent)
+    if (issues.length) {
+      console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
+      try {
+        const fixMsg = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemPrompt,
+          messages: [
+            { role: 'user', content: userPrompt },
+            { role: 'assistant', content: draft },
+            { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations.` },
+          ],
+        })
+        const fixed = fixMsg.content[0].text
+        const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent)
+        if (fixIssues.length) console.log(`[Draft Validator] Dashboard flow STILL violating after retry: ${fixIssues.join(' | ')}`)
+        else console.log('[Draft Validator] Dashboard flow violations corrected on retry')
+        draft = fixed
+      } catch (err) {
+        console.error('[Draft Validator] retry failed:', err.message)
+      }
+    }
+
+    res.json({ draft, persona: personaName })
   } catch (error) {
     console.error('Anthropic API error:', error.message)
     res.status(500).json({ error: 'Failed to generate reply. Check your API key.' })
@@ -2574,16 +2844,41 @@ app.post('/api/slack/events', async (req, res) => {
   try {
     // Regenerate draft using original email context + edit instruction
     const meta = notif.thread_meta || {}
+    // Regeneration must still honor the brand rules + approved links library +
+    // current live event info. Previously this prompt was minimal and the AI
+    // could re-introduce forbidden phrases or fabricated URLs Kerry just removed.
+    const linksLib = loadLinks()
+    const liveEvent = await loadLiveEventInfo()
+    const eventBlock = buildLiveEventBlock(liveEvent)
+    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${eventBlock}${buildHardRulesBlock(linksLib)}`
+    const regenUserContent = `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nKerry's edit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`
     const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1500,
-      system: 'You are regenerating an email draft based on edit instructions. Return ONLY the revised email body — no subject line, no labels, no explanation, just the reply text.',
-      messages: [{
-        role: 'user',
-        content: `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nEdit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`,
-      }],
+      system: regenSystem,
+      messages: [{ role: 'user', content: regenUserContent }],
     })
-    const revisedDraft = regenMsg.content[0].text.trim()
+    let revisedDraft = regenMsg.content[0].text.trim()
+
+    // Re-validate after regeneration — Kerry's instruction could still leave
+    // the model with a banned phrase or invented URL.
+    const regenIssues = validateDraftAgainstRules(revisedDraft, linksLib, liveEvent)
+    if (regenIssues.length) {
+      console.log(`[Draft Validator] Edit-in-Slack violations: ${regenIssues.join(' | ')}`)
+      try {
+        const fixMsg = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6', max_tokens: 1500, system: regenSystem,
+          messages: [
+            { role: 'user', content: regenUserContent },
+            { role: 'assistant', content: revisedDraft },
+            { role: 'user', content: `Your revised draft violated these HARD RULES:\n${regenIssues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations.` },
+          ],
+        })
+        revisedDraft = fixMsg.content[0].text.trim()
+      } catch (err) {
+        console.error('[Draft Validator] Edit-in-Slack retry failed:', err.message)
+      }
+    }
 
     // Update slack_notifications with new draft
     await supabase.from('slack_notifications')
@@ -6021,6 +6316,26 @@ app.delete('/api/reminders/:id', requireAuth, async (req, res) => {
   const { error } = await supabase.from('business_reminders').delete().eq('id', req.params.id)
   if (error) return res.status(500).json({ error: error.message })
   res.json({ success: true })
+})
+
+// ─── Live Event Info ─────────────────────────────────────────────────────────
+
+app.get('/api/live-event', requireAuth, async (_req, res) => {
+  const info = await loadLiveEventInfo()
+  const phase = info ? getLiveEventPhase(info) : { phase: 'none' }
+  res.json({ info, phase })
+})
+
+app.put('/api/live-event', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(400).json({ error: 'No database' })
+  const allowed = ['event_name', 'start_date', 'end_date', 'main_zoom_url', 'main_session_time', 'vip_zoom_url', 'vip_session_time', 'main_facebook_url', 'vip_facebook_url', 'notes']
+  const row = { id: 'current', updated_at: new Date().toISOString() }
+  for (const f of allowed) {
+    if (req.body[f] !== undefined) row[f] = req.body[f] === '' ? null : req.body[f]
+  }
+  const { data, error } = await supabase.from('live_event_info').upsert(row, { onConflict: 'id' }).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ info: data, phase: getLiveEventPhase(data) })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────
