@@ -364,14 +364,49 @@ async function fetchAttachmentBytes(messageId, attachmentId, account) {
 }
 
 // Build Anthropic multimodal content blocks for the latest inbound message's
-// attachments. Caps total payload + count so a flood of huge files can't
-// blow up the API call. Returns:
-//   { blocks: [...], summary: 'text describing what was attached and what was skipped' }
-const VISION_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+// attachments. For images we DON'T reject by raw size — students send giant
+// design files and logos and we want the AI to see them. Instead we pipe big
+// images through sharp to downsize to ~1568px longest side at JPEG q85, which
+// reliably shrinks anything reasonable under 1MB while preserving enough
+// detail for vision to read it. PDFs still have a hard cap since they can't
+// be losslessly compressed and over-cap PDFs typically blow the request.
+const sharp = require('sharp')
+const VISION_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif'])
 const VISION_DOC_TYPES = new Set(['application/pdf'])
 const VISION_MAX_ATTACHMENTS = 5
-const VISION_MAX_BYTES_TOTAL = 20 * 1024 * 1024 // 20 MB across all attachments
-const VISION_MAX_BYTES_PER_FILE = 5 * 1024 * 1024 // 5 MB per file
+// Cap on FINAL post-compression payload across all attachments. Anthropic's
+// per-request body limit is ~32MB; we leave headroom for prompt + base64 inflation.
+const VISION_MAX_BYTES_TOTAL = 24 * 1024 * 1024
+// Per-image: anything over this gets compressed via sharp before sending.
+// Below this, pass through untouched.
+const VISION_COMPRESS_THRESHOLD = 4 * 1024 * 1024
+// Hard cap on PDF size — we don't compress PDFs, so over-cap ones get noted.
+const VISION_PDF_MAX_BYTES = 10 * 1024 * 1024
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+}
+
+// Decode base64 → run sharp resize+JPEG re-encode → re-encode base64.
+// Returns { data, mediaType, finalBytes } on success or null on failure.
+async function compressImageForVision(b64, originalMime, filename) {
+  try {
+    const buf = Buffer.from(b64, 'base64')
+    const resized = await sharp(buf, { failOn: 'none' })
+      .rotate() // honor EXIF orientation
+      .resize({ width: 1568, height: 1568, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer()
+    const newB64 = resized.toString('base64')
+    console.log(`[Vision] compressed ${filename} ${originalMime} ${formatSize(buf.length)} → image/jpeg ${formatSize(resized.length)}`)
+    return { data: newB64, mediaType: 'image/jpeg', finalBytes: resized.length }
+  } catch (err) {
+    console.error(`[Vision] compression failed for ${filename}: ${err.message}`)
+    return null
+  }
+}
 
 async function buildAttachmentContentBlocks(message) {
   const atts = (message?.attachments || []).slice(0, VISION_MAX_ATTACHMENTS)
@@ -382,20 +417,18 @@ async function buildAttachmentContentBlocks(message) {
   let totalBytes = 0
 
   for (const att of atts) {
-    const size = att.size || 0
+    const rawSize = att.size || 0
     const mt = (att.mimeType || '').toLowerCase()
     const filename = att.filename || '(unnamed)'
+    const isImage = VISION_IMAGE_TYPES.has(mt)
+    const isPdf = VISION_DOC_TYPES.has(mt)
 
-    if (!VISION_IMAGE_TYPES.has(mt) && !VISION_DOC_TYPES.has(mt)) {
-      notes.push(`- ${filename} (${mt || 'unknown type'}, ${size} bytes) — file type not viewable; tell the customer what you can if they ask about it`)
+    if (!isImage && !isPdf) {
+      notes.push(`- ${filename} (${mt || 'unknown type'}, ${formatSize(rawSize)}) — file type not viewable; tell the customer what you can if they ask about it`)
       continue
     }
-    if (size > VISION_MAX_BYTES_PER_FILE) {
-      notes.push(`- ${filename} (${mt}, ${size} bytes) — skipped, exceeds ${VISION_MAX_BYTES_PER_FILE} byte per-file cap`)
-      continue
-    }
-    if (totalBytes + size > VISION_MAX_BYTES_TOTAL) {
-      notes.push(`- ${filename} (${mt}, ${size} bytes) — skipped, total payload limit reached`)
+    if (isPdf && rawSize > VISION_PDF_MAX_BYTES) {
+      notes.push(`- ${filename} (PDF, ${formatSize(rawSize)}) — too large to view; ask the customer to send a smaller version or a screenshot of the relevant page`)
       continue
     }
 
@@ -405,14 +438,42 @@ async function buildAttachmentContentBlocks(message) {
       continue
     }
 
-    if (VISION_IMAGE_TYPES.has(mt)) {
-      blocks.push({ type: 'image', source: { type: 'base64', media_type: mt, data: b64 } })
-      notes.push(`- ${filename} (image) — visible in this message`)
+    if (isImage) {
+      // Compress when the raw file is big OR when it's a format Anthropic
+      // doesn't accept directly (HEIC from iPhone) so we get a JPEG out.
+      let dataB64 = b64
+      let mediaType = mt
+      let finalBytes = rawSize
+      const needsCompress = rawSize > VISION_COMPRESS_THRESHOLD
+        || mt === 'image/heic' || mt === 'image/heif' || mt === 'image/gif'
+      if (needsCompress) {
+        const c = await compressImageForVision(b64, mt, filename)
+        if (!c) {
+          notes.push(`- ${filename} (${mt}, ${formatSize(rawSize)}) — couldn't be processed (file may be corrupted); ask the customer to resend`)
+          continue
+        }
+        dataB64 = c.data
+        mediaType = c.mediaType
+        finalBytes = c.finalBytes
+      }
+      if (totalBytes + finalBytes > VISION_MAX_BYTES_TOTAL) {
+        notes.push(`- ${filename} (image, ${formatSize(finalBytes)}) — skipped, total payload limit reached`)
+        continue
+      }
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: dataB64 } })
+      const sizeNote = needsCompress ? `${formatSize(rawSize)} → ${formatSize(finalBytes)}` : formatSize(finalBytes)
+      notes.push(`- ${filename} (image, ${sizeNote}) — visible in this message`)
+      totalBytes += finalBytes
     } else {
+      // PDF — pass through. Already size-checked above.
+      if (totalBytes + rawSize > VISION_MAX_BYTES_TOTAL) {
+        notes.push(`- ${filename} (PDF, ${formatSize(rawSize)}) — skipped, total payload limit reached`)
+        continue
+      }
       blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } })
-      notes.push(`- ${filename} (PDF) — visible in this message`)
+      notes.push(`- ${filename} (PDF, ${formatSize(rawSize)}) — visible in this message`)
+      totalBytes += rawSize
     }
-    totalBytes += size
   }
 
   const summary = notes.length ? `\n\nAttachments on this email:\n${notes.join('\n')}` : ''
