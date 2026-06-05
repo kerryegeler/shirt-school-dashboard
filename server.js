@@ -2173,6 +2173,264 @@ function computeDiffSummary(original, final) {
   return `${ow.length}→${fw.length} words; ~${added} added, ~${removed} removed`
 }
 
+// ─── Agent tools (Phase 2) ────────────────────────────────────────────────────
+// The email agent can now ask for data BEFORE drafting. Each tool is a
+// read-only Supabase/Kit/Gmail query. The model chooses which to call; we
+// execute and feed the result back. Cap at 5 iterations to bound cost.
+
+const AGENT_TOOL_MAX_ITERATIONS = 5
+
+// ── Kit helpers ──
+// Look up a Kit subscriber by email. Returns subscriber + tags or { found: false }.
+async function kitLookupSubscriber(email) {
+  if (!process.env.KIT_API_KEY) return { error: 'Kit not configured' }
+  const e = normalizeEmail(email)
+  if (!e) return { error: 'Invalid email' }
+  try {
+    const data = await kitApiGet(`/subscribers?email_address=${encodeURIComponent(e)}`)
+    const sub = (data?.subscribers || data?.data || [])[0]
+    if (!sub) return { found: false, message: `No Kit subscriber found for ${e}` }
+    // Some V4 responses include tags in `subscriber.tags`, others require a follow-up.
+    let tags = sub.tags || []
+    if (!tags.length && sub.id) {
+      try {
+        const tagRes = await kitApiGet(`/subscribers/${sub.id}/tags`)
+        tags = (tagRes?.tags || tagRes?.data || []).map((t) => t.name || t.attributes?.name).filter(Boolean)
+      } catch (err) {
+        console.error('[Kit] tags lookup failed:', err.message)
+      }
+    } else {
+      tags = tags.map((t) => typeof t === 'string' ? t : (t.name || t.attributes?.name)).filter(Boolean)
+    }
+    return {
+      found: true,
+      id: sub.id,
+      email: sub.email_address || sub.email || e,
+      state: sub.state || 'unknown',
+      created_at: sub.created_at,
+      first_name: sub.first_name,
+      tags,
+    }
+  } catch (err) {
+    console.error('[Kit] subscriber lookup failed:', err.message)
+    return { error: err.message }
+  }
+}
+
+// Check what's been sent to a subscriber recently. Kit V4 doesn't expose a
+// clean per-subscriber delivery feed; this returns the subscriber's state +
+// recent broadcasts they're targeted by tag for. Best-effort.
+async function kitCheckRecentDeliveries(email) {
+  if (!process.env.KIT_API_KEY) return { error: 'Kit not configured' }
+  const sub = await kitLookupSubscriber(email)
+  if (!sub.found) return sub  // pass through "not found" / errors
+  try {
+    const bcasts = await kitApiGet('/broadcasts?page[size]=10')
+    const recent = (bcasts?.broadcasts || bcasts?.data || []).slice(0, 10).map((b) => ({
+      id: b.id,
+      subject: b.subject || b.attributes?.subject,
+      sent_at: b.published_at || b.sent_at || b.attributes?.published_at,
+      state: b.state || b.attributes?.state,
+    }))
+    return {
+      subscriber: { email: sub.email, state: sub.state, tags: sub.tags },
+      recent_broadcasts: recent,
+      note: 'Kit V4 does not expose per-subscriber delivery history. These are the most recent broadcasts overall — use the subscriber state + tags to reason about whether they should have received them.',
+    }
+  } catch (err) {
+    return { error: err.message }
+  }
+}
+
+// ── Supabase-backed query helpers (mirror of Kajabi/Stripe data) ──
+async function toolLookupPaymentStatus(email) {
+  if (!supabase) return { error: 'Database not configured' }
+  const e = normalizeEmail(email)
+  if (!e) return { error: 'Invalid email' }
+  try {
+    const [failed, sequences] = await Promise.all([
+      supabase.from('kajabi_payments').select('product_name, amount_cents, status, failed_at, synced_at')
+        .eq('customer_email', e).eq('status', 'failed').order('failed_at', { ascending: false }).limit(10),
+      supabase.from('payment_recovery_sequences').select('id, status, product_name, started_at, notes')
+        .eq('customer_email', e).order('started_at', { ascending: false }).limit(10),
+    ])
+    return {
+      failed_payments: (failed.data || []).map((p) => ({
+        product: p.product_name,
+        amount: p.amount_cents ? `$${(p.amount_cents / 100).toFixed(2)}` : null,
+        failed_at: p.failed_at,
+      })),
+      recovery_sequences: (sequences.data || []).map((s) => ({
+        id: s.id,
+        status: s.status,
+        product: s.product_name,
+        started_at: s.started_at,
+        notes: s.notes,
+      })),
+    }
+  } catch (err) {
+    return { error: err.message }
+  }
+}
+
+// ── Tool definitions (Anthropic schema) ──
+const AGENT_TOOLS = [
+  {
+    name: 'lookup_customer_purchases',
+    description: 'Look up everything a customer has purchased from Shirt School (Kajabi + Stripe revenue). Use when you need to know what products/courses they have, before claiming they have or don\'t have access. The current sender\'s purchases are already in the CUSTOMER CONTEXT block — only use this tool for OTHER emails the sender mentions, or for a fresh sender with no dossier.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Customer email address to look up' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'lookup_payment_status',
+    description: 'Check if a customer has failed payments or is in an active payment recovery sequence. Use when a customer asks about billing, "did my payment go through", or claims a charge issue.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Customer email address to check' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'lookup_kit_subscriber',
+    description: 'Look up a subscriber in Kit (our email marketing platform). Returns whether they exist, their subscription state (active/cancelled/bounced), tags (which sequences/lists they\'re on), and signup date. Use this whenever a customer says they\'re not receiving emails, asks to be added/removed from a list, or claims a subscription issue. The tags tell you which Shirt School lists they\'re on.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Email address to look up in Kit' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'check_kit_recent_deliveries',
+    description: 'Get the subscriber\'s state + the 10 most recent broadcasts Shirt School has sent. Use this to help diagnose "I\'m not getting your emails" — combined with the subscriber\'s tags, you can reason about whether they SHOULD have received recent broadcasts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Subscriber email to check' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'search_past_threads',
+    description: 'Search past Gmail threads from or to a given email address across all connected Shirt School inboxes. Use when you need broader context than the dossier shows, or when the customer references a past conversation. Returns subjects, dates, message counts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Email address to search threads for' },
+      },
+      required: ['email'],
+    },
+  },
+]
+
+// ── Dispatcher: maps a tool name + input → result. Always returns a value
+// (never throws); errors are wrapped so the model sees them and adapts.
+async function executeAgentTool(name, input) {
+  try {
+    switch (name) {
+      case 'lookup_customer_purchases': {
+        const purchases = await lookupCustomerPurchases(input.email)
+        return { email: normalizeEmail(input.email), purchases }
+      }
+      case 'lookup_payment_status':
+        return await toolLookupPaymentStatus(input.email)
+      case 'lookup_kit_subscriber':
+        return await kitLookupSubscriber(input.email)
+      case 'check_kit_recent_deliveries':
+        return await kitCheckRecentDeliveries(input.email)
+      case 'search_past_threads': {
+        const threads = await lookupRecentThreadsByEmail(input.email)
+        return { email: normalizeEmail(input.email), threads }
+      }
+      default:
+        return { error: `Unknown tool: ${name}` }
+    }
+  } catch (err) {
+    console.error(`[Agent Tool] ${name} threw:`, err.message)
+    return { error: err.message }
+  }
+}
+
+// ── Agent loop: send → if tool_use, execute → loop. Caches across iterations
+// because the system + tools array stay identical (Anthropic key is the
+// prefix bytes). Returns { finalText, conversation, usage }.
+async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, label = 'agent' }) {
+  const conversation = [{ role: 'user', content: userContent }]
+  let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheCreate = 0
+  let finalText = ''
+  let iterations = 0
+
+  while (iterations < AGENT_TOOL_MAX_ITERATIONS) {
+    iterations += 1
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      system: systemBlocks,
+      tools: AGENT_TOOLS,
+      messages: conversation,
+    })
+    if (response.usage) {
+      totalIn += response.usage.input_tokens || 0
+      totalOut += response.usage.output_tokens || 0
+      totalCacheRead += response.usage.cache_read_input_tokens || 0
+      totalCacheCreate += response.usage.cache_creation_input_tokens || 0
+    }
+
+    // Append assistant turn verbatim (preserves tool_use ids for the next round).
+    conversation.push({ role: 'assistant', content: response.content })
+
+    if (response.stop_reason !== 'tool_use') {
+      // Final answer reached. Find the text block and return.
+      const textBlock = response.content.find((b) => b.type === 'text')
+      finalText = textBlock?.text || ''
+      break
+    }
+
+    // Extract all tool_use blocks, execute in parallel, build a single user
+    // message with tool_result blocks (one per tool_use).
+    const toolUses = response.content.filter((b) => b.type === 'tool_use')
+    const results = await Promise.all(toolUses.map(async (tu) => {
+      console.log(`[Agent Tool] ${label} iter ${iterations}: ${tu.name}(${JSON.stringify(tu.input).slice(0, 120)})`)
+      const out = await executeAgentTool(tu.name, tu.input || {})
+      return {
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: JSON.stringify(out).slice(0, 8000), // hard cap per result
+      }
+    }))
+    conversation.push({ role: 'user', content: results })
+  }
+
+  if (iterations >= AGENT_TOOL_MAX_ITERATIONS && !finalText) {
+    console.warn(`[Agent] ${label} hit max iterations (${AGENT_TOOL_MAX_ITERATIONS}) without final text`)
+    // Fallback: ask the model for the final draft with no more tools.
+    const finalResp = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      system: systemBlocks,
+      messages: [...conversation, { role: 'user', content: 'You\'ve used enough tool calls. Now write the final reply. No more tool calls.' }],
+    })
+    if (finalResp.usage) {
+      totalIn += finalResp.usage.input_tokens || 0
+      totalOut += finalResp.usage.output_tokens || 0
+    }
+    finalText = finalResp.content.find((b) => b.type === 'text')?.text || ''
+    conversation.push({ role: 'assistant', content: finalResp.content })
+  }
+
+  console.log(`[Agent] ${label} done — iters:${iterations} in:${totalIn} out:${totalOut} cache_create:${totalCacheCreate} cache_read:${totalCacheRead}`)
+  return { finalText, conversation, usage: { totalIn, totalOut, totalCacheRead, totalCacheCreate } }
+}
+
 // ─── Slack workflow helpers ───────────────────────────────────────────────────
 
 async function generateDraftForSlack(thread) {
@@ -2263,37 +2521,32 @@ Return JSON only.`
     ? [{ type: 'text', text: userPrompt + attachmentSummary }, ...attachmentBlocks]
     : (attachmentSummary ? userPrompt + attachmentSummary : userPrompt)
 
-  const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1500,
-    system: systemBlocks,
-    messages: [{ role: 'user', content: userContent }],
+  // Phase 2: agent tool loop. The model may call lookup_kit_subscriber,
+  // lookup_payment_status, etc. before drafting. Loop caps at 5 iterations.
+  const { finalText: text, conversation } = await draftWithToolLoop({
+    systemBlocks, userContent, maxTokens: 1500, label: `slack/${thread.threadId?.slice(-8) || 'unknown'}`,
   })
-  if (message.usage) console.log(`[Draft] Slack tokens — in:${message.usage.input_tokens} out:${message.usage.output_tokens} cache_create:${message.usage.cache_creation_input_tokens || 0} cache_read:${message.usage.cache_read_input_tokens || 0}`)
 
-  const text = message.content[0].text.trim()
-  const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+  const clean = text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
   let parsed
   try { parsed = JSON.parse(clean) } catch { parsed = { draft: clean, summary: '', confidence: 'low', confidence_reason: 'Could not parse JSON response' } }
 
   // Validate the draft against the HARD RULES. If it violates (e.g. banned
   // phrase, em dash, fabricated URL), do ONE re-prompt with the specific
-  // complaint. Caps at one retry so a bad response can't cause runaway cost.
+  // complaint. The retry continues the same conversation (preserving any tool
+  // calls the model already made) so we don't waste those lookups.
   const issues = validateDraftAgainstRules(parsed.draft || '', linksLib, liveEvent)
   if (issues.length) {
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
-      // Preserve attachment blocks on retry so the model still sees the image/PDF.
-      // Reuse the same systemBlocks so the retry hits the same prompt cache.
       const fixMsg = await anthropic.messages.create({
         model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemBlocks,
         messages: [
-          { role: 'user', content: userContent },
-          { role: 'assistant', content: text },
-          { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations.` },
+          ...conversation,
+          { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations. No more tool calls.` },
         ],
       })
-      const fixText = fixMsg.content[0].text.trim()
+      const fixText = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
       const fixClean = fixText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
       const fixed = JSON.parse(fixClean)
       const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent)
@@ -2829,14 +3082,11 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
       ? [{ type: 'text', text: userPrompt + attachmentSummary }, ...attachmentBlocks]
       : (attachmentSummary ? userPrompt + attachmentSummary : userPrompt)
 
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: systemBlocks,
-      messages: [{ role: 'user', content: userContent }],
+    // Phase 2: agent tool loop. Same tools available as the Slack flow.
+    const { finalText: initialDraft, conversation } = await draftWithToolLoop({
+      systemBlocks, userContent, maxTokens: 1024, label: `dashboard/${(email.threadId || email.id || '').slice(-8)}`,
     })
-    if (message.usage) console.log(`[Draft] Dashboard tokens — in:${message.usage.input_tokens} out:${message.usage.output_tokens} cache_create:${message.usage.cache_creation_input_tokens || 0} cache_read:${message.usage.cache_read_input_tokens || 0}`)
-    let draft = message.content[0].text
+    let draft = initialDraft
 
     // Validate against HARD RULES. If violations, re-prompt ONCE with the
     // specific complaint. This is what stops "Have a blessed day" et al.
@@ -2847,12 +3097,11 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
         const fixMsg = await anthropic.messages.create({
           model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemBlocks,
           messages: [
-            { role: 'user', content: userContent },
-            { role: 'assistant', content: draft },
-            { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations.` },
+            ...conversation,
+            { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations. No more tool calls.` },
           ],
         })
-        const fixed = fixMsg.content[0].text
+        const fixed = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
         const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent)
         if (fixIssues.length) console.log(`[Draft Validator] Dashboard flow STILL violating after retry: ${fixIssues.join(' | ')}`)
         else console.log('[Draft Validator] Dashboard flow violations corrected on retry')
