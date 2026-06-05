@@ -4,12 +4,12 @@ import EmailAgent from './modules/email-agent/EmailAgent.jsx'
 import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
 import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import ContentBoard from './modules/content-board/ContentBoard.jsx'
-import ChallengeLauncher from './modules/challenge-launcher/ChallengeLauncher.jsx'
 import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
 import SalesAnalytics from './modules/sales-analytics/SalesAnalytics.jsx'
 import Reminders from './modules/reminders/Reminders.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
+import LiveEventModal from './components/LiveEventModal.jsx'
 
 export default function App() {
   // dashboardUser: undefined = checking, null = not logged in, object = logged in
@@ -17,6 +17,7 @@ export default function App() {
   const [authState, setAuthState] = useState(null)
   const [activeModule, setActiveModule] = useState('email-agent')
   const [unreadCount, setUnreadCount] = useState(0)
+  const [liveEventOpen, setLiveEventOpen] = useState(false)
 
   const isAuthCallback = window.location.pathname === '/auth/callback'
 
@@ -101,6 +102,7 @@ export default function App() {
           unreadCount={unreadCount}
           accountStatus={authState.accounts || {}}
           onDisconnect={handleDisconnect}
+          onOpenLiveEvent={() => setLiveEventOpen(true)}
         />
         <main className="app-main">
           {activeModule === 'email-agent' && (
@@ -112,18 +114,20 @@ export default function App() {
           {activeModule === 'ai-feedback' && <FeedbackTab />}
           {activeModule === 'content-agent' && <ContentAgent />}
           {activeModule === 'content-board' && <ContentBoard />}
-          {activeModule === 'challenge-launcher' && <ChallengeLauncher />}
           {activeModule === 'payment-recovery' && <PaymentRecovery />}
           {activeModule === 'sales-analytics' && <SalesAnalytics />}
           {activeModule === 'reminders' && <Reminders />}
         </main>
       </div>
 
+      {liveEventOpen && <LiveEventModal onClose={() => setLiveEventOpen(false)} />}
+
       {/* Mobile menu launcher (pill in the bottom-center) + sections sheet */}
       <MobileMenu
         activeModule={activeModule}
         onSelect={(id) => setActiveModule(id)}
         unreadCount={unreadCount}
+        onOpenLiveEvent={() => setLiveEventOpen(true)}
       />
     </>
   )
@@ -136,13 +140,12 @@ const MOBILE_SECTIONS = [
   { id: 'ai-feedback', label: 'AI Feedback', short: 'Feedback' },
   { id: 'content-agent', label: 'Content Agent', short: 'Content' },
   { id: 'content-board', label: 'Content Board', short: 'Board' },
-  { id: 'challenge-launcher', label: 'Challenge Launcher', short: 'Launch' },
   { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
   { id: 'sales-analytics', label: 'Sales Analytics', short: 'Sales' },
   { id: 'reminders', label: 'Reminders', short: 'Reminders' },
 ]
 
-function MobileMenu({ activeModule, onSelect, unreadCount }) {
+function MobileMenu({ activeModule, onSelect, unreadCount, onOpenLiveEvent }) {
   const [open, setOpen] = useState(false)
   const active = MOBILE_SECTIONS.find((s) => s.id === activeModule) || MOBILE_SECTIONS[0]
 
@@ -188,6 +191,12 @@ function MobileMenu({ activeModule, onSelect, unreadCount }) {
                   <span className="mobile-menu-card-label">{s.label}</span>
                 </button>
               ))}
+              <button
+                className="mobile-menu-card"
+                onClick={() => { onOpenLiveEvent?.(); setOpen(false) }}
+              >
+                <span className="mobile-menu-card-label">📅 Live Event</span>
+              </button>
             </div>
           </div>
         </div>

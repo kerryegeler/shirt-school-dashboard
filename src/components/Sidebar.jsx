@@ -27,14 +27,6 @@ const IconBoard = () => (
   </svg>
 )
 
-const IconRocket = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 2c1.5-1.5 4-2 4-2s-.5 2.5-2 4L8 7 5 10l-1.5.5.5-1.5L7 6l2-4z" />
-    <circle cx="10" cy="6" r="1" fill="currentColor" stroke="none" />
-    <path d="M5 10c-1 1-1.5 2.5-1 3 .5.5 2 0 3-1" />
-  </svg>
-)
-
 const IconCard = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1" y="3" width="14" height="10" rx="2" />
@@ -61,18 +53,25 @@ const IconClock = () => (
   </svg>
 )
 
+const IconCalendar = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1.5" y="2.5" width="13" height="12" rx="1.5" />
+    <path d="M1.5 6h13" />
+    <path d="M5 1v3M11 1v3" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
   { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: false },
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
-  { id: 'challenge-launcher', label: 'Challenge Launcher', icon: IconRocket, comingSoon: false },
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
   { id: 'sales-analytics', label: 'Sales Analytics', icon: IconChartBar, comingSoon: false },
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
 ]
 
-export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect }) {
+export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect, onOpenLiveEvent }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
@@ -100,6 +99,16 @@ export default function Sidebar({ activeModule, onSelectModule, unreadCount, acc
             </div>
           )
         })}
+
+        <div className="sidebar-section-label" style={{ marginTop: 16 }}>Settings</div>
+        <div
+          className="sidebar-item"
+          onClick={() => onOpenLiveEvent?.()}
+          title="Configure current live event info the AI uses"
+        >
+          <span className="sidebar-item-icon"><IconCalendar /></span>
+          Live Event
+        </div>
       </nav>
 
       <div className="sidebar-footer">
