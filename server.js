@@ -1724,11 +1724,13 @@ async function lookupCustomerPurchases(email) {
   const key = normalizeEmail(email)
   if (!key) return []
   try {
+    // revenue_entries mirrors successful kajabi_payments (source='kajabi'),
+    // so exclude those here or every Kajabi purchase shows up twice.
     const [kajabi, revenue] = await Promise.all([
       supabase.from('kajabi_payments').select('product_name, amount_cents, status, type, failed_at, synced_at, currency')
         .eq('customer_email', key).order('synced_at', { ascending: false }).limit(20),
       supabase.from('revenue_entries').select('product_name, amount_cents, received_at, source, description, currency')
-        .eq('customer_email', key).order('received_at', { ascending: false }).limit(20),
+        .eq('customer_email', key).neq('source', 'kajabi').order('received_at', { ascending: false }).limit(20),
     ])
     const purchases = []
     for (const r of kajabi.data || []) {
@@ -1754,7 +1756,17 @@ async function lookupCustomerPurchases(email) {
       })
     }
     purchases.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
-    return purchases.slice(0, 15)
+    // Safety dedupe: same product + amount + calendar day = same purchase,
+    // even if it arrived via two sources (e.g. Stripe charge + Kajabi record).
+    const seen = new Set()
+    const deduped = purchases.filter((p) => {
+      const day = p.date ? String(p.date).slice(0, 10) : ''
+      const k = `${(p.product || '').toLowerCase()}|${p.amountCents}|${day}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    return deduped.slice(0, 15)
   } catch (err) {
     console.error('[Customer] purchase lookup error:', err.message)
     return []
@@ -1871,7 +1883,7 @@ async function buildCustomerDossier(email, currentThreadId = null) {
 // strings (empty if the draft is clean). Used by the draft endpoints so they
 // can re-prompt the model with the specific complaint, or surface the issues
 // to Kerry if they want to send the draft anyway.
-function validateDraftAgainstRules(draftText, linksText, eventInfo = null) {
+function validateDraftAgainstRules(draftText, linksText, eventInfo = null, learnedUrls = null) {
   if (!draftText) return []
   const issues = []
   const lc = draftText.toLowerCase()
@@ -1898,11 +1910,12 @@ function validateDraftAgainstRules(draftText, linksText, eventInfo = null) {
     issues.push(`Sign-off "${lastLine.slice(0, 60)}" is not allowed. Must end with exactly "- Kerry" or "- The Shirt School Support Team" on its own line.`)
   }
 
-  // 4. Any URL must be in the approved set (links.md + live event URLs).
-  //    Case-insensitive, ignoring trailing punctuation.
+  // 4. Any URL must be in the approved set: links.md + live event URLs +
+  //    URLs Kerry has himself used in edited/sent replies (learned links).
   const approved = new Set([
     ...extractApprovedUrls(linksText),
     ...extractLiveEventUrls(eventInfo),
+    ...(learnedUrls || []),
   ])
   const urlRe = /https?:\/\/[^\s)>\]]+/gi
   let m
@@ -1916,12 +1929,47 @@ function validateDraftAgainstRules(draftText, linksText, eventInfo = null) {
   return issues
 }
 
+// URLs Kerry has used in his own final (edited or approved) replies. If Kerry
+// put a URL in an email, it's approved by definition — without this, the
+// validator would strip the very links Kerry keeps adding back in, actively
+// fighting his feedback. Cached 5 minutes.
+let learnedUrlsCache = { at: 0, urls: new Set() }
+async function fetchLearnedUrls() {
+  if (!supabase) return new Set()
+  if (Date.now() - learnedUrlsCache.at < 5 * 60 * 1000) return learnedUrlsCache.urls
+  try {
+    const { data } = await supabase.from('ai_feedback')
+      .select('final_version')
+      .in('action', ['edited', 'approved'])
+      .order('created_at', { ascending: false })
+      .limit(150)
+    const urls = new Set()
+    const re = /https?:\/\/[^\s)>\]]+/gi
+    for (const row of data || []) {
+      let m
+      while ((m = re.exec(row.final_version || '')) !== null) {
+        urls.add(m[0].toLowerCase().replace(/[.,;:!?]+$/, ''))
+      }
+    }
+    learnedUrlsCache = { at: Date.now(), urls }
+    return urls
+  } catch (err) {
+    console.error('[Learned URLs] fetch failed:', err.message)
+    return learnedUrlsCache.urls
+  }
+}
+
 // Compose the strict, end-of-prompt enforcement block. Placed at the TAIL of
 // the system prompt so the model sees these rules right before it generates.
 // (Tone/policy detail lives in kerry-brain.md; this block is just the rules
 // the model has been violating most often.)
-function buildHardRulesBlock(linksText) {
+function buildHardRulesBlock(linksText, learnedUrls = null) {
   const forbidden = FORBIDDEN_PHRASES.map((f) => `  - "${f.phrase}"`).join('\n')
+  const learned = learnedUrls && learnedUrls.size
+    ? ['', '─── ADDITIONAL APPROVED LINKS (Kerry has used these in recent replies) ───',
+       ...[...learnedUrls].slice(0, 30).map((u) => `- ${u}`),
+       '─── END ADDITIONAL LINKS ───']
+    : []
   return [
     '',
     '──────────── HARD RULES — CHECK BEFORE RETURNING THE DRAFT ────────────',
@@ -1946,6 +1994,7 @@ function buildHardRulesBlock(linksText) {
     '─── APPROVED LINKS LIBRARY ───',
     linksText || '(no links file loaded)',
     '─── END APPROVED LINKS LIBRARY ───',
+    ...learned,
     '',
   ].join('\n')
 }
@@ -2187,9 +2236,21 @@ async function kitLookupSubscriber(email) {
   const e = normalizeEmail(email)
   if (!e) return { error: 'Invalid email' }
   try {
-    const data = await kitApiGet(`/subscribers?email_address=${encodeURIComponent(e)}`)
-    const sub = (data?.subscribers || data?.data || [])[0]
-    if (!sub) return { found: false, message: `No Kit subscriber found for ${e}` }
+    let data = await kitApiGet(`/subscribers?email_address=${encodeURIComponent(e)}`)
+    let sub = (data?.subscribers || data?.data || [])[0]
+    if (!sub) {
+      // Kit V4 defaults to active subscribers only — retry across all states
+      // (cancelled/bounced/complained) before concluding they don't exist.
+      data = await kitApiGet(`/subscribers?email_address=${encodeURIComponent(e)}&status=all`)
+      sub = (data?.subscribers || data?.data || [])[0]
+    }
+    if (!sub) {
+      console.log(`[Kit] subscriber lookup: no result for ${e} (checked all statuses)`)
+      return {
+        found: false,
+        message: `No Kit subscriber found for ${e} after checking all statuses. CAUTION: this could mean they subscribed under a different email address. Do NOT tell the customer they aren't set up to receive emails — say you're double-checking on our end, and ask if they might have signed up with a different address.`,
+      }
+    }
     // Some V4 responses include tags in `subscriber.tags`, others require a follow-up.
     let tags = sub.tags || []
     if (!tags.length && sub.id) {
@@ -2213,7 +2274,10 @@ async function kitLookupSubscriber(email) {
     }
   } catch (err) {
     console.error('[Kit] subscriber lookup failed:', err.message)
-    return { error: err.message }
+    return {
+      error: err.message,
+      guidance: 'The lookup FAILED — this tells you nothing about whether they are subscribed. Do NOT make any claims about their subscription status in the draft. Say you are checking on our end.',
+    }
   }
 }
 
@@ -2235,7 +2299,7 @@ async function kitCheckRecentDeliveries(email) {
     return {
       subscriber: { email: sub.email, state: sub.state, tags: sub.tags },
       recent_broadcasts: recent,
-      note: 'Kit V4 does not expose per-subscriber delivery history. These are the most recent broadcasts overall — use the subscriber state + tags to reason about whether they should have received them.',
+      note: 'Kit V4 does not expose per-subscriber delivery history. These are the most recent broadcasts overall. IMPORTANT: if the subscriber state is "active", they ARE being sent our emails — the most likely cause of "I\'m not getting emails" is their spam/promotions folder, NOT our system. Only an inactive/cancelled/bounced state suggests a problem on our side.',
     }
   } catch (err) {
     return { error: err.message }
@@ -2732,7 +2796,7 @@ async function generateDraftForSlack(thread) {
   let feedbackContext = ''
   if (supabase) {
     const { data: feedbackRows } = await supabase.from('ai_feedback')
-      .select('original_draft, final_version, diff_summary, action, category')
+      .select('original_draft, final_version, diff_summary, action, category, notes')
       .in('action', ['edited', 'approved'])
       .order('created_at', { ascending: false })
       .limit(20)
@@ -2744,12 +2808,22 @@ async function generateDraftForSlack(thread) {
         return `Example ${i + 1} [${f.category}, edited]:\nOriginal: "${f.original_draft.slice(0, 200)}"\nKerry changed to: "${f.final_version.slice(0, 200)}"${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
       }).join('\n\n---\n\n')
       feedbackContext = `\n\nKerry's recent feedback on AI drafts (learn from these patterns):\n${examples}\n`
+      // Kerry's typed edit instructions are standing orders — surface them
+      // explicitly so the next draft on a similar email follows them.
+      const instructions = feedbackRows
+        .map((f) => f.notes)
+        .filter((n) => n && n.startsWith("Kerry's edit instruction:"))
+        .map((n) => `- ${n.replace("Kerry's edit instruction: ", '')}`)
+      if (instructions.length) {
+        feedbackContext += `\nKerry's recent edit instructions — treat these as STANDING RULES for similar emails:\n${[...new Set(instructions)].slice(0, 10).join('\n')}\n`
+      }
     }
   }
 
   const linksLib = loadLinks()
   const liveEvent = await loadLiveEventInfo()
   const eventBlock = buildLiveEventBlock(liveEvent)
+  const learnedUrls = await fetchLearnedUrls()
   // Customer dossier: who is this sender, what have they bought, what threads
   // do we already have with them. Empty string for cold leads.
   const senderEmail = normalizeEmail(thread.from)
@@ -2763,7 +2837,7 @@ async function generateDraftForSlack(thread) {
   // Same shape used on the initial call AND the validator retry so both share
   // the cache hit.
   const staticSystem = `You are an AI email assistant for Shirt School. Draft a reply and assess the email.
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib)}`
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib, learnedUrls)}`
   const dynamicSystem = `${feedbackContext}${customerBlock}${eventBlock}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
 {"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
@@ -2785,11 +2859,14 @@ Return ONLY valid JSON (no markdown fences, no explanation) in exactly this form
         return `${who} (${when}):\n${stripEmailQuotes(m.bodyText || '').slice(0, 500)}`
       }).join('\n\n')
     : ''
+  // Quoted context: what the customer is replying TO. Vital when they reply to
+  // a Kit broadcast — that broadcast isn't in the Gmail thread, only quoted here.
+  const quotedContext = extractQuotedContext(latestInbound?.bodyText || '')
 
   const userPrompt = `Category: ${category}. Reply as ${personaName}.
 
 Subject: ${thread.subject}
-${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}
+${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}${quotedContext ? `\n--- THE EMAIL THEY ARE REPLYING TO (quoted inside their message — read this to understand what they're responding to) ---\n${quotedContext}\n` : ''}
 --- LATEST MESSAGE TO REPLY TO ---
 From: ${latestInbound?.senderName || thread.name} <${latestInbound?.from || thread.from}>
 Date: ${new Date(latestInbound?.timestamp || thread.timestamp).toLocaleString()}
@@ -2797,7 +2874,7 @@ Date: ${new Date(latestInbound?.timestamp || thread.timestamp).toLocaleString()}
 ${latestBody}
 ---
 
-Draft a reply that directly addresses the LATEST message above. The prior conversation is context — do not re-answer points that have already been resolved.
+Draft a reply that directly addresses the LATEST message above. The prior conversation and quoted email are context — use them to understand what the customer is referring to, but do not re-answer points already resolved.
 
 Return JSON only.`
 
@@ -2824,7 +2901,7 @@ Return JSON only.`
   // phrase, em dash, fabricated URL), do ONE re-prompt with the specific
   // complaint. The retry continues the same conversation (preserving any tool
   // calls the model already made) so we don't waste those lookups.
-  const issues = validateDraftAgainstRules(parsed.draft || '', linksLib, liveEvent)
+  const issues = validateDraftAgainstRules(parsed.draft || '', linksLib, liveEvent, learnedUrls)
   if (issues.length) {
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
@@ -2838,7 +2915,7 @@ Return JSON only.`
       const fixText = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
       const fixClean = fixText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
       const fixed = JSON.parse(fixClean)
-      const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent)
+      const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent, learnedUrls)
       if (fixIssues.length) console.log(`[Draft Validator] Slack flow STILL violating after retry: ${fixIssues.join(' | ')}`)
       else console.log('[Draft Validator] Slack flow violations corrected on retry')
       parsed = fixed
@@ -2876,6 +2953,36 @@ function stripEmailQuotes(text) {
   // Trim trailing blank lines
   while (result.length && !result[result.length - 1].trim()) result.pop()
   return result.join('\n').trim()
+}
+
+// The inverse of stripEmailQuotes: return the QUOTED portion of an email body.
+// Critical for replies to Kit broadcasts — the Gmail thread contains only the
+// customer's reply, and the email they're responding to exists ONLY as quoted
+// text inside it. Stripping it left the AI with "I didn't get the link??" and
+// zero idea what link they meant.
+function extractQuotedContext(text, maxChars = 1500) {
+  if (!text) return ''
+  const lines = text.split('\n')
+  let quoteStart = -1
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim()
+    if (
+      /^>/.test(trimmed) ||
+      /^On .{10,} wrote:/.test(trimmed) ||
+      /^-{5,}/.test(trimmed) ||
+      /^_{5,}/.test(trimmed) ||
+      /^From:\s+\S+/.test(trimmed) ||
+      /^Sent:\s+\S+/.test(trimmed) ||
+      /^(写道|schrieb|écrit):/.test(trimmed)
+    ) { quoteStart = i; break }
+  }
+  if (quoteStart === -1) return ''
+  const quoted = lines.slice(quoteStart)
+    .map((l) => l.replace(/^>+\s?/, ''))  // un-prefix "> " markers
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return quoted.slice(0, maxChars)
 }
 
 function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false, emailBody = '') {
@@ -3301,7 +3408,7 @@ app.post('/api/generate-reply', async (req, res) => {
   let feedbackContext = ''
   if (supabase) {
     const { data: feedbackRows } = await supabase.from('ai_feedback')
-      .select('original_draft, final_version, diff_summary')
+      .select('original_draft, final_version, diff_summary, notes')
       .eq('category', category)
       .order('created_at', { ascending: false })
       .limit(10)
@@ -3313,12 +3420,20 @@ app.post('/api/generate-reply', async (req, res) => {
           return `Example ${i + 1}:\nOriginal: ${orig}\nKerry changed to: ${final}${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
         }).join('\n\n---\n\n')
       }`
+      const instructions = feedbackRows
+        .map((f) => f.notes)
+        .filter((n) => n && n.startsWith("Kerry's edit instruction:"))
+        .map((n) => `- ${n.replace("Kerry's edit instruction: ", '')}`)
+      if (instructions.length) {
+        feedbackContext += `\n\nKerry's recent edit instructions — treat these as STANDING RULES for similar emails:\n${[...new Set(instructions)].slice(0, 10).join('\n')}`
+      }
     }
   }
 
   const linksLib = loadLinks()
   const liveEvent = await loadLiveEventInfo()
   const eventBlock = buildLiveEventBlock(liveEvent)
+  const learnedUrls = await fetchLearnedUrls()
   // Customer dossier for the dashboard Generate button. Same as Slack flow.
   const senderEmail = normalizeEmail(email.from)
   const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, email.threadId || email.id) : ''
@@ -3326,7 +3441,7 @@ app.post('/api/generate-reply', async (req, res) => {
   // Static (cached) vs dynamic split — see generateDraftForSlack for rationale.
   const staticSystem = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
 
-${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib)}`
+${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib, learnedUrls)}`
   const dynamicSystem = `
 The email you are replying to is categorized as: ${category}
 ${feedbackContext}${customerBlock}
@@ -3350,11 +3465,12 @@ Write only the email body. No subject line, no "From:", no metadata. Start direc
         return `${who} (${when}):\n${stripEmailQuotes(m.bodyText || '').slice(0, 500)}`
       }).join('\n\n')
     : ''
+  const quotedContext = extractQuotedContext(latestInbound?.bodyText || email.bodyText || email.body || '')
 
   const userPrompt = `Draft a reply to the LATEST message in this email thread.
 
 Subject: ${email.subject}
-${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}
+${historyText ? `\n--- PRIOR CONVERSATION (for context only) ---\n${historyText}\n` : ''}${quotedContext ? `\n--- THE EMAIL THEY ARE REPLYING TO (quoted inside their message — read this to understand what they're responding to) ---\n${quotedContext}\n` : ''}
 --- LATEST MESSAGE TO REPLY TO ---
 From: ${latestInbound?.senderName || email.name} <${latestInbound?.from || email.from}>
 Date: ${new Date(latestInbound?.timestamp || email.timestamp || Date.now()).toLocaleString()}
@@ -3362,7 +3478,7 @@ Date: ${new Date(latestInbound?.timestamp || email.timestamp || Date.now()).toLo
 ${latestBody}
 ---
 
-Draft a reply that directly addresses the LATEST message above. Do not re-answer points that have already been resolved in the prior conversation.`
+Draft a reply that directly addresses the LATEST message above. The prior conversation and quoted email are context — use them to understand what the customer is referring to, but do not re-answer points already resolved.`
 
   try {
     // Attachment vision: pull base64 image/PDF blocks off the latest inbound.
@@ -3380,7 +3496,7 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
 
     // Validate against HARD RULES. If violations, re-prompt ONCE with the
     // specific complaint. This is what stops "Have a blessed day" et al.
-    const issues = validateDraftAgainstRules(draft, linksLib, liveEvent)
+    const issues = validateDraftAgainstRules(draft, linksLib, liveEvent, learnedUrls)
     if (issues.length) {
       console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
       try {
@@ -3392,7 +3508,7 @@ Draft a reply that directly addresses the LATEST message above. Do not re-answer
           ],
         })
         const fixed = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
-        const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent)
+        const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent, learnedUrls)
         if (fixIssues.length) console.log(`[Draft Validator] Dashboard flow STILL violating after retry: ${fixIssues.join(' | ')}`)
         else console.log('[Draft Validator] Dashboard flow violations corrected on retry')
         draft = fixed
@@ -3772,12 +3888,13 @@ app.post('/api/slack/events', async (req, res) => {
     const linksLib = loadLinks()
     const liveEvent = await loadLiveEventInfo()
     const eventBlock = buildLiveEventBlock(liveEvent)
+    const learnedUrls = await fetchLearnedUrls()
     // Customer dossier for the Edit-in-Slack regen. Pulls the sender from
     // the original notification's thread_meta so the regen still knows who
     // this person is and what they've bought.
     const senderEmail = normalizeEmail(meta.from)
     const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, notif.thread_id) : ''
-    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib)}`
+    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib, learnedUrls)}`
     const regenUserContent = `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nKerry's edit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`
     const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
@@ -3789,7 +3906,7 @@ app.post('/api/slack/events', async (req, res) => {
 
     // Re-validate after regeneration — Kerry's instruction could still leave
     // the model with a banned phrase or invented URL.
-    const regenIssues = validateDraftAgainstRules(revisedDraft, linksLib, liveEvent)
+    const regenIssues = validateDraftAgainstRules(revisedDraft, linksLib, liveEvent, learnedUrls)
     if (regenIssues.length) {
       console.log(`[Draft Validator] Edit-in-Slack violations: ${regenIssues.join(' | ')}`)
       try {
@@ -3825,6 +3942,7 @@ app.post('/api/slack/events', async (req, res) => {
         thread_id: notif.thread_id, category: notif.category || 'general',
         original_draft: currentDraft, final_version: revisedDraft,
         diff_summary: computeDiffSummary(currentDraft, revisedDraft), action: 'edited',
+        notes: `Kerry's edit instruction: ${instruction.slice(0, 500)}`,
         created_at: new Date().toISOString(),
       })
     } catch {}
