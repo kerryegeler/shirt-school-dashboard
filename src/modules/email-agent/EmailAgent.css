@@ -2420,14 +2420,27 @@
     min-height: 72px;
   }
 
-  /* Archive button always visible on mobile (no hover) */
+  /* Archive button always visible on mobile (no hover) + thumb-sized */
   .email-archive-btn {
     opacity: 1;
+    width: var(--touch-target);
+    height: var(--touch-target);
   }
 
-  /* Draft textarea */
+  /* Folder delete: always visible on mobile, bigger hit area */
+  .folder-delete-btn {
+    opacity: 1;
+    width: 36px;
+    height: 36px;
+  }
+
+  /* Draft textarea + safe-area so the editor isn't hidden behind the
+     floating menu pill / home indicator on notched phones */
   .draft-textarea {
     min-height: 160px;
+  }
+  .draft-section {
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
   }
 }
 

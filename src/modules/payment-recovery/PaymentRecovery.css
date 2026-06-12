@@ -178,28 +178,28 @@
 }
 
 .pr-badge--active {
-  background: rgba(245,166,35,0.15);
-  color: #f5a623;
+  background: var(--warning-dim);
+  color: var(--warning);
 }
 
 .pr-badge--paid {
-  background: rgba(52,199,89,0.15);
-  color: #34c759;
+  background: var(--success-dim);
+  color: var(--success);
 }
 
 .pr-badge--cancelled {
   background: rgba(142,142,147,0.15);
-  color: #8e8e93;
+  color: var(--text-tertiary);
 }
 
 .pr-badge--warn {
-  background: rgba(255,107,107,0.15);
-  color: #ff6b6b;
+  background: var(--danger-dim);
+  color: var(--danger);
 }
 
 .pr-badge--pending {
-  background: rgba(108,99,255,0.15);
-  color: #8b83ff;
+  background: var(--pending-dim);
+  color: var(--pending);
 }
 
 /* ─── Drawer ───────────────────────────────────────────────────── */
@@ -357,4 +357,16 @@
   .pr-row--5col { grid-template-columns: 1fr; }
   .pr-actions { justify-content: flex-start; margin-top: 4px; }
   .pr-drawer { width: 100vw; }
+
+  /* Stacked rows read as cards on mobile — without this they blur into one
+     unscannable column since the header labels are hidden */
+  .pr-row {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  .pr-amount { font-weight: 600; font-size: var(--fs-md); }
+  .pr-actions .btn { min-height: var(--touch-target); }
 }

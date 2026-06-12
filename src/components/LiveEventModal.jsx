@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { fetchLiveEvent, saveLiveEvent } from '../services/api.js'
+import Modal from './ui/Modal.jsx'
 
 // Live Event singleton config. Edited monthly when Kerry sets up the new
 // challenge. The data is injected into every AI email draft so the agent
@@ -73,16 +74,21 @@ export default function LiveEventModal({ onClose }) {
   })()
 
   return (
-    <div className="live-event-overlay" onClick={() => !saving && onClose()}>
-      <div className="live-event-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="live-event-header">
-          <h3>Live Event Info</h3>
-          <button className="icon-btn" onClick={onClose} disabled={saving}>✕</button>
-        </div>
-
-        <div className={`live-event-banner ${phaseBanner.cls}`}>{phaseBanner.text}</div>
-
-        <div className="live-event-body">
+    <Modal
+      title="Live Event Info"
+      onClose={onClose}
+      closeDisabled={saving}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving || loading}>
+            {saved ? '✓ Saved' : saving ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <div className={`live-event-banner ${phaseBanner.cls}`}>{phaseBanner.text}</div>
+      <div className="live-event-body">
           {loading ? (
             <div style={{ padding: 24, textAlign: 'center', opacity: 0.7 }}>Loading…</div>
           ) : (
@@ -142,15 +148,7 @@ export default function LiveEventModal({ onClose }) {
               {error && <div className="live-event-error">{error}</div>}
             </>
           )}
-        </div>
-
-        <div className="live-event-footer">
-          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving || loading}>
-            {saved ? '✓ Saved' : saving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
       </div>
-    </div>
+    </Modal>
   )
 }

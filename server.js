@@ -22,8 +22,11 @@ const app = express()
 const PORT = process.env.PORT || 3001
 
 app.use(cors())
-app.use(express.json({ limit: '5mb' }))
-app.use(express.urlencoded({ extended: true, limit: '5mb' }))
+// Capture the raw request body alongside parsing — Slack/Stripe signature
+// verification computes an HMAC over the exact bytes received.
+const captureRawBody = (req, _res, buf) => { req.rawBody = buf.toString('utf8') }
+app.use(express.json({ limit: '5mb', verify: captureRawBody }))
+app.use(express.urlencoded({ extended: true, limit: '5mb', verify: captureRawBody }))
 
 // ─── Dashboard session (signed HTTP-only cookie, no DB needed) ────────────────
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production'
@@ -105,6 +108,53 @@ function requireDashboardAuth(req, res, next) {
 }
 
 app.use(requireDashboardAuth)
+
+// ─── Webhook signature verification ──────────────────────────────────────────
+// The public endpoints above accept requests from Slack/Stripe/Kajabi. Without
+// these checks, anyone who discovers the URL could fake a Slack button click
+// (approve + send an email) or inject bogus payment webhooks. Each verifier
+// falls back to ACCEPT with a startup warning when its secret env var isn't
+// set, so adding the secrets can happen after deploy without breakage.
+
+function verifySlackSignature(req) {
+  const secret = process.env.SLACK_SIGNING_SECRET
+  if (!secret) return true
+  const ts = req.headers['x-slack-request-timestamp']
+  const sig = req.headers['x-slack-signature']
+  if (!ts || !sig || !req.rawBody) return false
+  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false // replay guard
+  const expected = 'v0=' + crypto.createHmac('sha256', secret).update(`v0:${ts}:${req.rawBody}`).digest('hex')
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig))
+  } catch {
+    return false
+  }
+}
+
+function verifyStripeSignature(req) {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET
+  if (!secret) return true
+  const header = req.headers['stripe-signature'] || ''
+  let t = null
+  const v1s = []
+  for (const kv of header.split(',')) {
+    const [k, v] = kv.split('=')
+    if (k === 't') t = v
+    else if (k === 'v1') v1s.push(v)
+  }
+  if (!t || !v1s.length || !req.rawBody) return false
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false
+  const expected = crypto.createHmac('sha256', secret).update(`${t}.${req.rawBody}`).digest('hex')
+  return v1s.some((v1) => {
+    try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)) } catch { return false }
+  })
+}
+
+function verifyKajabiKey(req) {
+  const key = process.env.KAJABI_WEBHOOK_KEY
+  if (!key) return true
+  return req.query.key === key
+}
 
 // ─── Hardcoded target accounts ───────────────────────────────────────────────
 // The app ALWAYS fetches from and sends on behalf of these two accounts only.
@@ -1185,6 +1235,13 @@ app.post('/api/emails/send', requireAuth, async (req, res) => {
             sent_at: new Date().toISOString(),
           }, { onConflict: 'thread_id' })
           console.log(`[Dashboard Send] Marked thread ${email.threadId} handled through msg ${latestInboundMsgId}`)
+          // Cancel any pending Slack approval timer — Kerry already replied
+          // from the dashboard; the timer would double-send.
+          if (approvalTimers.has(email.threadId)) {
+            clearTimeout(approvalTimers.get(email.threadId))
+            approvalTimers.delete(email.threadId)
+            console.log(`[Dashboard Send] Cancelled pending approval timer for ${email.threadId}`)
+          }
         }
       } catch (err) {
         console.error('[Dashboard Send] Could not mark thread handled:', err.message)
@@ -1956,6 +2013,74 @@ async function fetchLearnedUrls() {
   } catch (err) {
     console.error('[Learned URLs] fetch failed:', err.message)
     return learnedUrlsCache.urls
+  }
+}
+
+// Feedback context for draft prompts, cached 5 min per category-scope.
+// Previously each pipeline ran its own ai_feedback query on EVERY draft
+// (the Slack poll alone caused ~60 queries/hour) with three subtly different
+// formats; this is the single shared implementation.
+const feedbackContextCache = new Map() // scope ('all' | category) → { at, text }
+const FEEDBACK_CONTEXT_TTL_MS = 5 * 60 * 1000
+
+function invalidateFeedbackCaches() {
+  feedbackContextCache.clear()
+  learnedUrlsCache.at = 0
+}
+
+async function buildFeedbackContext(category = null) {
+  if (!supabase) return ''
+  const scope = category || 'all'
+  const cached = feedbackContextCache.get(scope)
+  if (cached && Date.now() - cached.at < FEEDBACK_CONTEXT_TTL_MS) return cached.text
+
+  let q = supabase.from('ai_feedback')
+    .select('original_draft, final_version, diff_summary, action, category, notes')
+    .in('action', ['edited', 'approved'])
+    .order('created_at', { ascending: false })
+    .limit(20)
+  if (category) q = q.eq('category', category)
+  const { data: rows } = await q
+
+  let text = ''
+  if (rows?.length) {
+    const examples = rows.map((f, i) => {
+      if (f.action === 'approved') {
+        return `Example ${i + 1} [${f.category}, approved as-is]: "${f.original_draft.slice(0, 200)}"`
+      }
+      return `Example ${i + 1} [${f.category}, edited]:\nOriginal: "${f.original_draft.slice(0, 200)}"\nKerry changed to: "${f.final_version.slice(0, 200)}"${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
+    }).join('\n\n---\n\n')
+    text = `\n\nKerry's recent feedback on AI drafts (learn from these patterns):\n${examples}\n`
+    const instructions = rows
+      .map((f) => f.notes)
+      .filter((n) => n && n.startsWith("Kerry's edit instruction:"))
+      .map((n) => `- ${n.replace("Kerry's edit instruction: ", '')}`)
+    if (instructions.length) {
+      text += `\nKerry's recent edit instructions — treat these as STANDING RULES for similar emails:\n${[...new Set(instructions)].slice(0, 10).join('\n')}\n`
+    }
+  }
+  feedbackContextCache.set(scope, { at: Date.now(), text })
+  return text
+}
+
+// Everything the draft pipelines need beyond the email itself. Single source
+// so the Slack flow, dashboard flow, and Edit-in-Slack regen can't drift.
+async function buildDraftContext({ category = null, senderEmail = null, threadId = null } = {}) {
+  const [liveEvent, learnedUrls, feedbackContext, customerBlock] = await Promise.all([
+    loadLiveEventInfo(),
+    fetchLearnedUrls(),
+    buildFeedbackContext(category),
+    senderEmail ? buildCustomerDossier(senderEmail, threadId) : Promise.resolve(''),
+  ])
+  return {
+    kerryBrain: loadKerryBrain(),
+    learnedBehaviors: loadLearnedBehaviors(),
+    linksLib: loadLinks(),
+    liveEvent,
+    eventBlock: buildLiveEventBlock(liveEvent),
+    learnedUrls,
+    feedbackContext,
+    customerBlock,
   }
 }
 
@@ -2753,10 +2878,15 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, 
     const results = await Promise.all(toolUses.map(async (tu) => {
       console.log(`[Agent Tool] ${label} iter ${iterations}: ${tu.name}(${JSON.stringify(tu.input).slice(0, 120)})`)
       const out = await executeAgentTool(tu.name, tu.input || {}, { threadId })
+      let payload = JSON.stringify(out)
+      if (payload.length > 8000) {
+        // Tell the model the data is incomplete instead of silently cutting it
+        payload = payload.slice(0, 7900) + '... [TRUNCATED — result exceeded size limit, treat as partial data]'
+      }
       return {
         type: 'tool_result',
         tool_use_id: tu.id,
-        content: JSON.stringify(out).slice(0, 8000), // hard cap per result
+        content: payload,
       }
     }))
     conversation.push({ role: 'user', content: results })
@@ -2786,48 +2916,11 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, 
 // ─── Slack workflow helpers ───────────────────────────────────────────────────
 
 async function generateDraftForSlack(thread) {
-  const kerryBrain = loadKerryBrain()
-  const learnedBehaviors = loadLearnedBehaviors()
-  console.log(`[Slack Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
   const category = thread.category
   const personaName = PERSONA_NAMES[category] || 'Kerry'
-
-  // Inject last 20 feedback entries so the AI learns from patterns
-  let feedbackContext = ''
-  if (supabase) {
-    const { data: feedbackRows } = await supabase.from('ai_feedback')
-      .select('original_draft, final_version, diff_summary, action, category, notes')
-      .in('action', ['edited', 'approved'])
-      .order('created_at', { ascending: false })
-      .limit(20)
-    if (feedbackRows?.length) {
-      const examples = feedbackRows.map((f, i) => {
-        if (f.action === 'approved') {
-          return `Example ${i + 1} [${f.category}, approved as-is]: "${f.original_draft.slice(0, 200)}"`
-        }
-        return `Example ${i + 1} [${f.category}, edited]:\nOriginal: "${f.original_draft.slice(0, 200)}"\nKerry changed to: "${f.final_version.slice(0, 200)}"${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
-      }).join('\n\n---\n\n')
-      feedbackContext = `\n\nKerry's recent feedback on AI drafts (learn from these patterns):\n${examples}\n`
-      // Kerry's typed edit instructions are standing orders — surface them
-      // explicitly so the next draft on a similar email follows them.
-      const instructions = feedbackRows
-        .map((f) => f.notes)
-        .filter((n) => n && n.startsWith("Kerry's edit instruction:"))
-        .map((n) => `- ${n.replace("Kerry's edit instruction: ", '')}`)
-      if (instructions.length) {
-        feedbackContext += `\nKerry's recent edit instructions — treat these as STANDING RULES for similar emails:\n${[...new Set(instructions)].slice(0, 10).join('\n')}\n`
-      }
-    }
-  }
-
-  const linksLib = loadLinks()
-  const liveEvent = await loadLiveEventInfo()
-  const eventBlock = buildLiveEventBlock(liveEvent)
-  const learnedUrls = await fetchLearnedUrls()
-  // Customer dossier: who is this sender, what have they bought, what threads
-  // do we already have with them. Empty string for cold leads.
-  const senderEmail = normalizeEmail(thread.from)
-  const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, thread.threadId) : ''
+  const { kerryBrain, learnedBehaviors, linksLib, liveEvent, eventBlock, learnedUrls, feedbackContext, customerBlock } =
+    await buildDraftContext({ senderEmail: normalizeEmail(thread.from), threadId: thread.threadId })
+  console.log(`[Slack Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
 
   // Split system prompt for Anthropic prompt caching:
   //   staticSystem  — kerry-brain + learned-behaviors + hard-rules + links
@@ -3221,6 +3314,20 @@ async function sendApprovedEmail(threadId) {
       return
     }
 
+    // Atomic claim: flip approved → sending so a concurrent caller (double
+    // Slack click, startup resend racing a timer) can't send the same email
+    // twice. Only one UPDATE can match status='approved'.
+    if (supabase) {
+      const { data: claimed } = await supabase.from('slack_notifications')
+        .update({ status: 'sending' })
+        .eq('thread_id', threadId).eq('status', 'approved')
+        .select('thread_id')
+      if (!claimed?.length) {
+        console.log(`[Slack Send] Skipping — another sender already claimed thread ${threadId}`)
+        return
+      }
+    }
+
     const meta = notif.thread_meta || {}
     const sendFrom = meta.defaultFrom || notif.account
     console.log(`[Slack Send] Sending from=${sendFrom} to=${meta.from} (${meta.fromName})`)
@@ -3321,6 +3428,13 @@ async function sendApprovedEmail(threadId) {
   } catch (err) {
     const errDetail = err.response?.data ? JSON.stringify(err.response.data) : ''
     console.error(`[Slack Send] ✗ Error for thread ${threadId}: ${err.message} ${errDetail}`)
+    // Release the 'sending' claim so Kerry can retry (approve again / startup resend)
+    if (supabase) {
+      await supabase.from('slack_notifications')
+        .update({ status: 'approved' })
+        .eq('thread_id', threadId).eq('status', 'sending')
+        .then(() => {}, () => {})
+    }
     if (slackClient && notif?.channel_id && notif?.slack_ts) {
       await slackClient.chat.postMessage({
         channel: notif.channel_id, thread_ts: notif.slack_ts,
@@ -3332,7 +3446,12 @@ async function sendApprovedEmail(threadId) {
 
 function scheduleApprovalSend(threadId, delayMs) {
   if (approvalTimers.has(threadId)) clearTimeout(approvalTimers.get(threadId))
-  const timer = setTimeout(() => sendApprovedEmail(threadId), delayMs)
+  // Self-cleaning: remove the Map entry the moment the timer fires, so entries
+  // can't accumulate when sendApprovedEmail exits early (wrong status, etc.)
+  const timer = setTimeout(() => {
+    approvalTimers.delete(threadId)
+    sendApprovedEmail(threadId)
+  }, delayMs)
   approvalTimers.set(threadId, timer)
 }
 
@@ -3351,26 +3470,39 @@ async function runSlackPoll() {
 
       for (const t of threads) {
         try {
+          // Cheap metadata pass first: figure out whether there's a NEW inbound
+          // message before paying for a full-thread fetch. Previously every
+          // poll fetched 20 full threads (bodies + attachments) every 3 min
+          // even when nothing changed.
+          const metaRes = await gmail.users.threads.get({
+            userId: 'me', id: t.id, format: 'metadata',
+            metadataHeaders: ['From', 'Message-ID', 'Date'],
+          })
+          const metaMsgs = metaRes.data.messages || []
+          const getH = (m, name) => m.payload?.headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || ''
+          const isOurs = (from) => TARGET_ACCOUNTS.some((a) => (from || '').toLowerCase().includes(a.toLowerCase()))
+          const inboundMeta = [...metaMsgs].reverse().find((m) =>
+            !isOurs(getH(m, 'From')) && !(m.labelIds || []).includes('SENT'))
+          if (!inboundMeta) continue // no inbound messages — nothing to notify
+          if (Number(inboundMeta.internalDate || 0) < cutoff) continue
+
+          const latestMsgId = getH(inboundMeta, 'Message-ID') || inboundMeta.id
+          const notif = await getSlackNotification(t.id)
+          if (notif?.last_notified_message_id === latestMsgId) continue
+
+          // New inbound message — NOW fetch the full thread for drafting
           const threadRes = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' })
           const thread = buildThreadObject(threadRes.data, account)
           if (!thread) continue
 
-          if (new Date(thread.timestamp).getTime() < cutoff) continue
-
           // Skip Kajabi billing notifications — Payment Recovery handles those separately
           if (isKajabiNotificationThread(thread)) continue
 
-          // Find the latest inbound (non-outgoing) message in the thread
+          // Re-derive the message id from the full thread (authoritative)
           const latestInbound = (thread.messages || []).filter((m) => !m.isOutgoing).at(-1)
-          if (!latestInbound) continue // no inbound messages — nothing to notify
+          if (!latestInbound) continue
 
-          const latestMsgId = latestInbound.messageId || latestInbound.id
-
-          // Check if we've already notified on this specific message
-          const notif = await getSlackNotification(t.id)
-          if (notif?.last_notified_message_id === latestMsgId) continue
-
-          await postEmailToSlack(thread, latestMsgId)
+          await postEmailToSlack(thread, latestInbound.messageId || latestInbound.id)
           await new Promise((r) => setTimeout(r, 800)) // Rate limit guard
         } catch (err) {
           console.error(`[Slack] Error processing thread ${t.id}:`, err.message)
@@ -3399,44 +3531,10 @@ app.post('/api/generate-reply', async (req, res) => {
   if (!email || !category) return res.status(400).json({ error: 'Missing email or category' })
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured' })
 
-  const kerryBrain = loadKerryBrain()
-  const learnedBehaviors = loadLearnedBehaviors()
-  console.log(`[Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
   const personaName = PERSONA_NAMES[category] || 'Kerry'
-
-  // Fetch last 10 feedback examples for this category to improve drafts
-  let feedbackContext = ''
-  if (supabase) {
-    const { data: feedbackRows } = await supabase.from('ai_feedback')
-      .select('original_draft, final_version, diff_summary, notes')
-      .eq('category', category)
-      .order('created_at', { ascending: false })
-      .limit(10)
-    if (feedbackRows?.length) {
-      feedbackContext = `\n\nHere are recent examples where Kerry edited your AI drafts. Learn from these patterns:\n\n${
-        feedbackRows.map((f, i) => {
-          const orig = f.original_draft.slice(0, 300)
-          const final = f.final_version.slice(0, 300)
-          return `Example ${i + 1}:\nOriginal: ${orig}\nKerry changed to: ${final}${f.diff_summary ? `\n(${f.diff_summary})` : ''}`
-        }).join('\n\n---\n\n')
-      }`
-      const instructions = feedbackRows
-        .map((f) => f.notes)
-        .filter((n) => n && n.startsWith("Kerry's edit instruction:"))
-        .map((n) => `- ${n.replace("Kerry's edit instruction: ", '')}`)
-      if (instructions.length) {
-        feedbackContext += `\n\nKerry's recent edit instructions — treat these as STANDING RULES for similar emails:\n${[...new Set(instructions)].slice(0, 10).join('\n')}`
-      }
-    }
-  }
-
-  const linksLib = loadLinks()
-  const liveEvent = await loadLiveEventInfo()
-  const eventBlock = buildLiveEventBlock(liveEvent)
-  const learnedUrls = await fetchLearnedUrls()
-  // Customer dossier for the dashboard Generate button. Same as Slack flow.
-  const senderEmail = normalizeEmail(email.from)
-  const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, email.threadId || email.id) : ''
+  const { kerryBrain, learnedBehaviors, linksLib, liveEvent, eventBlock, learnedUrls, feedbackContext, customerBlock } =
+    await buildDraftContext({ category, senderEmail: normalizeEmail(email.from), threadId: email.threadId || email.id })
+  console.log(`[Draft] Injecting learned behaviors: ${learnedBehaviors ? learnedBehaviors.length + ' bytes' : 'EMPTY — no learned behaviors loaded'}`)
 
   // Static (cached) vs dynamic split — see generateDraftForSlack for rationale.
   const staticSystem = `You are an AI email assistant for Shirt School. Your job is to draft email replies on behalf of Kerry or the Shirt School Support Team.
@@ -3527,6 +3625,10 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
 // ─── Slack actions endpoint ───────────────────────────────────────────────────
 
 app.post('/api/slack/actions', async (req, res) => {
+  if (!verifySlackSignature(req)) {
+    console.warn('[Security] Rejected /api/slack/actions request with bad/missing Slack signature')
+    return res.status(401).send()
+  }
   res.status(200).send() // Respond to Slack immediately (3s timeout requirement)
 
   let payload
@@ -3575,6 +3677,7 @@ app.post('/api/slack/actions', async (req, res) => {
               diff_summary: 'Approved without changes', action: 'approved',
               created_at: new Date().toISOString(),
             })
+            invalidateFeedbackCaches()
           } catch {}
         }
       }
@@ -3809,6 +3912,10 @@ app.post('/api/slack/actions', async (req, res) => {
 // ─── Slack Events endpoint (for conversational thread editing) ────────────────
 
 app.post('/api/slack/events', async (req, res) => {
+  if (!verifySlackSignature(req)) {
+    console.warn('[Security] Rejected /api/slack/events request with bad/missing Slack signature')
+    return res.status(401).send()
+  }
   const body = req.body || {}
 
   // Slack URL verification challenge (sent once when you configure the endpoint)
@@ -3885,16 +3992,9 @@ app.post('/api/slack/events', async (req, res) => {
     // Regeneration must still honor the brand rules + approved links library +
     // current live event info. Previously this prompt was minimal and the AI
     // could re-introduce forbidden phrases or fabricated URLs Kerry just removed.
-    const linksLib = loadLinks()
-    const liveEvent = await loadLiveEventInfo()
-    const eventBlock = buildLiveEventBlock(liveEvent)
-    const learnedUrls = await fetchLearnedUrls()
-    // Customer dossier for the Edit-in-Slack regen. Pulls the sender from
-    // the original notification's thread_meta so the regen still knows who
-    // this person is and what they've bought.
-    const senderEmail = normalizeEmail(meta.from)
-    const customerBlock = senderEmail ? await buildCustomerDossier(senderEmail, notif.thread_id) : ''
-    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib, learnedUrls)}`
+    const { linksLib, liveEvent, eventBlock, learnedUrls, feedbackContext, customerBlock } =
+      await buildDraftContext({ category: notif.category, senderEmail: normalizeEmail(meta.from), threadId: notif.thread_id })
+    const regenSystem = `You are regenerating an email draft based on Kerry's edit instructions. Return ONLY the revised email body. No subject line, no labels, no explanation, just the reply text.\n${feedbackContext}${customerBlock}${eventBlock}${buildHardRulesBlock(linksLib, learnedUrls)}`
     const regenUserContent = `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nKerry's edit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`
     const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
@@ -3945,6 +4045,7 @@ app.post('/api/slack/events', async (req, res) => {
         notes: `Kerry's edit instruction: ${instruction.slice(0, 500)}`,
         created_at: new Date().toISOString(),
       })
+      invalidateFeedbackCaches()
     } catch {}
 
     // Post revised draft back to Slack thread with all 4 action buttons
@@ -4001,6 +4102,7 @@ app.post('/api/feedback', requireAuth, async (req, res) => {
       created_at: new Date().toISOString(),
     })
     if (error) return res.status(500).json({ error: error.message })
+    invalidateFeedbackCaches()
   }
   res.json({ success: true, diffSummary })
 
@@ -5848,6 +5950,10 @@ function flattenForKeywords(obj, depth = 0) {
 }
 
 app.post('/api/kajabi/webhook', async (req, res) => {
+  if (!verifyKajabiKey(req)) {
+    console.warn('[Security] Rejected /api/kajabi/webhook request with bad/missing key param')
+    return res.status(401).send()
+  }
   res.status(200).send() // Always ack quickly so Kajabi doesn't retry
   if (!supabase) return
 
@@ -6384,6 +6490,10 @@ async function backfillStripeRevenue(daysBack = 90) {
 // alone isn't enough — we must filter at the event level. charge.succeeded is
 // the single source of truth and matches what the /v1/charges backfill imports.
 app.post('/api/stripe/webhook', async (req, res) => {
+  if (!verifyStripeSignature(req)) {
+    console.warn('[Security] Rejected /api/stripe/webhook request with bad/missing Stripe signature')
+    return res.status(401).send()
+  }
   res.status(200).send()
   if (!supabase) return
   const event = req.body || {}
@@ -7146,6 +7256,12 @@ if (fs.existsSync(distPath)) {
 async function init() {
   console.log('\nShirt School Dashboard starting...')
 
+  // Webhook security status — each missing secret means that endpoint accepts
+  // unsigned requests (see verifySlackSignature / verifyStripeSignature / verifyKajabiKey)
+  if (!process.env.SLACK_SIGNING_SECRET) console.warn('  ⚠ SLACK_SIGNING_SECRET not set — /api/slack/* accept UNSIGNED requests. Copy it from Slack app settings → Basic Information.')
+  if (!process.env.STRIPE_WEBHOOK_SECRET) console.warn('  ⚠ STRIPE_WEBHOOK_SECRET not set — /api/stripe/webhook accepts UNSIGNED requests. Copy from Stripe dashboard → Webhooks.')
+  if (!process.env.KAJABI_WEBHOOK_KEY) console.warn('  ⚠ KAJABI_WEBHOOK_KEY not set — /api/kajabi/webhook accepts requests without a key. Set a random value and append ?key=<value> to the webhook URL in Kajabi.')
+
   if (supabase) {
     console.log('  Supabase: connected')
 
@@ -7237,9 +7353,19 @@ async function init() {
   const connected = connectedAccounts()
   console.log('  Connected:', connected.length ? connected.join(', ') : 'none')
 
-  // Memory usage monitor — logs every 10 minutes so Railway logs show any leaks
+  // Memory usage monitor — logs every 10 minutes so Railway logs show any
+  // leaks, and WARNS when RSS growth exceeds ~50MB/hour so a slow leak is
+  // visible before Railway OOM-kills the process.
+  let lastMemSample = { rss: process.memoryUsage().rss, at: Date.now() }
   setInterval(() => {
-    console.log('[Memory]', JSON.stringify(process.memoryUsage()))
+    const mem = process.memoryUsage()
+    console.log('[Memory]', JSON.stringify(mem))
+    const hours = (Date.now() - lastMemSample.at) / 3600000
+    const growthMbPerHour = ((mem.rss - lastMemSample.rss) / (1024 * 1024)) / hours
+    if (growthMbPerHour > 50) {
+      console.warn(`[Memory] ⚠ RSS growing at ~${Math.round(growthMbPerHour)}MB/hour — possible leak (caches, timers).`)
+    }
+    lastMemSample = { rss: mem.rss, at: Date.now() }
   }, 10 * 60 * 1000)
 
   // Restore learned behaviors from Supabase (survives Railway deploys), then rebuild if needed

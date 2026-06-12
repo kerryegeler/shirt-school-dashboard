@@ -28,7 +28,7 @@
   /* Text */
   --text-primary:  #f0f0f0;
   --text-secondary:#b2b2b2;
-  --text-tertiary: #6e6e6e;
+  --text-tertiary: #8a8a8a; /* was #6e6e6e — bumped for WCAG contrast on dark bg */
 
   /* Border */
   --border:        #262626;
@@ -40,11 +40,38 @@
   --cat-sponsorship-bg:  #271a00;
   --cat-sponsorship-text:#f5a623;
   --cat-general-bg:      #1e1e1e;
-  --cat-general-text:    #666666;
+  --cat-general-text:    #8a8a8a;
 
-  /* Status */
-  --green:  #30d158;
-  --red:    #ff453a;
+  /* Status — the ONLY source of truth for semantic colors. Modules previously
+     hardcoded their own shades (#34d399 vs #34c759 for "success", #8b83ff for
+     "pending", #ff6b6b for errors); always use these tokens instead. */
+  --green:       #30d158;
+  --red:         #ff453a;
+  --success:     #30d158;
+  --success-dim: rgba(48, 209, 88, 0.15);
+  --danger:      #ff453a;
+  --danger-dim:  rgba(255, 69, 58, 0.12);
+  --warning:     #f5a623;
+  --warning-dim: rgba(245, 166, 35, 0.15);
+  --info:        #5b9cf6;
+  --info-dim:    rgba(91, 156, 246, 0.15);
+  --pending:     #8b83ff;
+  --pending-dim: rgba(139, 131, 255, 0.15);
+
+  /* Typography scale — use these instead of ad-hoc px sizes */
+  --fs-xs:   12px;  /* labels, badges, meta */
+  --fs-sm:   13px;  /* body-secondary, table cells */
+  --fs-md:   15px;  /* body, inputs, buttons */
+  --fs-lg:   18px;  /* section/panel headings */
+  --fs-xl:   22px;  /* page titles */
+
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
 
   /* Misc */
   --radius-sm: 6px;
@@ -52,6 +79,14 @@
   --radius-lg: 16px;
   --shadow-sm: 0 1px 6px rgba(0,0,0,0.5);
   --shadow-md: 0 8px 40px rgba(0,0,0,0.7);
+
+  /* Z-index layers — modals previously used conflicting ad-hoc values */
+  --z-drawer:  300;
+  --z-modal:   500;
+  --z-toast:   700;
+
+  /* Touch target floor for mobile */
+  --touch-target: 44px;
 
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
@@ -384,10 +419,183 @@ input, textarea, select {
 .btn-send:hover { background: var(--orange-hover); }
 .btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
+.btn-danger {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid rgba(255, 69, 58, 0.3);
+}
+.btn-danger:hover { background: rgba(255, 69, 58, 0.2); }
+.btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .btn svg {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
+}
+
+/* Keyboard-visible focus everywhere. Replaces the scattered `outline: none`
+   declarations that left keyboard users with no focus indicator. */
+:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none;
+  border-color: var(--orange) !important;
+}
+
+/* ─── Shared status badges ──────────────────────────────────────── */
+/* Two sizes, semantic colors from tokens. Use these instead of per-module
+   badge classes with hardcoded hex. */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status-badge--lg { padding: 4px 12px; font-size: var(--fs-sm); }
+.status-badge--success { background: var(--success-dim); color: var(--success); }
+.status-badge--danger  { background: var(--danger-dim);  color: var(--danger); }
+.status-badge--warning { background: var(--warning-dim); color: var(--warning); }
+.status-badge--info    { background: var(--info-dim);    color: var(--info); }
+.status-badge--pending { background: var(--pending-dim); color: var(--pending); }
+.status-badge--neutral { background: var(--bg-elevated); color: var(--text-secondary); }
+
+/* ─── Shared modal shell (used by components/ui/Modal.jsx) ──────── */
+.ui-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.ui-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ui-modal--wide { max-width: 760px; }
+
+.ui-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ui-modal-header h3 {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.ui-modal-close {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+.ui-modal-close:hover { background: var(--bg-elevated); color: var(--text-primary); }
+
+.ui-modal-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.ui-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .ui-modal-overlay { padding: 0; align-items: stretch; }
+  .ui-modal {
+    max-width: 100%;
+    max-height: 100dvh;
+    height: 100%;
+    border-radius: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ─── Toasts ────────────────────────────────────────────────────── */
+.toast-stack {
+  position: fixed;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  align-items: center;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 10px 16px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  pointer-events: auto;
+  animation: toast-in 0.2s ease;
+  max-width: min(440px, calc(100vw - 32px));
+}
+
+.toast--success { border-color: rgba(48, 209, 88, 0.4); }
+.toast--danger  { border-color: rgba(255, 69, 58, 0.4); }
+
+.toast-undo-btn {
+  color: var(--orange);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.toast-undo-btn:hover { background: var(--orange-dim); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 768px) {
+  /* Clear the floating mobile menu pill */
+  .toast-stack { bottom: calc(140px + env(safe-area-inset-bottom)); }
 }
 
 /* ─── Category Badge ─────────────────────────────────────────────── */

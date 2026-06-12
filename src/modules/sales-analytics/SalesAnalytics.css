@@ -172,6 +172,25 @@
 }
 
 /* ─── Monthly chart ───────────────────────────────────────────── */
+.sa-chart-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+/* Y-axis reference labels (max / half / zero) so bar heights are readable */
+.sa-chart-yaxis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 38px 0 22px; /* aligns with bar area: value labels above, month labels below */
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-align: right;
+  min-width: 34px;
+  flex-shrink: 0;
+}
+
 .sa-chart {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -179,6 +198,8 @@
   align-items: end;
   height: 220px;
   padding-top: 20px;
+  flex: 1;
+  min-width: 0;
 }
 
 .sa-bar-wrap {

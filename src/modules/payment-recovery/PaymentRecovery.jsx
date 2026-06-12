@@ -3,7 +3,31 @@ import {
   fetchFailedPayments, syncKajabi, startRecoverySequence,
   fetchRecoverySequence, cancelRecoverySequence, fetchRecoverySequences,
 } from '../../services/api.js'
+import ConfirmDialog from '../../components/ui/ConfirmDialog.jsx'
+import { useToast } from '../../components/ui/Toast.jsx'
 import './PaymentRecovery.css'
+
+// Build a CSV from payment rows and trigger a download. Quotes every field so
+// product names with commas can't break columns.
+function exportPaymentsCsv(payments, filename) {
+  const header = ['Customer Name', 'Customer Email', 'Product', 'Amount', 'Currency', 'Status', 'Failed At', 'Recovery Status']
+  const rows = payments.map((p) => [
+    p.customer_name || '', p.customer_email || '', p.product_name || '',
+    p.amount_cents != null ? (p.amount_cents / 100).toFixed(2) : '',
+    p.currency || 'USD', p.status || '', p.failed_at || '',
+    p.sequence?.status || '',
+  ])
+  const csv = [header, ...rows]
+    .map((r) => r.map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
+    .join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 function formatMoney(cents, currency = 'USD') {
   if (cents == null) return '—'
@@ -39,11 +63,13 @@ function StatusBadge({ status }) {
 // ─── Failed Payments Tab ──────────────────────────────────────────────────────
 
 function FailedPaymentsTab({ onOpenSequence }) {
+  const toast = useToast()
   const [payments, setPayments] = useState([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [msg, setMsg] = useState('')
   const [busyId, setBusyId] = useState(null)
+  const [confirmStart, setConfirmStart] = useState(null) // payment row pending confirmation
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -77,14 +103,15 @@ function FailedPaymentsTab({ onOpenSequence }) {
   }
 
   async function handleStart(payment) {
-    if (!confirm(`Start recovery sequence for ${payment.customer_email}?\n\nFirst email will send immediately, then follow-ups on Day 5 and Day 10.`)) return
+    setConfirmStart(null)
     setBusyId(payment.id)
     try {
       const seq = await startRecoverySequence(payment.id)
       await load()
+      toast.show(`Recovery started for ${payment.customer_email}`, { variant: 'success' })
       onOpenSequence?.(seq.id)
     } catch (err) {
-      alert(`Failed: ${err.message}`)
+      toast.show(`Failed to start recovery: ${err.message}`, { variant: 'danger' })
     }
     setBusyId(null)
   }
@@ -96,8 +123,28 @@ function FailedPaymentsTab({ onOpenSequence }) {
           {syncing ? 'Scanning…' : '↻ Scan Inbox for Failures'}
         </button>
         <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
+        {payments.length > 0 && (
+          <button
+            className="btn btn-ghost"
+            onClick={() => exportPaymentsCsv(payments, `failed-payments-${new Date().toISOString().slice(0, 10)}.csv`)}
+            title="Download these rows as a CSV"
+          >
+            ⬇ Export CSV
+          </button>
+        )}
         {msg && <span className="pr-msg">{msg}</span>}
       </div>
+
+      {confirmStart && (
+        <ConfirmDialog
+          title="Start recovery sequence?"
+          message={`This starts the recovery flow for ${confirmStart.customer_email}. The first email sends immediately, then follow-ups on Day 5 and Day 10.`}
+          confirmLabel="Start Recovery"
+          busy={busyId === confirmStart.id}
+          onConfirm={() => handleStart(confirmStart)}
+          onCancel={() => setConfirmStart(null)}
+        />
+      )}
 
       {loading && <div className="pr-loading"><div className="pr-spinner" /></div>}
 
@@ -142,7 +189,7 @@ function FailedPaymentsTab({ onOpenSequence }) {
                   ) : (
                     <button
                       className="btn btn-primary btn-sm"
-                      onClick={() => handleStart(p)}
+                      onClick={() => setConfirmStart(p)}
                       disabled={busyId === p.id || !p.customer_email}
                     >
                       {busyId === p.id ? 'Starting…' : 'Start Recovery'}
@@ -324,9 +371,11 @@ function HistoryTab({ onOpenSequence }) {
 // ─── Sequence Detail Drawer ───────────────────────────────────────────────────
 
 function SequenceDetail({ sequenceId, onClose, onChanged }) {
+  const toast = useToast()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [cancelling, setCancelling] = useState(false)
+  const [confirmCancel, setConfirmCancel] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -340,14 +389,15 @@ function SequenceDetail({ sequenceId, onClose, onChanged }) {
   useEffect(() => { load() }, [load])
 
   async function handleCancel() {
-    if (!confirm('Cancel this recovery sequence? Any pending emails will not be sent.')) return
+    setConfirmCancel(false)
     setCancelling(true)
     try {
       await cancelRecoverySequence(sequenceId)
       await load()
       onChanged?.()
+      toast.show('Recovery sequence cancelled')
     } catch (err) {
-      alert(`Failed: ${err.message}`)
+      toast.show(`Cancel failed: ${err.message}`, { variant: 'danger' })
     }
     setCancelling(false)
   }
@@ -359,6 +409,18 @@ function SequenceDetail({ sequenceId, onClose, onChanged }) {
           <h3>Recovery Sequence</h3>
           <button className="pr-icon-btn" onClick={onClose}>✕</button>
         </div>
+
+        {confirmCancel && (
+          <ConfirmDialog
+            title="Cancel this recovery sequence?"
+            message="Any pending emails in the sequence will not be sent. This can't be resumed — you'd need to start a new sequence."
+            confirmLabel="Cancel Sequence"
+            danger
+            busy={cancelling}
+            onConfirm={handleCancel}
+            onCancel={() => setConfirmCancel(false)}
+          />
+        )}
 
         {loading && <div className="pr-loading"><div className="pr-spinner" /></div>}
 
@@ -407,7 +469,7 @@ function SequenceDetail({ sequenceId, onClose, onChanged }) {
 
             {data.sequence.status === 'active' && (
               <div className="pr-drawer-footer">
-                <button className="btn btn-ghost" onClick={handleCancel} disabled={cancelling}>
+                <button className="btn btn-danger" onClick={() => setConfirmCancel(true)} disabled={cancelling}>
                   {cancelling ? 'Cancelling…' : 'Cancel Sequence'}
                 </button>
               </div>

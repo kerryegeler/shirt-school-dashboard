@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchFeedback, updateFeedbackNotes, fetchLearnedBehaviors, saveLearnedBehaviors, triggerLearningRebuild } from '../../services/api.js'
 import './FeedbackTab.css'
 
@@ -146,13 +146,17 @@ export default function FeedbackTab() {
 
   useEffect(() => { load(); loadLearned() }, [load, loadLearned])
 
+  // Track the rebuild delay so it can't fire setState after unmount
+  const rebuildTimerRef = useRef(null)
+  useEffect(() => () => { if (rebuildTimerRef.current) clearTimeout(rebuildTimerRef.current) }, [])
+
   async function handleRebuildLearning() {
     setRebuilding(true)
     setRebuildMsg('')
     try {
       await triggerLearningRebuild()
       setRebuildMsg('Rebuilding… check back in a few seconds.')
-      setTimeout(async () => {
+      rebuildTimerRef.current = setTimeout(async () => {
         await loadLearned()
         setRebuildMsg('')
         setRebuilding(false)

@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import ConfirmDialog from '../../components/ui/ConfirmDialog.jsx'
+import { useToast } from '../../components/ui/Toast.jsx'
 import {
   fetchSalesSummary, fetchRevenueEntries, addRevenueEntry,
   deleteRevenueEntry, backfillKajabi, backfillStripe, cleanupStripeDuplicates,
@@ -108,22 +110,43 @@ const PERIOD_OPTIONS = [
 function MonthlyChart({ months }) {
   if (!months?.length) return null
   const max = Math.max(...months.map((m) => m.cents), 1)
+  const compact = (cents) => {
+    const v = cents / 100
+    return v >= 1000 ? `$${Math.round(v / 100) / 10}k` : `$${Math.round(v)}`
+  }
   return (
-    <div className="sa-chart">
-      {months.map((m) => {
-        const pct = max > 0 ? (m.cents / max) * 100 : 0
-        return (
-          <div key={m.month} className="sa-bar-wrap" title={`${m.label}: ${formatMoney(m.cents)}`}>
-            <div className="sa-bar-value">{m.cents > 0 ? formatMoney(m.cents).replace('.00', '') : ''}</div>
-            <div className="sa-bar-container">
-              <div className="sa-bar" style={{ height: `${pct}%` }} />
+    <div className="sa-chart-row">
+      <div className="sa-chart-yaxis">
+        <span>{compact(max)}</span>
+        <span>{compact(max / 2)}</span>
+        <span>$0</span>
+      </div>
+      <div className="sa-chart">
+        {months.map((m) => {
+          const pct = max > 0 ? (m.cents / max) * 100 : 0
+          return (
+            <div key={m.month} className="sa-bar-wrap" title={`${m.label}: ${formatMoney(m.cents)}`}>
+              <div className="sa-bar-value">{m.cents > 0 ? formatMoney(m.cents).replace('.00', '') : ''}</div>
+              <div className="sa-bar-container">
+                <div className="sa-bar" style={{ height: `${pct}%` }} />
+              </div>
+              <div className="sa-bar-label">{m.label}</div>
             </div>
-            <div className="sa-bar-label">{m.label}</div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
     </div>
   )
+}
+
+// Month-over-month delta from the summary's monthly array (last entry = current month)
+function monthComparison(monthly) {
+  if (!monthly || monthly.length < 2) return null
+  const current = monthly[monthly.length - 1]
+  const previous = monthly[monthly.length - 2]
+  if (!previous.cents) return { current, previous, pct: null }
+  const pct = Math.round(((current.cents - previous.cents) / previous.cents) * 100)
+  return { current, previous, pct }
 }
 
 // ─── Manual entry modal ───────────────────────────────────────────────────────
@@ -250,6 +273,7 @@ function AddEntryModal({ onClose, onAdded }) {
 // ─── Main module ──────────────────────────────────────────────────────────────
 
 export default function SalesAnalytics() {
+  const toast = useToast()
   const [summary, setSummary] = useState(null)
   const [entries, setEntries] = useState([])
   const [products, setProducts] = useState([])
@@ -259,6 +283,8 @@ export default function SalesAnalytics() {
   const [showAdd, setShowAdd] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [confirmAction, setConfirmAction] = useState(null) // 'cleanup' | 'repair' | null
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const [periodPreset, setPeriodPreset] = useState('today')
   const [customFrom, setCustomFrom] = useState(isoDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)))
   const [customTo, setCustomTo] = useState(todayLocal())
@@ -268,7 +294,12 @@ export default function SalesAnalytics() {
     ? { from: customFrom, to: customTo, label: 'Custom Range' }
     : rangeForPreset(periodPreset)
 
+  // Monotonic counter so rapid filter changes can't race: only the most
+  // recent request is allowed to write state.
+  const loadSeqRef = useRef(0)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current
     setLoading(true)
     try {
       const [s, e, p] = await Promise.all([
@@ -281,13 +312,14 @@ export default function SalesAnalytics() {
         }),
         fetchSalesProducts().catch(() => []),
       ])
+      if (seq !== loadSeqRef.current) return // a newer request superseded this one
       setSummary(s)
       setEntries(e)
       setProducts(p)
     } catch (err) {
-      setSyncMsg(`Error: ${err.message}`)
+      if (seq === loadSeqRef.current) setSyncMsg(`Error: ${err.message}`)
     }
-    setLoading(false)
+    if (seq === loadSeqRef.current) setLoading(false)
   }, [filterSource, filterProduct, range.from, range.to])
 
   useEffect(() => { load() }, [load])
@@ -309,7 +341,7 @@ export default function SalesAnalytics() {
   }
 
   async function handleCleanupDuplicates() {
-    if (!confirm('Remove duplicate Stripe entries? This keeps one entry per payment and deletes the rest.')) return
+    setConfirmAction(null)
     setSyncing(true); setSyncMsg('Scanning for Stripe duplicates…')
     try {
       const r = await cleanupStripeDuplicates()
@@ -323,7 +355,7 @@ export default function SalesAnalytics() {
   }
 
   async function handleRepairKajabi() {
-    if (!confirm('This will WIPE all Kajabi revenue entries and rebuild them from the webhook log. Continue?')) return
+    setConfirmAction(null)
     setSyncing(true); setSyncMsg('Rebuilding Kajabi entries from webhook log…')
     try {
       const r = await repairKajabi()
@@ -355,14 +387,16 @@ export default function SalesAnalytics() {
   }
 
   async function handleDelete(id) {
-    if (!confirm('Delete this revenue entry?')) return
+    setConfirmDeleteId(null)
     try {
       await deleteRevenueEntry(id)
       await load()
+      toast.show('Entry deleted')
     } catch (err) {
-      alert(`Failed: ${err.message}`)
+      toast.show(`Delete failed: ${err.message}`, { variant: 'danger' })
     }
   }
+
 
   return (
     <div className="sales-analytics">
@@ -383,10 +417,33 @@ export default function SalesAnalytics() {
         <div className="sa-toolbar">
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
-          <button className="btn btn-ghost" onClick={handleRepairKajabi} disabled={syncing}>Repair Kajabi</button>
+          <button className="btn btn-ghost" onClick={() => setConfirmAction('repair')} disabled={syncing}>Repair Kajabi</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
         </div>
+
+        {confirmAction === 'repair' && (
+          <ConfirmDialog
+            title="Rebuild Kajabi entries?"
+            message="This WIPES all Kajabi revenue entries and rebuilds them from the webhook log. Totals may shift if old webhooks were incomplete."
+            confirmLabel="Wipe & Rebuild"
+            danger
+            busy={syncing}
+            onConfirm={handleRepairKajabi}
+            onCancel={() => setConfirmAction(null)}
+          />
+        )}
+
+        {confirmDeleteId && (
+          <ConfirmDialog
+            title="Delete this revenue entry?"
+            message="The entry is removed from your revenue ledger. Automated syncs may re-import it if it still exists in Stripe/Kajabi."
+            confirmLabel="Delete"
+            danger
+            onConfirm={() => handleDelete(confirmDeleteId)}
+            onCancel={() => setConfirmDeleteId(null)}
+          />
+        )}
 
         {/* Period selector */}
         <div className="sa-period-bar">
@@ -438,6 +495,20 @@ export default function SalesAnalytics() {
                 <div className="sa-stat-value">{formatMoney((summary.monthly || []).reduce((sum, m) => sum + (m.cents || 0), 0))}</div>
                 <div className="sa-stat-count">{summary.total_entries || 0} {summary.total_entries === 1 ? 'sale' : 'sales'} total</div>
               </div>
+              {(() => {
+                const cmp = monthComparison(summary.monthly)
+                if (!cmp) return null
+                const up = cmp.pct != null && cmp.pct >= 0
+                return (
+                  <div className="sa-stat">
+                    <div className="sa-stat-label">{cmp.current.label} vs {cmp.previous.label}</div>
+                    <div className="sa-stat-value" style={cmp.pct != null ? { color: up ? 'var(--success)' : 'var(--danger)' } : undefined}>
+                      {cmp.pct != null ? `${up ? '+' : ''}${cmp.pct}%` : '—'}
+                    </div>
+                    <div className="sa-stat-sub">{formatMoney(cmp.current.cents)} vs {formatMoney(cmp.previous.cents)}</div>
+                  </div>
+                )
+              })()}
             </div>
 
             <div className="sa-card">
@@ -492,7 +563,7 @@ export default function SalesAnalytics() {
                       <div className="sa-desc">{e.description || (e.product_name) || '—'}</div>
                       <div className="sa-amount">{formatMoney(e.amount_cents, e.currency)}</div>
                       <div className="sa-row-actions">
-                        <button className="sa-text-btn" onClick={() => handleDelete(e.id)} title="Delete entry">✕</button>
+                        <button className="sa-text-btn" onClick={() => setConfirmDeleteId(e.id)} title="Delete entry">✕</button>
                       </div>
                     </div>
                   ))}

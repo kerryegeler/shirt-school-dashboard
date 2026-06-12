@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { generateReply, sendEmail, fetchDraft, saveDraft, deleteDraft, logFeedback, forwardEmail, fetchCustomerProfile, saveCustomerProfile } from '../../services/api.js'
+import { useToast } from '../../components/ui/Toast.jsx'
 
 const CATEGORY_LABELS = {
   student_support: 'Student Support',
@@ -452,6 +453,7 @@ function CustomerPanel({ email, threadId }) {
 }
 
 export default function EmailDetail({ email, connectedAccounts = [], onMarkUnread, onReclassify, onArchive, onUnarchive, viewMode, onDraftSaved, onDraftDeleted, onSent }) {
+  const toast = useToast()
   const [draft, setDraft] = useState('')
   const [manualMode, setManualMode] = useState(false)
   const [personaUsed, setPersonaUsed] = useState('')
@@ -475,15 +477,19 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
   const [forwarded, setForwarded] = useState(false)
   const aiDraftRef = useRef('') // Original AI-generated draft before user edits
 
-  // Load saved draft on mount
+  // Load saved draft when the selected email changes. The id guard ensures a
+  // slow response for email A can't populate the editor after switching to B.
   useEffect(() => {
+    let cancelled = false
     if (email.hasDraft) {
       fetchDraft(email.id).then(({ content, originalAiDraft }) => {
+        if (cancelled) return
         if (content) { setDraft(content); setManualMode(true) }
         if (originalAiDraft) aiDraftRef.current = originalAiDraft
       }).catch(() => {})
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { cancelled = true }
+  }, [email.id, email.hasDraft])
 
   const persona = PERSONA_INFO[email.category]
 
@@ -578,22 +584,32 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
       await saveDraft(email.id, draft, original || null)
       setDraftSavedAt(new Date())
       onDraftSaved?.(email.id)
+      toast.show('Draft saved')
       // Log feedback if draft differs from the AI original
       if (original && draft !== original) {
         logFeedback({ threadId: email.id, category: email.category, originalDraft: original, finalVersion: draft })
           .catch(() => {})
       }
-    } catch {}
+    } catch (err) {
+      toast.show(`Draft save failed: ${err.message}`, { variant: 'danger' })
+    }
     finally { setSavingDraft(false) }
   }
 
   async function handleSend() {
+    const recipient = (toEmail || email.from || '').trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+      setSendError(`"${recipient}" doesn't look like a valid email address. Fix the To field and try again.`)
+      setConfirmSend(false)
+      return
+    }
     setSending(true)
     setSendError('')
     try {
       await sendEmail(email, draft, effectiveFrom, toEmail, manualMode)
       setSent(true)
       setConfirmSend(false)
+      toast.show(`Email sent to ${recipient}`, { variant: 'success' })
       // Log feedback whenever the final sent version differs from the AI original
       const original = aiDraftRef.current
       if (original && draft !== original) {

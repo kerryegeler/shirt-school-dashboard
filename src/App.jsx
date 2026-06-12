@@ -10,6 +10,7 @@ import Reminders from './modules/reminders/Reminders.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 import LiveEventModal from './components/LiveEventModal.jsx'
+import { ToastProvider } from './components/ui/Toast.jsx'
 
 export default function App() {
   // dashboardUser: undefined = checking, null = not logged in, object = logged in
@@ -94,7 +95,7 @@ export default function App() {
     .map(([k]) => k)
 
   return (
-    <>
+    <ToastProvider>
       <div className="app-layout">
         <Sidebar
           activeModule={activeModule}
@@ -129,7 +130,7 @@ export default function App() {
         unreadCount={unreadCount}
         onOpenLiveEvent={() => setLiveEventOpen(true)}
       />
-    </>
+    </ToastProvider>
   )
 }
 

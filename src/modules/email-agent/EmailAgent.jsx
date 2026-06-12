@@ -5,6 +5,8 @@ import {
   markEmailRead, markEmailUnread, reclassifyEmail, archiveEmail, archiveAll, unarchiveEmail, fetchThread,
   fetchFolders, createFolder, deleteFolder, assignFolder, searchEmails, fetchSentEmails,
 } from '../../services/api.js'
+import ConfirmDialog from '../../components/ui/ConfirmDialog.jsx'
+import { useToast } from '../../components/ui/Toast.jsx'
 import './EmailAgent.css'
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
@@ -210,6 +212,7 @@ function ComposeModal({ connectedAccounts, onClose }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
+  const toast = useToast()
   // Core email state
   const [emails, setEmails] = useState([])
   const [selectedEmail, setSelectedEmail] = useState(null)
@@ -415,10 +418,12 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
   // ── Archive All ──────────────────────────────────────────────────────────────
 
   const [archivingAll, setArchivingAll] = useState(false)
+  const [confirmArchiveAll, setConfirmArchiveAll] = useState(false)
 
   async function handleArchiveAll() {
-    if (!window.confirm(`Archive all ${totalEstimate || emails.length} inbox emails? They will be removed from your inbox in Gmail immediately.`)) return
+    setConfirmArchiveAll(false)
     setArchivingAll(true)
+    const count = totalEstimate || emails.length
     try {
       await archiveAll()
       setEmails([])
@@ -426,11 +431,29 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
       setSelectedIds(new Set())
       setNextPageTokens(null)
       setTotalEstimate(0)
+      toast.show(`${count} email${count === 1 ? '' : 's'} archived`, { variant: 'success' })
     } catch (err) {
-      alert(`Archive all failed: ${err.message}`)
+      toast.show(`Archive all failed: ${err.message}`, { variant: 'danger' })
     } finally {
       setArchivingAll(false)
     }
+  }
+
+  // ── Mark All Read ────────────────────────────────────────────────────────────
+
+  const [markingAllRead, setMarkingAllRead] = useState(false)
+
+  async function handleMarkAllRead() {
+    const unread = emails.filter((e) => !e.read)
+    if (!unread.length) return
+    setMarkingAllRead(true)
+    // Optimistic: flip them all read in the UI immediately
+    setEmails((prev) => prev.map((e) => (e.read ? e : { ...e, read: true, status: e.status === 'unread' ? 'read' : e.status })))
+    const results = await Promise.allSettled(unread.map((e) => markEmailRead(e.id, e.account)))
+    const failed = results.filter((r) => r.status === 'rejected').length
+    if (failed) toast.show(`${failed} of ${unread.length} could not be marked read`, { variant: 'danger' })
+    else toast.show(`${unread.length} email${unread.length === 1 ? '' : 's'} marked read`, { variant: 'success' })
+    setMarkingAllRead(false)
   }
 
   // ── Filtered emails + counts ────────────────────────────────────────────────
@@ -716,10 +739,20 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
             </svg>
             <span className="compose-trigger-label">Compose</span>
           </button>
+          {viewMode === 'inbox' && !isSearchMode && emails.some((e) => !e.read) && (
+            <button
+              className="btn btn-ghost"
+              onClick={handleMarkAllRead}
+              disabled={markingAllRead || loading}
+              title="Mark all inbox emails as read"
+            >
+              {markingAllRead ? 'Marking…' : 'Mark All Read'}
+            </button>
+          )}
           {viewMode === 'inbox' && !isSearchMode && emails.length > 0 && (
             <button
               className="btn btn-ghost btn-archive-all"
-              onClick={handleArchiveAll}
+              onClick={() => setConfirmArchiveAll(true)}
               disabled={archivingAll || loading}
               title="Archive all inbox emails"
             >
@@ -742,6 +775,18 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         <ComposeModal
           connectedAccounts={connectedAccounts}
           onClose={() => setComposeOpen(false)}
+        />
+      )}
+
+      {confirmArchiveAll && (
+        <ConfirmDialog
+          title="Archive all inbox emails?"
+          message={`This removes ${totalEstimate || emails.length} email${(totalEstimate || emails.length) === 1 ? '' : 's'} from your Gmail inbox immediately. You can still find them under Archived.`}
+          confirmLabel="Archive All"
+          danger
+          busy={archivingAll}
+          onConfirm={handleArchiveAll}
+          onCancel={() => setConfirmArchiveAll(false)}
         />
       )}
 

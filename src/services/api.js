@@ -1,5 +1,12 @@
+// All API calls go through this wrapper: 30s timeout so a hung request can't
+// leave the UI on an infinite spinner. AbortSignal.timeout is supported in all
+// modern browsers (and this dashboard only runs on Kerry's devices).
+function apiFetch(url, options = {}) {
+  return fetch(url, { signal: AbortSignal.timeout(30000), ...options })
+}
+
 export async function fetchSentEmails() {
-  const response = await fetch('/api/emails/sent')
+  const response = await apiFetch('/api/emails/sent')
   const data = await response.json()
   console.log('[Sent] HTTP', response.status, '→', data)
   if (!response.ok) throw new Error(data.error || 'Failed to fetch sent emails')
@@ -10,21 +17,21 @@ export async function fetchThread(id, account) {
   const url = account
     ? `/api/emails/${id}?account=${encodeURIComponent(account)}`
     : `/api/emails/${id}`
-  const response = await fetch(url)
+  const response = await apiFetch(url)
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to fetch thread')
   return data.thread
 }
 
 export async function archiveAll() {
-  const response = await fetch('/api/emails/archive-all', { method: 'POST' })
+  const response = await apiFetch('/api/emails/archive-all', { method: 'POST' })
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to archive all')
   return data
 }
 
 export async function archiveEmail(id, account) {
-  const response = await fetch(`/api/emails/${id}/archive`, {
+  const response = await apiFetch(`/api/emails/${id}/archive`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account }),
@@ -36,7 +43,7 @@ export async function archiveEmail(id, account) {
 }
 
 export async function unarchiveEmail(id, account) {
-  const response = await fetch(`/api/emails/${id}/unarchive`, {
+  const response = await apiFetch(`/api/emails/${id}/unarchive`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account }),
@@ -48,7 +55,7 @@ export async function unarchiveEmail(id, account) {
 }
 
 export async function markEmailRead(id, account) {
-  const response = await fetch(`/api/emails/${id}/read`, {
+  const response = await apiFetch(`/api/emails/${id}/read`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account }),
@@ -60,7 +67,7 @@ export async function markEmailRead(id, account) {
 }
 
 export async function markEmailUnread(id, account) {
-  const response = await fetch(`/api/emails/${id}/unread`, {
+  const response = await apiFetch(`/api/emails/${id}/unread`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account }),
@@ -72,7 +79,7 @@ export async function markEmailUnread(id, account) {
 }
 
 export async function reclassifyEmail(id, category) {
-  const response = await fetch(`/api/emails/${id}/category`, {
+  const response = await apiFetch(`/api/emails/${id}/category`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ category }),
@@ -83,7 +90,7 @@ export async function reclassifyEmail(id, category) {
 }
 
 export async function generateReply(email, category) {
-  const response = await fetch('/api/generate-reply', {
+  const response = await apiFetch('/api/generate-reply', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, category }),
@@ -99,21 +106,21 @@ export async function generateReply(email, category) {
 }
 
 export async function searchEmails(q) {
-  const response = await fetch(`/api/emails/search?q=${encodeURIComponent(q)}`)
+  const response = await apiFetch(`/api/emails/search?q=${encodeURIComponent(q)}`)
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Search failed')
   return data
 }
 
 export async function fetchDraft(threadId) {
-  const response = await fetch(`/api/drafts/${threadId}`)
+  const response = await apiFetch(`/api/drafts/${threadId}`)
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to fetch draft')
   return { content: data.content, originalAiDraft: data.originalAiDraft || null }
 }
 
 export async function saveDraft(threadId, content, originalAiDraft) {
-  const response = await fetch(`/api/drafts/${threadId}`, {
+  const response = await apiFetch(`/api/drafts/${threadId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, originalAiDraft }),
@@ -125,18 +132,18 @@ export async function saveDraft(threadId, content, originalAiDraft) {
 }
 
 export async function deleteDraft(threadId) {
-  await fetch(`/api/drafts/${threadId}`, { method: 'DELETE' })
+  await apiFetch(`/api/drafts/${threadId}`, { method: 'DELETE' })
 }
 
 export async function fetchFolders() {
-  const response = await fetch('/api/folders')
+  const response = await apiFetch('/api/folders')
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to fetch folders')
   return data.folders
 }
 
 export async function createFolder(name) {
-  const response = await fetch('/api/folders', {
+  const response = await apiFetch('/api/folders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -147,7 +154,7 @@ export async function createFolder(name) {
 }
 
 export async function deleteFolder(id) {
-  const response = await fetch(`/api/folders/${id}`, { method: 'DELETE' })
+  const response = await apiFetch(`/api/folders/${id}`, { method: 'DELETE' })
   if (!response.ok) {
     const data = await response.json()
     throw new Error(data.error || 'Failed to delete folder')
@@ -155,7 +162,7 @@ export async function deleteFolder(id) {
 }
 
 export async function assignFolder(threadId, folderId) {
-  const response = await fetch(`/api/emails/${threadId}/folder`, {
+  const response = await apiFetch(`/api/emails/${threadId}/folder`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ folderId }),
@@ -166,14 +173,14 @@ export async function assignFolder(threadId, folderId) {
 }
 
 export async function fetchLearnedBehaviors() {
-  const r = await fetch('/api/learned-behaviors')
+  const r = await apiFetch('/api/learned-behaviors')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch learned behaviors')
   return d // { content, lastUpdated }
 }
 
 export async function saveLearnedBehaviors(content) {
-  const r = await fetch('/api/learned-behaviors', {
+  const r = await apiFetch('/api/learned-behaviors', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -182,14 +189,14 @@ export async function saveLearnedBehaviors(content) {
 }
 
 export async function fetchFeedback() {
-  const response = await fetch('/api/feedback')
+  const response = await apiFetch('/api/feedback')
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Failed to fetch feedback')
   return data.entries
 }
 
 export async function logFeedback({ threadId, category, originalDraft, finalVersion }) {
-  const response = await fetch('/api/feedback', {
+  const response = await apiFetch('/api/feedback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ threadId, category, originalDraft, finalVersion }),
@@ -200,7 +207,7 @@ export async function logFeedback({ threadId, category, originalDraft, finalVers
 }
 
 export async function updateFeedbackNotes(id, notes) {
-  const response = await fetch(`/api/feedback/${id}/notes`, {
+  const response = await apiFetch(`/api/feedback/${id}/notes`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ notes }),
@@ -214,61 +221,61 @@ export async function updateFeedbackNotes(id, notes) {
 // ─── Content Agent ─────────────────────────────────────────────────────────────
 
 export async function fetchContentIdeas() {
-  const r = await fetch('/api/content/ideas')
+  const r = await apiFetch('/api/content/ideas')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch ideas')
   return d.ideas
 }
 
 export async function updateContentIdea(id, updates) {
-  const r = await fetch(`/api/content/ideas/${id}`, {
+  const r = await apiFetch(`/api/content/ideas/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
   })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update idea') }
 }
 
 export async function deleteContentIdea(id) {
-  const r = await fetch(`/api/content/ideas/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/content/ideas/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete idea') }
 }
 
 export async function saveContentIdea(id) {
-  const r = await fetch(`/api/content/ideas/${id}/save`, { method: 'POST' })
+  const r = await apiFetch(`/api/content/ideas/${id}/save`, { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to save idea')
   return d
 }
 
 export async function fetchContentBriefs() {
-  const r = await fetch('/api/content/briefs')
+  const r = await apiFetch('/api/content/briefs')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch briefs')
   return d.briefs
 }
 
 export async function fetchContentBrief(id) {
-  const r = await fetch(`/api/content/briefs/${id}`)
+  const r = await apiFetch(`/api/content/briefs/${id}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Brief not found')
   return d.brief
 }
 
 export async function runContentBrief() {
-  const r = await fetch('/api/content/run-brief', { method: 'POST' })
+  const r = await apiFetch('/api/content/run-brief', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to run brief')
   return d
 }
 
 export async function fetchContentTopics() {
-  const r = await fetch('/api/content/topics')
+  const r = await apiFetch('/api/content/topics')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch topics')
   return d.topics
 }
 
 export async function createContentTopic(keyword) {
-  const r = await fetch('/api/content/topics', {
+  const r = await apiFetch('/api/content/topics', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keyword }),
   })
   const d = await r.json()
@@ -277,33 +284,33 @@ export async function createContentTopic(keyword) {
 }
 
 export async function updateContentTopic(id, updates) {
-  const r = await fetch(`/api/content/topics/${id}`, {
+  const r = await apiFetch(`/api/content/topics/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
   })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update topic') }
 }
 
 export async function deleteContentTopic(id) {
-  const r = await fetch(`/api/content/topics/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/content/topics/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete topic') }
 }
 
 export async function fetchChannelStats() {
-  const r = await fetch('/api/content/channel-stats')
+  const r = await apiFetch('/api/content/channel-stats')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch channel stats')
   return d  // returns { stats, configured, channelId, kerryConnected }
 }
 
 export async function fetchYouTubeChannels() {
-  const r = await fetch('/api/content/youtube-channels')
+  const r = await apiFetch('/api/content/youtube-channels')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch channels')
   return d
 }
 
 export async function lookupChannel(query) {
-  const r = await fetch('/api/content/channel-lookup', {
+  const r = await apiFetch('/api/content/channel-lookup', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }),
   })
   const d = await r.json()
@@ -312,28 +319,28 @@ export async function lookupChannel(query) {
 }
 
 export async function selectChannel(channelId) {
-  const r = await fetch('/api/content/channel-select', {
+  const r = await apiFetch('/api/content/channel-select', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelId }),
   })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to save channel') }
 }
 
 export async function refreshChannelStats() {
-  const r = await fetch('/api/content/channel-stats/refresh', { method: 'POST' })
+  const r = await apiFetch('/api/content/channel-stats/refresh', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to refresh stats')
   return d
 }
 
 export async function fetchCompetitors() {
-  const r = await fetch('/api/content/competitors')
+  const r = await apiFetch('/api/content/competitors')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch competitors')
   return d.competitors
 }
 
 export async function addCompetitor(competitor) {
-  const r = await fetch('/api/content/competitors', {
+  const r = await apiFetch('/api/content/competitors', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(competitor),
   })
   const d = await r.json()
@@ -342,28 +349,28 @@ export async function addCompetitor(competitor) {
 }
 
 export async function updateCompetitor(id, updates) {
-  const r = await fetch(`/api/content/competitors/${id}`, {
+  const r = await apiFetch(`/api/content/competitors/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates),
   })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update competitor') }
 }
 
 export async function deleteCompetitor(id) {
-  const r = await fetch(`/api/content/competitors/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/content/competitors/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete competitor') }
 }
 
 // ─── Content Board ──────────────────────────────────────────────────────────────
 
 export async function fetchContentCards() {
-  const r = await fetch('/api/content/cards')
+  const r = await apiFetch('/api/content/cards')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch cards')
   return d.cards
 }
 
 export async function createContentCard({ title, boardType, generateAI, ideaData }) {
-  const r = await fetch('/api/content/cards', {
+  const r = await apiFetch('/api/content/cards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, boardType, generateAI, ideaData }),
@@ -374,7 +381,7 @@ export async function createContentCard({ title, boardType, generateAI, ideaData
 }
 
 export async function updateContentCard(id, updates) {
-  const r = await fetch(`/api/content/cards/${id}`, {
+  const r = await apiFetch(`/api/content/cards/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -383,12 +390,12 @@ export async function updateContentCard(id, updates) {
 }
 
 export async function deleteContentCard(id) {
-  const r = await fetch(`/api/content/cards/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/content/cards/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete card') }
 }
 
 export async function regenerateCardSections(id, field) {
-  const r = await fetch(`/api/content/cards/${id}/regenerate`, {
+  const r = await apiFetch(`/api/content/cards/${id}/regenerate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ field }),
@@ -411,7 +418,7 @@ export async function sendEmail(email, draft, fromAccount, toEmail, isManual = f
     account: email.account,
     category: email.category,
   }
-  const response = await fetch('/api/emails/send', {
+  const response = await apiFetch('/api/emails/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: trimmedEmail, draft, fromAccount, toEmail, isManual }),
@@ -434,7 +441,7 @@ export async function sendEmail(email, draft, fromAccount, toEmail, isManual = f
 }
 
 export async function composeEmail({ fromAccount, toEmail, subject, body }) {
-  const response = await fetch('/api/emails/compose', {
+  const response = await apiFetch('/api/emails/compose', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fromAccount, toEmail, subject, body }),
@@ -455,7 +462,7 @@ export async function forwardEmail({ email, message, toEmail, fromAccount, note 
     to: message.to, subject: message.subject, bodyText: message.bodyText,
     timestamp: message.timestamp,
   } : null
-  const response = await fetch('/api/emails/forward', {
+  const response = await apiFetch('/api/emails/forward', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: trimmedEmail, message: trimmedMsg, toEmail, fromAccount, note }),
@@ -466,42 +473,42 @@ export async function forwardEmail({ email, message, toEmail, fromAccount, note 
 }
 
 export async function triggerLearningRebuild() {
-  const r = await fetch('/api/learning/run', { method: 'POST' })
+  const r = await apiFetch('/api/learning/run', { method: 'POST' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed') }
 }
 
 // ─── Payment Recovery ─────────────────────────────────────────────────────────
 
 export async function fetchFailedPayments(status = 'failed') {
-  const r = await fetch(`/api/payment-recovery/payments?status=${encodeURIComponent(status)}`)
+  const r = await apiFetch(`/api/payment-recovery/payments?status=${encodeURIComponent(status)}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch payments')
   return d.payments
 }
 
 export async function syncKajabi() {
-  const r = await fetch('/api/payment-recovery/sync', { method: 'POST' })
+  const r = await apiFetch('/api/payment-recovery/sync', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to sync')
   return d
 }
 
 export async function startRecoverySequence(paymentId) {
-  const r = await fetch(`/api/payment-recovery/start/${paymentId}`, { method: 'POST' })
+  const r = await apiFetch(`/api/payment-recovery/start/${paymentId}`, { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to start sequence')
   return d.sequence
 }
 
 export async function fetchRecoverySequence(sequenceId) {
-  const r = await fetch(`/api/payment-recovery/sequences/${sequenceId}`)
+  const r = await apiFetch(`/api/payment-recovery/sequences/${sequenceId}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch sequence')
   return d
 }
 
 export async function cancelRecoverySequence(sequenceId) {
-  const r = await fetch(`/api/payment-recovery/sequences/${sequenceId}/cancel`, { method: 'POST' })
+  const r = await apiFetch(`/api/payment-recovery/sequences/${sequenceId}/cancel`, { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to cancel sequence')
   return d
@@ -509,7 +516,7 @@ export async function cancelRecoverySequence(sequenceId) {
 
 export async function fetchRecoverySequences(status) {
   const qs = status ? `?status=${encodeURIComponent(status)}` : ''
-  const r = await fetch(`/api/payment-recovery/sequences${qs}`)
+  const r = await apiFetch(`/api/payment-recovery/sequences${qs}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch sequences')
   return d.sequences
@@ -522,7 +529,7 @@ export async function fetchSalesSummary({ from, to, product } = {}) {
   if (from) qs.set('from', from)
   if (to) qs.set('to', to)
   if (product) qs.set('product', product)
-  const r = await fetch(`/api/sales/summary?${qs.toString()}`)
+  const r = await apiFetch(`/api/sales/summary?${qs.toString()}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch summary')
   return d
@@ -535,21 +542,21 @@ export async function fetchRevenueEntries({ source, from, to, product, limit = 1
   if (to) qs.set('to', to)
   if (product) qs.set('product', product)
   if (limit) qs.set('limit', String(limit))
-  const r = await fetch(`/api/sales/entries?${qs.toString()}`)
+  const r = await apiFetch(`/api/sales/entries?${qs.toString()}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch entries')
   return d.entries
 }
 
 export async function fetchSalesProducts() {
-  const r = await fetch('/api/sales/products')
+  const r = await apiFetch('/api/sales/products')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch products')
   return d.products
 }
 
 export async function addRevenueEntry(entry) {
-  const r = await fetch('/api/sales/entries', {
+  const r = await apiFetch('/api/sales/entries', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(entry),
   })
@@ -559,20 +566,20 @@ export async function addRevenueEntry(entry) {
 }
 
 export async function deleteRevenueEntry(id) {
-  const r = await fetch(`/api/sales/entries/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/sales/entries/${id}`, { method: 'DELETE' })
   const d = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(d.error || 'Failed to delete entry')
 }
 
 export async function backfillKajabi() {
-  const r = await fetch('/api/sales/backfill-kajabi', { method: 'POST' })
+  const r = await apiFetch('/api/sales/backfill-kajabi', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Backfill failed')
   return d
 }
 
 export async function backfillStripe(days = 90) {
-  const r = await fetch('/api/sales/backfill-stripe', {
+  const r = await apiFetch('/api/sales/backfill-stripe', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ days }),
   })
@@ -582,14 +589,14 @@ export async function backfillStripe(days = 90) {
 }
 
 export async function cleanupStripeDuplicates() {
-  const r = await fetch('/api/sales/cleanup-stripe-duplicates', { method: 'POST' })
+  const r = await apiFetch('/api/sales/cleanup-stripe-duplicates', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Cleanup failed')
   return d
 }
 
 export async function repairKajabi() {
-  const r = await fetch('/api/sales/repair-kajabi', { method: 'POST' })
+  const r = await apiFetch('/api/sales/repair-kajabi', { method: 'POST' })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Kajabi repair failed')
   return d
@@ -598,14 +605,14 @@ export async function repairKajabi() {
 // ─── Business Reminders ───────────────────────────────────────────────────────
 
 export async function fetchReminders(includeDone = false) {
-  const r = await fetch(`/api/reminders${includeDone ? '?includeDone=true' : ''}`)
+  const r = await apiFetch(`/api/reminders${includeDone ? '?includeDone=true' : ''}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to fetch reminders')
   return d.reminders
 }
 
 export async function createReminder({ title, notes, due_date }) {
-  const r = await fetch('/api/reminders', {
+  const r = await apiFetch('/api/reminders', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, notes, due_date }),
   })
@@ -615,7 +622,7 @@ export async function createReminder({ title, notes, due_date }) {
 }
 
 export async function updateReminder(id, updates) {
-  const r = await fetch(`/api/reminders/${id}`, {
+  const r = await apiFetch(`/api/reminders/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
   })
@@ -623,21 +630,21 @@ export async function updateReminder(id, updates) {
 }
 
 export async function deleteReminder(id) {
-  const r = await fetch(`/api/reminders/${id}`, { method: 'DELETE' })
+  const r = await apiFetch(`/api/reminders/${id}`, { method: 'DELETE' })
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete reminder') }
 }
 
 // ─── Live Event Info ──────────────────────────────────────────────────────────
 
 export async function fetchLiveEvent() {
-  const r = await fetch('/api/live-event')
+  const r = await apiFetch('/api/live-event')
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to load live event info')
   return d // { info, phase }
 }
 
 export async function saveLiveEvent(fields) {
-  const r = await fetch('/api/live-event', {
+  const r = await apiFetch('/api/live-event', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   })
@@ -650,14 +657,14 @@ export async function saveLiveEvent(fields) {
 
 export async function fetchCustomerProfile(email, threadId) {
   const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : ''
-  const r = await fetch(`/api/customer-profile/${encodeURIComponent(email)}${qs}`)
+  const r = await apiFetch(`/api/customer-profile/${encodeURIComponent(email)}${qs}`)
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to load customer profile')
   return d // { email, profile, purchases, threads }
 }
 
 export async function saveCustomerProfile(email, fields) {
-  const r = await fetch(`/api/customer-profile/${encodeURIComponent(email)}`, {
+  const r = await apiFetch(`/api/customer-profile/${encodeURIComponent(email)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   })
