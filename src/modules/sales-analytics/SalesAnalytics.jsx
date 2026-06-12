@@ -139,16 +139,6 @@ function MonthlyChart({ months }) {
   )
 }
 
-// Month-over-month delta from the summary's monthly array (last entry = current month)
-function monthComparison(monthly) {
-  if (!monthly || monthly.length < 2) return null
-  const current = monthly[monthly.length - 1]
-  const previous = monthly[monthly.length - 2]
-  if (!previous.cents) return { current, previous, pct: null }
-  const pct = Math.round(((current.cents - previous.cents) / previous.cents) * 100)
-  return { current, previous, pct }
-}
-
 // ─── Manual entry modal ───────────────────────────────────────────────────────
 
 function AddEntryModal({ onClose, onAdded }) {
@@ -495,20 +485,6 @@ export default function SalesAnalytics() {
                 <div className="sa-stat-value">{formatMoney((summary.monthly || []).reduce((sum, m) => sum + (m.cents || 0), 0))}</div>
                 <div className="sa-stat-count">{summary.total_entries || 0} {summary.total_entries === 1 ? 'sale' : 'sales'} total</div>
               </div>
-              {(() => {
-                const cmp = monthComparison(summary.monthly)
-                if (!cmp) return null
-                const up = cmp.pct != null && cmp.pct >= 0
-                return (
-                  <div className="sa-stat">
-                    <div className="sa-stat-label">{cmp.current.label} vs {cmp.previous.label}</div>
-                    <div className="sa-stat-value" style={cmp.pct != null ? { color: up ? 'var(--success)' : 'var(--danger)' } : undefined}>
-                      {cmp.pct != null ? `${up ? '+' : ''}${cmp.pct}%` : '—'}
-                    </div>
-                    <div className="sa-stat-sub">{formatMoney(cmp.current.cents)} vs {formatMoney(cmp.previous.cents)}</div>
-                  </div>
-                )
-              })()}
             </div>
 
             <div className="sa-card">
