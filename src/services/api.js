@@ -369,11 +369,11 @@ export async function fetchContentCards() {
   return d.cards
 }
 
-export async function createContentCard({ title, boardType, generateAI, ideaData }) {
+export async function createContentCard({ title, boardType, generateAI, ideaData, column }) {
   const r = await apiFetch('/api/content/cards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, boardType, generateAI, ideaData }),
+    body: JSON.stringify({ title, boardType, generateAI, ideaData, column }),
   })
   const d = await r.json()
   if (!r.ok) throw new Error(d.error || 'Failed to create card')

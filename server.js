@@ -5217,9 +5217,13 @@ app.get('/api/content/cards', requireAuth, async (req, res) => {
 })
 
 app.post('/api/content/cards', requireAuth, async (req, res) => {
-  const { title, boardType, generateAI, ideaData } = req.body
+  const { title, boardType, generateAI, ideaData, column } = req.body
   if (!title?.trim()) return res.status(400).json({ error: 'Title required' })
   if (!['long_form', 'short_form'].includes(boardType)) return res.status(400).json({ error: 'Invalid boardType' })
+
+  // Quick-add lets a card start in a specific column (defaults to "idea").
+  const validColumns = boardType === 'long_form' ? LONG_FORM_COLUMNS : SHORT_FORM_COLUMNS
+  const boardColumn = validColumns.includes(column) ? column : 'idea'
 
   let sections = {}
   if (generateAI) {
@@ -5242,7 +5246,7 @@ app.post('/api/content/cards', requireAuth, async (req, res) => {
   const card = {
     title: title.trim(),
     board_type: boardType,
-    board_column: 'idea',
+    board_column: boardColumn,
     sections,
     notes: '',
     position: 0,
@@ -5280,9 +5284,14 @@ app.post('/api/content/cards/:id/regenerate', requireAuth, async (req, res) => {
 
   try {
     const newSections = await generateCardSections(card.title, card.board_type)
+    // Preserve user-owned metadata (labels, links) that lives in the same JSON
+    // blob as the AI content so "Regenerate All" doesn't wipe it.
+    const preserved = {}
+    if (card.sections?.labels) preserved.labels = card.sections.labels
+    if (card.sections?.links) preserved.links = card.sections.links
     const mergedSections = field
       ? { ...card.sections, [field]: newSections[field] }
-      : newSections
+      : { ...newSections, ...preserved }
 
     const { error } = await supabase.from('content_cards')
       .update({ sections: mergedSections, updated_at: new Date().toISOString() })
