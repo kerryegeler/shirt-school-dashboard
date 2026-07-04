@@ -96,6 +96,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/slack/events',   // Slack Event Subscriptions
   '/api/kajabi/webhook', // Called by Kajabi, not the dashboard user
   '/api/stripe/webhook', // Called by Stripe, not the dashboard user
+  '/api/social-proof/purchases', // Called by the popup widget on public landing pages; returns sanitized data only
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -7236,6 +7237,128 @@ app.put('/api/customer-profile/:email', requireAuth, async (req, res) => {
   const profile = await upsertCustomerProfile(email, fields)
   if (!profile) return res.status(500).json({ error: 'Save failed' })
   res.json({ profile })
+})
+
+// ─── Social Proof Popup (public API + embeddable widget) ─────────────────────
+// Powers "Joe from Florida just grabbed their ticket…" popups on Kajabi landing
+// pages, backed by real purchases from the Kajabi webhook sync. The purchases
+// endpoint is intentionally PUBLIC (no requireAuth) because the widget calls it
+// from visitors' browsers — it only ever exposes a first name, a coarse
+// location, and a timestamp. Never emails, last names, or amounts.
+// The embeddable client lives in widgets/social-proof.js.
+
+// Quote/punctuation-insensitive product matching: the Kajabi product name
+// contains literal quotation marks (e.g. Five-Day "Launch Your Brand" Challenge),
+// so we compare on lowercase alphanumerics only.
+function normalizeProductKey(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+const US_STATE_NAMES = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California',
+  CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+  KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri',
+  MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio',
+  OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+  SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont',
+  VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+  DC: 'Washington DC',
+}
+
+// Dig a displayable location out of the raw Kajabi webhook payload. Kajabi
+// doesn't always include an address, so every level degrades gracefully:
+// state → city → non-US country → null (widget then omits "from …").
+function extractPurchaseLocation(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const state = findScalarByKeys(raw, ['state', 'province', 'region', 'state_code', 'billing_state', 'address_state'])
+  const city = findScalarByKeys(raw, ['city', 'town', 'billing_city', 'address_city'])
+  const country = findScalarByKeys(raw, ['country', 'country_code', 'billing_country', 'address_country'])
+
+  let loc = null
+  if (state) {
+    const s = String(state).trim()
+    loc = US_STATE_NAMES[s.toUpperCase()] || (s.length > 2 ? s : null)
+  }
+  if (!loc && city) loc = String(city).trim()
+  if (!loc && country) {
+    const c = String(country).trim()
+    const isUS = ['US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA'].includes(c.toUpperCase())
+    if (!isUS && c.length > 2) loc = c // bare "US" adds nothing; 2-letter codes aren't friendly
+  }
+  if (!loc) return null
+  loc = loc.replace(/\s+/g, ' ')
+  return loc.length > 40 ? null : loc
+}
+
+// First name only, title-cased when the source is shouty/lowercase. Anything
+// that looks like an email means name extraction failed upstream — drop it.
+function firstNameOnly(fullName) {
+  const first = String(fullName || '').trim().split(/\s+/)[0] || ''
+  if (!first || first.includes('@') || first.length > 24) return null
+  if (first === first.toLowerCase() || first === first.toUpperCase()) {
+    return first[0].toUpperCase() + first.slice(1).toLowerCase()
+  }
+  return first
+}
+
+const socialProofCache = new Map() // cacheKey → { at, body }
+
+app.get('/api/social-proof/purchases', async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=60')
+  if (!supabase) return res.json({ purchases: [], embedBase: process.env.RAILWAY_PUBLIC_URL || null })
+
+  const productKey = normalizeProductKey(req.query.product || 'launch your brand challenge')
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 45, 1), 365)
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50)
+
+  const cacheKey = `${productKey}|${days}|${limit}`
+  const hit = socialProofCache.get(cacheKey)
+  if (hit && Date.now() - hit.at < 60_000) return res.json(hit.body)
+
+  const sinceIso = new Date(Date.now() - days * 86_400_000).toISOString()
+  const { data: rows, error } = await supabase.from('kajabi_payments')
+    .select('customer_name, customer_email, product_name, raw_data, synced_at')
+    .eq('status', 'success')
+    .gte('synced_at', sinceIso)
+    .order('synced_at', { ascending: false })
+    .limit(400)
+  if (error) {
+    console.error('[SocialProof] query error:', error.message)
+    return res.status(500).json({ error: 'Lookup failed' })
+  }
+
+  const seen = new Set() // dedupe repeat buyers (e.g. ticket + VIP upgrade)
+  const purchases = []
+  for (const row of rows || []) {
+    if (productKey && !normalizeProductKey(row.product_name).includes(productKey)) continue
+    const dedupeKey = (row.customer_email || row.customer_name || '').toLowerCase().trim()
+    if (dedupeKey) {
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+    }
+    purchases.push({
+      name: firstNameOnly(row.customer_name),
+      location: extractPurchaseLocation(row.raw_data),
+      at: row.synced_at,
+    })
+    if (purchases.length >= limit) break
+  }
+
+  const body = { purchases, embedBase: process.env.RAILWAY_PUBLIC_URL || null }
+  socialProofCache.set(cacheKey, { at: Date.now(), body })
+  if (socialProofCache.size > 50) socialProofCache.clear()
+  res.json(body)
+})
+
+// The embeddable widget itself. Short cache so edits roll out quickly while
+// still absorbing traffic spikes on the landing page.
+app.get('/widgets/social-proof.js', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=300')
+  res.type('application/javascript')
+  res.sendFile(path.resolve('widgets/social-proof.js'))
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

@@ -477,6 +477,19 @@ export async function triggerLearningRebuild() {
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed') }
 }
 
+// ─── Social Proof ─────────────────────────────────────────────────────────────
+
+export async function fetchSocialProofPurchases({ product, days = 45, limit = 20 } = {}) {
+  const qs = new URLSearchParams()
+  if (product) qs.set('product', product)
+  qs.set('days', String(days))
+  qs.set('limit', String(limit))
+  const r = await apiFetch(`/api/social-proof/purchases?${qs.toString()}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch purchases')
+  return d // { purchases: [{ name, location, at }], embedBase }
+}
+
 // ─── Payment Recovery ─────────────────────────────────────────────────────────
 
 export async function fetchFailedPayments(status = 'failed') {

@@ -53,6 +53,12 @@ const IconClock = () => (
   </svg>
 )
 
+const IconMegaphone = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 6.5v3l2 .5 1.5 3.5 1.5-.5-1-3L14 12V2L4 6l-2 .5z" />
+  </svg>
+)
+
 const IconCalendar = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="1.5" y="2.5" width="13" height="12" rx="1.5" />
@@ -69,6 +75,7 @@ const modules = [
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
   { id: 'sales-analytics', label: 'Sales Analytics', icon: IconChartBar, comingSoon: false },
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
+  { id: 'social-proof', label: 'Social Proof', icon: IconMegaphone, comingSoon: false },
 ]
 
 export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect, onOpenLiveEvent }) {

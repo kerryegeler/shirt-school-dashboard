@@ -7,6 +7,7 @@ import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
 import SalesAnalytics from './modules/sales-analytics/SalesAnalytics.jsx'
 import Reminders from './modules/reminders/Reminders.jsx'
+import SocialProof from './modules/social-proof/SocialProof.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 import LiveEventModal from './components/LiveEventModal.jsx'
@@ -118,6 +119,7 @@ export default function App() {
           {activeModule === 'payment-recovery' && <PaymentRecovery />}
           {activeModule === 'sales-analytics' && <SalesAnalytics />}
           {activeModule === 'reminders' && <Reminders />}
+          {activeModule === 'social-proof' && <SocialProof />}
         </main>
       </div>
 
@@ -144,6 +146,7 @@ const MOBILE_SECTIONS = [
   { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
   { id: 'sales-analytics', label: 'Sales Analytics', short: 'Sales' },
   { id: 'reminders', label: 'Reminders', short: 'Reminders' },
+  { id: 'social-proof', label: 'Social Proof', short: 'Proof' },
 ]
 
 function MobileMenu({ activeModule, onSelect, unreadCount, onOpenLiveEvent }) {
