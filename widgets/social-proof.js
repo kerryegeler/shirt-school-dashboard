@@ -25,6 +25,12 @@
  *                  shuffled, so every page view surfaces different buyers)
  *   data-loop      "1" = keep cycling forever (default: one pass per page view)
  *   data-anon      "1" = include purchases with no name as "Someone"
+ *   data-pause     seconds popups stay hidden after the visitor interacts with
+ *                  a button/link/form field (default 90; "0" disables all
+ *                  interaction-hiding). Independent of this timer, a click on a
+ *                  purchase-intent CTA ("checkout", "buy", "register"…) or a
+ *                  visible checkout modal/iframe stops popups for the session,
+ *                  so they never cover the purchase button mid-checkout.
  *   data-test      "1" = demo mode: starts fast, ignores dismissal, and shows
  *                  sample data if there are no real purchases. NEVER leave this
  *                  on a live page.
@@ -50,6 +56,7 @@
   var LOOP = cfg.loop === '1'
   var ANON = cfg.anon === '1'
   var TEST = cfg.test === '1'
+  var PAUSE_MS = num(cfg.pause, 90) * 1000
   var DISMISS_KEY = 'ss_social_proof_dismissed'
 
   function num(v, fallback) {
@@ -168,12 +175,60 @@
 
     var stopped = false
     var timers = []
+    var snoozedUntil = 0
+    var checkoutPoll = null
     function later(fn, ms) { timers.push(setTimeout(fn, ms)) }
     function stop() {
       stopped = true
       for (var i = 0; i < timers.length; i++) clearTimeout(timers[i])
+      if (checkoutPoll) clearInterval(checkoutPoll)
+      document.removeEventListener('click', onInteract, true)
+      document.removeEventListener('focusin', onInteract, true)
       card.classList.remove('show')
-      later(function () { if (host.parentNode) host.parentNode.removeChild(host) }, 400)
+      setTimeout(function () { if (host.parentNode) host.parentNode.removeChild(host) }, 400)
+    }
+    function stopForSession() {
+      try { sessionStorage.setItem(DISMISS_KEY, '1') } catch (e) {}
+      stop()
+    }
+    function snooze() {
+      snoozedUntil = Date.now() + PAUSE_MS
+      card.classList.remove('show')
+    }
+
+    // Get out of the visitor's way the moment they engage with the page —
+    // especially the checkout flow, where a bottom popup can cover the
+    // purchase button on mobile.
+    var INTENT_RE = /checkout|buy now|purchase|order now|enroll|register|\bjoin\b|sign ?up|add to cart|claim|grab (my|your|a)|get (my|your|instant|access|started|the)|\bpay\b/i
+    function onInteract(e) {
+      var t = e.target
+      if (!t || t === host || (host.contains && host.contains(t))) return // our own popup
+      var el = t.closest ? t.closest('a,button,[role="button"],input,select,textarea,label') : null
+      if (!el) return
+      var txt = ((el.innerText || el.value || '') + ' ' + (el.getAttribute('href') || '')).slice(0, 160)
+      if (INTENT_RE.test(txt)) { stopForSession(); return }
+      snooze()
+    }
+
+    if (PAUSE_MS > 0 && !TEST) {
+      document.addEventListener('click', onInteract, true)
+      document.addEventListener('focusin', onInteract, true)
+      // Kajabi opens checkout as an overlay on the same page; if anything
+      // checkout-ish becomes visible, stop for the session.
+      checkoutPoll = setInterval(function () {
+        var el = null
+        try {
+          el = document.querySelector('iframe[src*="checkout" i], [class*="checkout" i], [id*="checkout" i]')
+        } catch (err) { /* old browser without `i` attr selectors */ }
+        if (el) {
+          // Only counts once it's actually on screen: a modal overlay right
+          // away, an inline checkout section when the visitor scrolls to it.
+          var r = el.getBoundingClientRect()
+          var onScreen = r.width > 200 && r.height > 200 &&
+            r.top < window.innerHeight && r.bottom > 0
+          if (onScreen) stopForSession()
+        }
+      }, 2000)
     }
 
     function render(ev) {
@@ -226,6 +281,12 @@
 
     function cycle(idx) {
       if (stopped) return
+      if (Date.now() < snoozedUntil) {
+        // Visitor is mid-interaction (e.g. filling out checkout) — check back
+        // once the snooze window has passed. Each new interaction extends it.
+        later(function () { cycle(idx) }, Math.max(snoozedUntil - Date.now(), 1000))
+        return
+      }
       if (idx >= events.length) {
         if (!LOOP) { stop(); return }
         idx = 0

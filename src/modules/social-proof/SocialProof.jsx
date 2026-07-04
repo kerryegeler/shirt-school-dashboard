@@ -299,6 +299,7 @@ export default function SocialProof() {
               <li>Go to <b>Settings → Page Scripts</b> (or add a <b>Custom Code</b> block).</li>
               <li>Paste the embed code into the <b>Footer</b> scripts area and save.</li>
               <li>Popups rotate through real recent purchases; visitors can dismiss them for their session.</li>
+              <li>They auto-hide whenever a visitor taps a button or form field, and stop for the session once someone heads to checkout — so they never cover the purchase button.</li>
             </ol>
             <div className="sp-howto-note">
               Reuse on any other page: paste the same snippet and change <code>data-product</code> and
