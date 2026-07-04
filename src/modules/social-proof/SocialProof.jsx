@@ -12,6 +12,8 @@ const DEFAULTS = {
   duration: 7,
   gap: 14,
   days: 45,
+  limit: 60,
+  shuffle: true,
 }
 
 const IconMegaphone = () => (
@@ -81,7 +83,7 @@ export default function SocialProof() {
     setLoading(true)
     setError('')
     try {
-      const d = await fetchSocialProofPurchases({ product, days, limit: 20 })
+      const d = await fetchSocialProofPurchases({ product, days, limit: 200 })
       setPurchases(d.purchases || [])
       setEmbedBase(d.embedBase)
     } catch (err) {
@@ -113,6 +115,8 @@ export default function SocialProof() {
     if (Number(config.duration) !== DEFAULTS.duration) attrs.push(`data-duration="${config.duration}"`)
     if (Number(config.gap) !== DEFAULTS.gap) attrs.push(`data-gap="${config.gap}"`)
     if (Number(config.days) !== DEFAULTS.days) attrs.push(`data-days="${config.days}"`)
+    if (Number(config.limit) !== DEFAULTS.limit) attrs.push(`data-limit="${config.limit}"`)
+    if (!config.shuffle) attrs.push('data-shuffle="0"')
     return `<script ${attrs.join(' ')} async></script>`
   }, [base, config])
 
@@ -142,6 +146,7 @@ export default function SocialProof() {
     s.dataset.accent = config.accent
     s.dataset.duration = String(config.duration)
     s.dataset.gap = '3'
+    if (!config.shuffle) s.dataset.shuffle = '0'
     s.dataset.test = '1'
     document.body.appendChild(s)
     setDemoRunning(true)
@@ -258,6 +263,24 @@ export default function SocialProof() {
             <div className="sp-field">
               <label className="sp-label">Show last (days)</label>
               <input type="number" min="1" max="365" className="sp-input" value={config.days} onChange={set('days')} />
+            </div>
+          </div>
+
+          <div className="sp-row">
+            <div className="sp-field">
+              <label className="sp-label">Pool size <span className="sp-label-hint">how many recent buyers to rotate through (max 200)</span></label>
+              <input type="number" min="1" max="200" className="sp-input" value={config.limit} onChange={set('limit')} />
+            </div>
+            <div className="sp-field">
+              <label className="sp-label">Order <span className="sp-label-hint">random shows different buyers on every visit</span></label>
+              <select
+                className="sp-input"
+                value={config.shuffle ? 'random' : 'newest'}
+                onChange={(e) => setConfig((c) => ({ ...c, shuffle: e.target.value === 'random' }))}
+              >
+                <option value="random">Random (recommended)</option>
+                <option value="newest">Newest first</option>
+              </select>
             </div>
           </div>
 

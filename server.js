@@ -7312,39 +7312,49 @@ app.get('/api/social-proof/purchases', async (req, res) => {
 
   const productKey = normalizeProductKey(req.query.product || 'launch your brand challenge')
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 45, 1), 365)
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50)
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 60, 1), 200)
 
   const cacheKey = `${productKey}|${days}|${limit}`
   const hit = socialProofCache.get(cacheKey)
   if (hit && Date.now() - hit.at < 60_000) return res.json(hit.body)
 
   const sinceIso = new Date(Date.now() - days * 86_400_000).toISOString()
-  const { data: rows, error } = await supabase.from('kajabi_payments')
-    .select('customer_name, customer_email, product_name, raw_data, synced_at')
-    .eq('status', 'success')
-    .gte('synced_at', sinceIso)
-    .order('synced_at', { ascending: false })
-    .limit(400)
-  if (error) {
-    console.error('[SocialProof] query error:', error.message)
-    return res.status(500).json({ error: 'Lookup failed' })
-  }
 
+  // Page through the window rather than one capped query — a busy challenge
+  // launch can put hundreds of sales (plus other products) in the window, and
+  // Supabase returns at most ~1000 rows per request anyway.
   const seen = new Set() // dedupe repeat buyers (e.g. ticket + VIP upgrade)
   const purchases = []
-  for (const row of rows || []) {
-    if (productKey && !normalizeProductKey(row.product_name).includes(productKey)) continue
-    const dedupeKey = (row.customer_email || row.customer_name || '').toLowerCase().trim()
-    if (dedupeKey) {
-      if (seen.has(dedupeKey)) continue
-      seen.add(dedupeKey)
+  const PAGE = 1000
+  const MAX_SCAN = 5000
+  for (let offset = 0; offset < MAX_SCAN && purchases.length < limit; offset += PAGE) {
+    const { data: rows, error } = await supabase.from('kajabi_payments')
+      .select('customer_name, customer_email, product_name, raw_data, synced_at')
+      .eq('status', 'success')
+      .gte('synced_at', sinceIso)
+      .order('synced_at', { ascending: false })
+      .range(offset, offset + PAGE - 1)
+    if (error) {
+      console.error('[SocialProof] query error:', error.message)
+      return res.status(500).json({ error: 'Lookup failed' })
     }
-    purchases.push({
-      name: firstNameOnly(row.customer_name),
-      location: extractPurchaseLocation(row.raw_data),
-      at: row.synced_at,
-    })
-    if (purchases.length >= limit) break
+
+    for (const row of rows || []) {
+      if (productKey && !normalizeProductKey(row.product_name).includes(productKey)) continue
+      const dedupeKey = (row.customer_email || row.customer_name || '').toLowerCase().trim()
+      if (dedupeKey) {
+        if (seen.has(dedupeKey)) continue
+        seen.add(dedupeKey)
+      }
+      purchases.push({
+        name: firstNameOnly(row.customer_name),
+        location: extractPurchaseLocation(row.raw_data),
+        at: row.synced_at,
+      })
+      if (purchases.length >= limit) break
+    }
+
+    if (!rows || rows.length < PAGE) break // window exhausted
   }
 
   const body = { purchases, embedBase: process.env.RAILWAY_PUBLIC_URL || null }

@@ -20,6 +20,9 @@
  *   data-duration  seconds each popup stays visible (default 7)
  *   data-gap       seconds between popups (default 14)
  *   data-days      how far back to show purchases (default 45)
+ *   data-limit     size of the purchase pool to pull (default 60, max 200)
+ *   data-shuffle   "0" = show newest-first instead of random order (default:
+ *                  shuffled, so every page view surfaces different buyers)
  *   data-loop      "1" = keep cycling forever (default: one pass per page view)
  *   data-anon      "1" = include purchases with no name as "Someone"
  *   data-test      "1" = demo mode: starts fast, ignores dismissal, and shows
@@ -42,6 +45,8 @@
   var DURATION = num(cfg.duration, 7) * 1000
   var GAP = num(cfg.gap, 14) * 1000
   var DAYS = num(cfg.days, 45)
+  var LIMIT = Math.min(num(cfg.limit, 60), 200)
+  var SHUFFLE = cfg.shuffle !== '0'
   var LOOP = cfg.loop === '1'
   var ANON = cfg.anon === '1'
   var TEST = cfg.test === '1'
@@ -75,6 +80,16 @@
     reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   } catch (e) {}
 
+  // Fisher–Yates. Randomizing the rotation keeps repeat visitors from seeing
+  // the identical sequence every time.
+  function shuffle(arr) {
+    for (var i = arr.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1))
+      var t = arr[i]; arr[i] = arr[j]; arr[j] = t
+    }
+    return arr
+  }
+
   function init() {
     if (dismissed()) return
 
@@ -83,7 +98,7 @@
     var prev = document.querySelectorAll('[data-ss-social-proof]')
     for (var i = 0; i < prev.length; i++) prev[i].parentNode.removeChild(prev[i])
 
-    var qs = '?product=' + encodeURIComponent(PRODUCT) + '&days=' + DAYS + '&limit=20'
+    var qs = '?product=' + encodeURIComponent(PRODUCT) + '&days=' + DAYS + '&limit=' + LIMIT
     fetch(API_BASE + '/api/social-proof/purchases' + qs)
       .then(function (r) { return r.ok ? r.json() : { purchases: [] } })
       .then(function (data) {
@@ -97,6 +112,7 @@
             { name: 'Mike', location: null, at: new Date(Date.now() - 3 * 3600000).toISOString() },
           ]
         }
+        if (SHUFFLE) shuffle(events)
         if (events.length) run(events)
       })
       .catch(function () {}) // social proof must never break the host page
