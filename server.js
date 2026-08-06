@@ -97,6 +97,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/kajabi/webhook', // Called by Kajabi, not the dashboard user
   '/api/stripe/webhook', // Called by Stripe, not the dashboard user
   '/api/social-proof/purchases', // Called by the popup widget on public landing pages; returns sanitized data only
+  '/api/utm/collect',    // Called by the UTM tracker on public landing/thank-you pages (Kajabi + GHL)
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -4878,6 +4879,13 @@ async function shouldRunCatchUpBrief() {
 }
 
 function startContentBriefScheduler() {
+  // Mon/Thu 8am CT brief is off by default — set CONTENT_BRIEF_SCHEDULE=on to re-enable.
+  // Manual runs ("▶ Run Brief Now" / POST /api/content/run-brief) are unaffected.
+  if (process.env.CONTENT_BRIEF_SCHEDULE !== 'on') {
+    console.log('  Content Agent: scheduled brief disabled (set CONTENT_BRIEF_SCHEDULE=on to re-enable)')
+    return
+  }
+
   if (!process.env.YOUTUBE_API_KEY && !process.env.SERPER_API_KEY) {
     console.log('  Content Agent: not configured (set YOUTUBE_API_KEY + SERPER_API_KEY to enable)')
     return
@@ -7369,6 +7377,362 @@ app.get('/widgets/social-proof.js', (_req, res) => {
   res.set('Cache-Control', 'public, max-age=300')
   res.type('application/javascript')
   res.sendFile(path.resolve('widgets/social-proof.js'))
+})
+
+// ─── UTM Lead Tracking ────────────────────────────────────────────────────────
+// Answers "which platform sent this lead?" across Kajabi and Go High Level.
+// The embeddable client lives in widgets/utm.js — see that file's header for
+// the embed snippets and how attribution survives the landing → thank-you hop.
+
+const UTM_FIELDS = ['campaign', 'source', 'medium', 'content', 'term']
+
+// Salted so the raw IP never lands in the database. Only used to re-link a
+// visitor whose funnel crossed domains and lost its localStorage.
+function utmIpHash(req) {
+  const fwd = req.headers['x-forwarded-for']
+  const ip = (typeof fwd === 'string' ? fwd.split(',')[0] : null) || req.ip || req.socket?.remoteAddress || ''
+  const ua = req.headers['user-agent'] || ''
+  if (!ip) return null
+  return crypto.createHmac('sha256', SESSION_SECRET).update(`${ip}|${ua}`).digest('hex').slice(0, 32)
+}
+
+function cleanUtmValue(v) {
+  if (v === null || v === undefined) return null
+  const s = String(v).trim().toLowerCase()
+  if (!s || s.length > 120) return null
+  return s
+}
+
+// Supabase caps a single select at 1000 rows. Walk pages so a busy launch week
+// doesn't silently report partial numbers.
+async function fetchAllUtmEvents(fromIso, toIso, campaign) {
+  const PAGE = 1000
+  const MAX_ROWS = 50000
+  const rows = []
+  for (let offset = 0; offset < MAX_ROWS; offset += PAGE) {
+    let q = supabase.from('utm_events')
+      .select('event_type, source, medium, campaign, content, email, page_url, occurred_at')
+      .gte('occurred_at', fromIso).lte('occurred_at', toIso)
+      .order('occurred_at', { ascending: false })
+      .range(offset, offset + PAGE - 1)
+    if (campaign) q = q.eq('campaign', campaign)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    rows.push(...(data || []))
+    if (!data || data.length < PAGE) break
+  }
+  return rows
+}
+
+// Build the tagged URL for a link row. This is what gets posted on each platform.
+function buildTaggedUrl(link) {
+  try {
+    const u = new URL(link.destination_url)
+    u.searchParams.set('utm_source', link.source)
+    u.searchParams.set('utm_campaign', link.campaign)
+    if (link.medium) u.searchParams.set('utm_medium', link.medium)
+    if (link.content) u.searchParams.set('utm_content', link.content)
+    if (link.term) u.searchParams.set('utm_term', link.term)
+    return u.toString()
+  } catch {
+    return link.destination_url
+  }
+}
+
+// The embeddable tracker. Short cache so edits roll out quickly.
+app.get('/widgets/utm.js', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=300')
+  res.type('application/javascript')
+  res.sendFile(path.resolve('widgets/utm.js'))
+})
+
+// Optional short link: /go/<slug> logs the click server-side, then forwards to
+// the tagged destination. Useful where a long tagged URL is ugly (a YouTube
+// description) or where you may want to repoint the destination after posting.
+app.get('/go/:slug', async (req, res) => {
+  const slug = String(req.params.slug || '').toLowerCase()
+  if (!supabase) return res.redirect(302, '/')
+
+  const { data: link } = await supabase.from('utm_links')
+    .select('*').eq('slug', slug).maybeSingle()
+
+  if (!link) return res.status(404).send('Link not found')
+
+  const visitorId = crypto.randomUUID()
+  const target = new URL(buildTaggedUrl(link))
+  target.searchParams.set('ssv', visitorId)
+
+  // Redirect first — never make a real visitor wait on our own bookkeeping.
+  res.redirect(302, target.toString())
+
+  try {
+    await supabase.from('utm_events').insert({
+      event_type: 'click',
+      visitor_id: visitorId,
+      link_id: link.id,
+      campaign: link.campaign,
+      source: link.source,
+      medium: link.medium,
+      content: link.content,
+      term: link.term,
+      page_url: target.toString(),
+      referrer: req.headers.referer || null,
+      landing_url: link.destination_url,
+      ip_hash: utmIpHash(req),
+      user_agent: (req.headers['user-agent'] || '').slice(0, 500),
+      dedup_key: `click:${visitorId}`,
+    })
+  } catch (err) {
+    console.error('[UTM] click log failed:', err.message)
+  }
+})
+
+// Public collector. Called by widgets/utm.js from landing and thank-you pages.
+app.post('/api/utm/collect', async (req, res) => {
+  res.status(204).send() // ack immediately; the visitor's page is waiting on nothing
+  if (!supabase) return
+
+  try {
+    const b = req.body || {}
+    const eventType = ['visit', 'lead'].includes(b.event_type) ? b.event_type : 'visit'
+    const visitorId = b.visitor_id ? String(b.visitor_id).slice(0, 100) : null
+    if (!visitorId) return
+
+    const attrib = {}
+    for (const f of UTM_FIELDS) attrib[f] = cleanUtmValue(b[f])
+
+    const ipHash = utmIpHash(req)
+
+    // A lead with no tags means the visitor crossed domains (or cleared storage)
+    // between landing and converting. Re-link them: first by visitor id, then by
+    // IP+device within the last 6 hours. Without this, cross-domain funnels would
+    // report every lead as "direct".
+    if (!attrib.source && !attrib.campaign) {
+      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()
+      let prior = null
+
+      const { data: byVisitor } = await supabase.from('utm_events')
+        .select('campaign, source, medium, content, term')
+        .eq('visitor_id', visitorId).in('event_type', ['click', 'visit'])
+        .not('source', 'is', null)
+        .order('occurred_at', { ascending: false }).limit(1)
+      prior = byVisitor?.[0] || null
+
+      if (!prior && ipHash) {
+        const { data: byIp } = await supabase.from('utm_events')
+          .select('campaign, source, medium, content, term')
+          .eq('ip_hash', ipHash).in('event_type', ['click', 'visit'])
+          .not('source', 'is', null).gte('occurred_at', sixHoursAgo)
+          .order('occurred_at', { ascending: false }).limit(1)
+        prior = byIp?.[0] || null
+      }
+
+      if (prior) for (const f of UTM_FIELDS) attrib[f] = attrib[f] || prior[f] || null
+    }
+
+    // One lead per visitor per campaign; one visit per visitor per page per day.
+    // The unique index on dedup_key is what actually enforces it — a thank-you
+    // page refresh hits the conflict and is ignored rather than double-counted.
+    const dayStamp = new Date().toISOString().slice(0, 10)
+    const dedupKey = eventType === 'lead'
+      ? `lead:${visitorId}:${attrib.campaign || 'direct'}`
+      : `visit:${visitorId}:${String(b.page_url || '').slice(0, 200)}:${dayStamp}`
+
+    const email = typeof b.email === 'string' && b.email.includes('@')
+      ? b.email.trim().toLowerCase().slice(0, 200) : null
+
+    const { error } = await supabase.from('utm_events').upsert({
+      event_type: eventType,
+      visitor_id: visitorId,
+      campaign: attrib.campaign,
+      source: attrib.source,
+      medium: attrib.medium,
+      content: attrib.content,
+      term: attrib.term,
+      page_url: b.page_url ? String(b.page_url).slice(0, 1000) : null,
+      referrer: b.referrer ? String(b.referrer).slice(0, 1000) : null,
+      landing_url: b.landing_url ? String(b.landing_url).slice(0, 1000) : null,
+      email,
+      ip_hash: ipHash,
+      user_agent: (req.headers['user-agent'] || '').slice(0, 500),
+      dedup_key: dedupKey,
+    }, { onConflict: 'dedup_key', ignoreDuplicates: true })
+
+    if (error) console.error('[UTM] collect insert failed:', error.message)
+    else if (eventType === 'lead') {
+      console.log(`[UTM] lead → source=${attrib.source || 'direct'} campaign=${attrib.campaign || 'none'}`)
+    }
+  } catch (err) {
+    console.error('[UTM] collect error:', err.message)
+  }
+})
+
+// ─── UTM dashboard routes (authenticated) ─────────────────────────────────────
+
+app.get('/api/utm/links', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ links: [], embedBase: null })
+  const { data, error } = await supabase.from('utm_links')
+    .select('*').order('created_at', { ascending: false })
+  if (error) return res.status(500).json({ error: error.message })
+  const base = process.env.RAILWAY_PUBLIC_URL || `${req.protocol}://${req.get('host')}`
+  res.json({
+    links: (data || []).map((l) => ({
+      ...l,
+      tagged_url: buildTaggedUrl(l),
+      short_url: `${base}/go/${l.slug}`,
+    })),
+    embedBase: base,
+  })
+})
+
+app.post('/api/utm/links', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const b = req.body || {}
+
+  const destination = String(b.destination_url || '').trim()
+  if (!destination) return res.status(400).json({ error: 'Destination URL is required' })
+  let normalizedDestination
+  try {
+    normalizedDestination = new URL(/^https?:\/\//i.test(destination) ? destination : `https://${destination}`).toString()
+  } catch {
+    return res.status(400).json({ error: 'Destination URL is not a valid URL' })
+  }
+
+  const campaign = cleanUtmValue(b.campaign)
+  const source = cleanUtmValue(b.source)
+  if (!campaign) return res.status(400).json({ error: 'Campaign is required' })
+  if (!source) return res.status(400).json({ error: 'Source is required' })
+
+  // Slugs are the public /go/ path, so keep them url-safe and collision-free.
+  const base = `${source}-${campaign}`.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+  let slug = base || 'link'
+  const { data: existing } = await supabase.from('utm_links').select('slug').like('slug', `${slug}%`)
+  if ((existing || []).some((r) => r.slug === slug)) {
+    slug = `${slug}-${crypto.randomBytes(2).toString('hex')}`
+  }
+
+  const { data, error } = await supabase.from('utm_links').insert({
+    slug,
+    label: b.label ? String(b.label).trim().slice(0, 200) : null,
+    destination_url: normalizedDestination,
+    campaign,
+    source,
+    medium: cleanUtmValue(b.medium),
+    content: cleanUtmValue(b.content),
+    term: cleanUtmValue(b.term),
+  }).select().single()
+
+  if (error) return res.status(500).json({ error: error.message })
+  const publicBase = process.env.RAILWAY_PUBLIC_URL || `${req.protocol}://${req.get('host')}`
+  res.json({ link: { ...data, tagged_url: buildTaggedUrl(data), short_url: `${publicBase}/go/${data.slug}` } })
+})
+
+app.patch('/api/utm/links/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const updates = {}
+  if ('archived' in req.body) updates.archived = !!req.body.archived
+  if ('label' in req.body) updates.label = String(req.body.label || '').trim().slice(0, 200) || null
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' })
+  const { error } = await supabase.from('utm_links').update(updates).eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+app.delete('/api/utm/links/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const { error } = await supabase.from('utm_links').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+// The metrics view: leads grouped by where they came from.
+app.get('/api/utm/stats', requireAuth, async (req, res) => {
+  if (!supabase) return res.json({ totals: {}, bySource: [], daily: [], recentLeads: [], campaigns: [] })
+
+  const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365)
+  const campaign = cleanUtmValue(req.query.campaign)
+  const toIso = new Date().toISOString()
+  const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+
+  try {
+    // Campaign list for the filter dropdown is drawn from saved links plus
+    // anything that has actually reported events, so a campaign shows up even
+    // if its link was built somewhere else.
+    const [{ data: linkRows }, events] = await Promise.all([
+      supabase.from('utm_links').select('campaign'),
+      fetchAllUtmEvents(fromIso, toIso, campaign),
+    ])
+
+    const campaigns = [...new Set([
+      ...(linkRows || []).map((r) => r.campaign),
+      ...events.map((e) => e.campaign),
+    ].filter(Boolean))].sort()
+
+    const totals = { clicks: 0, visits: 0, leads: 0 }
+    const groups = new Map()
+    const daily = new Map()
+
+    for (const ev of events) {
+      if (ev.event_type === 'click') totals.clicks++
+      else if (ev.event_type === 'visit') totals.visits++
+      else if (ev.event_type === 'lead') totals.leads++
+
+      const source = ev.source || 'direct'
+      const medium = ev.medium || null
+      const key = `${source}|||${medium || ''}`
+      if (!groups.has(key)) {
+        groups.set(key, { source, medium, clicks: 0, visits: 0, leads: 0, campaigns: new Set() })
+      }
+      const g = groups.get(key)
+      if (ev.event_type === 'click') g.clicks++
+      else if (ev.event_type === 'visit') g.visits++
+      else if (ev.event_type === 'lead') g.leads++
+      if (ev.campaign) g.campaigns.add(ev.campaign)
+
+      const day = String(ev.occurred_at).slice(0, 10)
+      if (!daily.has(day)) daily.set(day, { date: day, visits: 0, leads: 0 })
+      if (ev.event_type === 'visit') daily.get(day).visits++
+      else if (ev.event_type === 'lead') daily.get(day).leads++
+    }
+
+    const bySource = [...groups.values()]
+      .map((g) => ({
+        source: g.source,
+        medium: g.medium,
+        clicks: g.clicks,
+        visits: g.visits,
+        leads: g.leads,
+        // Against visits, not clicks: a visit is the honest denominator since
+        // untagged traffic and non-redirect links produce visits with no click.
+        conversion_rate: g.visits > 0 ? Math.round((g.leads / g.visits) * 1000) / 10 : null,
+        campaigns: [...g.campaigns].sort(),
+      }))
+      .sort((a, b) => b.leads - a.leads || b.visits - a.visits)
+
+    const recentLeads = events
+      .filter((e) => e.event_type === 'lead')
+      .slice(0, 50)
+      .map((e) => ({
+        occurred_at: e.occurred_at,
+        source: e.source || 'direct',
+        medium: e.medium,
+        campaign: e.campaign,
+        email: e.email,
+        page_url: e.page_url,
+      }))
+
+    res.json({
+      range: { days, from: fromIso, to: toIso },
+      totals,
+      bySource,
+      daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
+      recentLeads,
+      campaigns,
+    })
+  } catch (err) {
+    console.error('[UTM] stats error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

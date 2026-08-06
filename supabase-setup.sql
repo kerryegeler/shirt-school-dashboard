@@ -381,3 +381,56 @@ create table if not exists agent_action_proposals (
 alter table agent_action_proposals disable row level security;
 create index if not exists idx_action_proposals_status on agent_action_proposals(status, created_at desc);
 create index if not exists idx_action_proposals_thread on agent_action_proposals(thread_id);
+
+-- ─── UTM Lead Tracking ───────────────────────────────────────────────────────
+-- Attributes leads to the platform that sent them (YouTube / email / Meta ads).
+-- Works across Kajabi AND Go High Level, on any domain, via widgets/utm.js.
+--
+-- Flow: build a tagged link in the dashboard → post it on one platform only →
+-- the snippet on the landing page records a 'visit' and remembers the source →
+-- the snippet on the thank-you page records a 'lead' against that same source.
+
+-- Saved links built in the dashboard's link builder.
+create table if not exists utm_links (
+  id               uuid primary key default gen_random_uuid(),
+  slug             text unique not null,      -- short-link path: /go/<slug>
+  label            text,                      -- human name, e.g. "YouTube — Aug 17 webinar"
+  destination_url  text not null,             -- landing page, no query string
+  campaign         text not null,             -- utm_campaign, e.g. "webinar-aug17"
+  source           text not null,             -- utm_source, e.g. "youtube"
+  medium           text,                      -- utm_medium, e.g. "video" / "email" / "cpc"
+  content          text,                      -- utm_content, for A/B variants
+  term             text,                      -- utm_term
+  archived         boolean not null default false,
+  created_at       timestamptz not null default now()
+);
+alter table utm_links disable row level security;
+create index if not exists idx_utm_links_campaign on utm_links(campaign, created_at desc);
+
+-- Every tracked event. One row per click / landing-page visit / lead.
+-- dedup_key is what stops a thank-you page refresh from counting as 2 leads.
+create table if not exists utm_events (
+  id           uuid primary key default gen_random_uuid(),
+  event_type   text not null,                 -- 'click' | 'visit' | 'lead'
+  visitor_id   text,                          -- anonymous id minted by the snippet
+  link_id      uuid references utm_links(id) on delete set null,
+  campaign     text,
+  source       text,
+  medium       text,
+  content      text,
+  term         text,
+  page_url     text,
+  referrer     text,
+  landing_url  text,                          -- first page of the session
+  email        text,                          -- captured opportunistically, may be null
+  ip_hash      text,                          -- salted hash, used for cross-domain fallback
+  user_agent   text,
+  dedup_key    text unique,
+  occurred_at  timestamptz not null default now()
+);
+alter table utm_events disable row level security;
+create index if not exists idx_utm_events_occurred on utm_events(occurred_at desc);
+create index if not exists idx_utm_events_type on utm_events(event_type, occurred_at desc);
+create index if not exists idx_utm_events_campaign on utm_events(campaign, event_type, occurred_at desc);
+create index if not exists idx_utm_events_visitor on utm_events(visitor_id, occurred_at desc);
+create index if not exists idx_utm_events_iphash on utm_events(ip_hash, occurred_at desc);

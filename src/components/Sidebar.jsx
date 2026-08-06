@@ -67,6 +67,13 @@ const IconCalendar = () => (
   </svg>
 )
 
+const IconLinkChain = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6.5 9.5a3 3 0 004.24 0l2.12-2.12a3 3 0 00-4.24-4.24L7.56 4.2" />
+    <path d="M9.5 6.5a3 3 0 00-4.24 0L3.14 8.62a3 3 0 004.24 4.24l1.06-1.06" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
@@ -76,6 +83,7 @@ const modules = [
   { id: 'sales-analytics', label: 'Sales Analytics', icon: IconChartBar, comingSoon: false },
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
   { id: 'social-proof', label: 'Social Proof', icon: IconMegaphone, comingSoon: false },
+  { id: 'utm-tracker', label: 'Lead Tracking', icon: IconLinkChain, comingSoon: false },
 ]
 
 export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect, onOpenLiveEvent }) {

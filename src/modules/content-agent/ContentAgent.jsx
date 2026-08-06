@@ -159,7 +159,7 @@ function IdeasBank({ onSchedule }) {
       {!loading && filtered.length === 0 && (
         <div className="ca-empty">
           {ideas.length === 0
-            ? 'No saved ideas yet. Click ⭐ Save in Slack when a daily brief drops, or run a brief now from the Past Briefs tab.'
+            ? 'No saved ideas yet. Run a brief from the Past Briefs tab, then ⭐ Save the ideas you want to keep.'
             : 'No ideas in this category.'}
         </div>
       )}

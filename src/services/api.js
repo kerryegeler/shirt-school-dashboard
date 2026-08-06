@@ -685,3 +685,44 @@ export async function saveCustomerProfile(email, fields) {
   if (!r.ok) throw new Error(d.error || 'Failed to save customer profile')
   return d.profile
 }
+
+// ─── UTM Lead Tracking ────────────────────────────────────────────────────────
+
+export async function fetchUtmLinks() {
+  const r = await apiFetch('/api/utm/links')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load links')
+  return d // { links, embedBase }
+}
+
+export async function createUtmLink(fields) {
+  const r = await apiFetch('/api/utm/links', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create link')
+  return d.link
+}
+
+export async function updateUtmLink(id, updates) {
+  const r = await apiFetch(`/api/utm/links/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to update link') }
+}
+
+export async function deleteUtmLink(id) {
+  const r = await apiFetch(`/api/utm/links/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete link') }
+}
+
+export async function fetchUtmStats({ days = 30, campaign = '' } = {}) {
+  const qs = new URLSearchParams({ days: String(days) })
+  if (campaign) qs.set('campaign', campaign)
+  const r = await apiFetch(`/api/utm/stats?${qs}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load stats')
+  return d
+}
