@@ -46,8 +46,16 @@
 
   var STORAGE_KEY = 'ss_utm_attr'
   var VISITOR_KEY = 'ss_utm_vid'
-  var SENT_KEY = 'ss_utm_sent'
+  // Version suffix: bumping it retires every marker written by an older build.
+  // v2 clears markers left by the pre-text/plain snippet, which recorded leads
+  // as "sent" that iOS Safari had actually dropped (see the send() comment).
+  var SENT_KEY = 'ss_utm_sent_v2'
   var TTL_DAYS = 90
+  // The server's unique dedup_key is what actually guarantees one lead per
+  // visitor per campaign. This marker only exists to skip a redundant request,
+  // so it expires quickly — a bad one costs at most one duplicate POST, which
+  // the server discards, rather than silently suppressing a real lead forever.
+  var SENT_TTL_MS = 30 * 60 * 1000
 
   // ── Locate ourselves ───────────────────────────────────────────────────────
   // The API lives on whatever host served this file, so the same snippet works
@@ -209,7 +217,8 @@
     if (eventType === 'lead') {
       sentKey = visitorId + ':' + (payload.campaign || 'direct')
       var alreadySent = load(SENT_KEY)
-      if (alreadySent && alreadySent.key === sentKey) {
+      if (alreadySent && alreadySent.key === sentKey &&
+          Date.now() - (alreadySent.at || 0) < SENT_TTL_MS) {
         log('lead already recorded for', sentKey)
         return
       }
