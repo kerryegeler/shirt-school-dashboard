@@ -27,6 +27,9 @@ app.use(cors())
 const captureRawBody = (req, _res, buf) => { req.rawBody = buf.toString('utf8') }
 app.use(express.json({ limit: '5mb', verify: captureRawBody }))
 app.use(express.urlencoded({ extended: true, limit: '5mb', verify: captureRawBody }))
+// The UTM tracker posts JSON with a text/plain content type on purpose — see
+// widgets/utm.js. Nothing else sends text/plain, so parsing it is harmless.
+app.use(express.text({ type: 'text/plain', limit: '64kb' }))
 
 // ─── Dashboard session (signed HTTP-only cookie, no DB needed) ────────────────
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production'
@@ -7493,7 +7496,9 @@ app.post('/api/utm/collect', async (req, res) => {
   if (!supabase) return
 
   try {
-    const b = req.body || {}
+    // Sent as text/plain to dodge a CORS preflight (see widgets/utm.js), so the
+    // body arrives as a raw string rather than pre-parsed by express.json.
+    const b = (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) || {}
     const eventType = ['visit', 'lead'].includes(b.event_type) ? b.event_type : 'visit'
     const visitorId = b.visitor_id ? String(b.visitor_id).slice(0, 100) : null
     if (!visitorId) return

@@ -227,11 +227,19 @@
       if (sentKey) store(SENT_KEY, { key: sentKey, at: Date.now() })
     }
 
-    // sendBeacon survives the page unloading mid-request, which matters on
-    // thank-you pages that immediately redirect somewhere else.
+    // The body is JSON, but it MUST go out as text/plain. Content types beyond
+    // text/plain, form-urlencoded and multipart are not CORS-safelisted, so
+    // application/json forces a preflight — and iOS Safari silently drops any
+    // sendBeacon that would need one. That made iPhone traffic vanish while
+    // Chrome worked fine. text/plain skips the preflight entirely and saves a
+    // round trip; the server parses the string back into JSON. Do not "fix"
+    // this back to application/json.
+    //
+    // sendBeacon first because it survives the page unloading mid-request,
+    // which matters on thank-you pages that redirect straight somewhere else.
     try {
       if (navigator.sendBeacon) {
-        var blob = new Blob([body], { type: 'application/json' })
+        var blob = new Blob([body], { type: 'text/plain;charset=UTF-8' })
         if (navigator.sendBeacon(url, blob)) {
           markSent()
           return
@@ -242,7 +250,7 @@
     try {
       fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: body,
         keepalive: true,
         mode: 'cors',
