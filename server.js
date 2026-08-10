@@ -7389,6 +7389,13 @@ app.get('/widgets/social-proof.js', (_req, res) => {
 
 const UTM_FIELDS = ['campaign', 'source', 'medium', 'content', 'term']
 
+// Paths the dashboard itself owns. A short link may not claim one of these, or
+// it would be shadowed by the real route and never resolve.
+const RESERVED_SHORT_SLUGS = new Set([
+  'api', 'widgets', 'go', 'auth', 'assets', 'static', 'public', 'dist',
+  'login', 'logout', 'dashboard', 'index', 'favicon', 'robots', 'sitemap',
+])
+
 // Salted so the raw IP never lands in the database. Only used to re-link a
 // visitor whose funnel crossed domains and lost its localStorage.
 function utmIpHash(req) {
@@ -7449,18 +7456,15 @@ app.get('/widgets/utm.js', (_req, res) => {
   res.sendFile(path.resolve('widgets/utm.js'))
 })
 
-// Optional short link: /go/<slug> logs the click server-side, then forwards to
-// the tagged destination. Useful where a long tagged URL is ugly (a YouTube
-// description) or where you may want to repoint the destination after posting.
-app.get('/go/:slug', async (req, res) => {
-  const slug = String(req.params.slug || '').toLowerCase()
-  if (!supabase) return res.redirect(302, '/')
-
-  const { data: link } = await supabase.from('utm_links')
-    .select('*').eq('slug', slug).maybeSingle()
-
-  if (!link) return res.status(404).send('Link not found')
-
+// Short links log the click server-side, then forward to the tagged destination.
+// Useful where a long tagged URL is ugly (a YouTube description) or where you may
+// want to repoint the destination after posting.
+//
+// Two shapes resolve to the same link:
+//   /<slug>      — the short one, e.g. go.kerryegeler.com/brain
+//   /go/<slug>   — kept forever as an alias, because links already posted to
+//                  YouTube or an email cannot be edited after the fact.
+async function redirectShortLink(link, req, res) {
   const visitorId = crypto.randomUUID()
   const target = new URL(buildTaggedUrl(link))
   target.searchParams.set('ssv', visitorId)
@@ -7488,6 +7492,19 @@ app.get('/go/:slug', async (req, res) => {
   } catch (err) {
     console.error('[UTM] click log failed:', err.message)
   }
+}
+
+async function lookupShortLink(slug) {
+  if (!supabase || !slug) return null
+  const { data } = await supabase.from('utm_links')
+    .select('*').eq('slug', String(slug).toLowerCase()).maybeSingle()
+  return data || null
+}
+
+app.get('/go/:slug', async (req, res) => {
+  const link = await lookupShortLink(req.params.slug)
+  if (!link) return res.status(404).send('Link not found')
+  return redirectShortLink(link, req, res)
 })
 
 // Public collector. Called by widgets/utm.js from landing and thank-you pages.
@@ -7584,7 +7601,8 @@ app.get('/api/utm/links', requireAuth, async (req, res) => {
     links: (data || []).map((l) => ({
       ...l,
       tagged_url: buildTaggedUrl(l),
-      short_url: `${base}/go/${l.slug}`,
+      // Bare form — /go/<slug> still resolves for links already out in the wild.
+      short_url: `${base}/${l.slug}`,
     })),
     embedBase: base,
   })
@@ -7617,6 +7635,9 @@ app.post('/api/utm/links', requireAuth, async (req, res) => {
 
   const requestedSlug = sanitizeSlug(b.slug)
   let slug
+  if (requestedSlug && RESERVED_SHORT_SLUGS.has(requestedSlug)) {
+    return res.status(400).json({ error: `"${requestedSlug}" is reserved by the dashboard. Pick a different short link.` })
+  }
   if (requestedSlug) {
     // A custom slug that silently became something else would send traffic to
     // the wrong place, so a collision is an error rather than a rename.
@@ -7645,7 +7666,7 @@ app.post('/api/utm/links', requireAuth, async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message })
   const publicBase = process.env.RAILWAY_PUBLIC_URL || `${req.protocol}://${req.get('host')}`
-  res.json({ link: { ...data, tagged_url: buildTaggedUrl(data), short_url: `${publicBase}/go/${data.slug}` } })
+  res.json({ link: { ...data, tagged_url: buildTaggedUrl(data), short_url: `${publicBase}/${data.slug}` } })
 })
 
 app.patch('/api/utm/links/:id', requireAuth, async (req, res) => {
@@ -7766,6 +7787,30 @@ app.get('/api/health', (_req, res) => {
     gmailConfigured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     connectedAccounts: connectedAccounts(),
   })
+})
+
+// ─── Bare short links: go.kerryegeler.com/<slug> ─────────────────────────────
+// Registered last on purpose. Every real route above is matched first, and an
+// unknown slug calls next() so the dashboard SPA still loads normally — this
+// only ever intercepts a path that is a real saved link.
+//
+// Single path segment only, and never something carrying a file extension, so
+// /assets/index.js and /favicon.png can't be swallowed. Reserved names guard the
+// paths the dashboard itself owns.
+app.get('/:slug', async (req, res, next) => {
+  const slug = String(req.params.slug || '').toLowerCase()
+  if (!slug || slug.includes('.') || RESERVED_SHORT_SLUGS.has(slug)) return next()
+
+  let link = null
+  try {
+    link = await lookupShortLink(slug)
+  } catch (err) {
+    console.error('[UTM] short link lookup failed:', err.message)
+    return next() // a database hiccup must not take the dashboard down
+  }
+  if (!link) return next()
+
+  return redirectShortLink(link, req, res)
 })
 
 // ─── Serve built frontend (production) ────────────────────────────────────────
