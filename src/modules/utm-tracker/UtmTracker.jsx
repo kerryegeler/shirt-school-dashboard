@@ -95,7 +95,7 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
   const [saving, setSaving] = useState(false)
   const [showArchived, setShowArchived] = useState(false)
   const [form, setForm] = useState({
-    destination_url: '', campaign: '', source: 'youtube', medium: 'video', content: '', label: '',
+    destination_url: '', campaign: '', source: 'youtube', medium: 'video', content: '', label: '', slug: '',
   })
 
   const load = useCallback(async () => {
@@ -115,6 +115,10 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }))
 
+  // Host only, so the slug field reads like the finished link. Set a custom
+  // domain on Railway (RAILWAY_PUBLIC_URL) and short links pick it up here.
+  const shortBase = (embedBase || '').replace(/^https?:\/\//, '') || 'your-domain.com'
+
   function pickPreset(preset) {
     setForm((f) => ({ ...f, source: preset.source, medium: preset.medium }))
   }
@@ -125,7 +129,7 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
     setError('')
     try {
       await createUtmLink(form)
-      setForm((f) => ({ ...f, content: '', label: '' }))
+      setForm((f) => ({ ...f, content: '', label: '', slug: '' }))
       await load()
     } catch (err) {
       setError(err.message)
@@ -216,6 +220,18 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
         <input className="utm-input" placeholder="ad-creative-b" value={form.content} onChange={set('content')} />
 
         <label className="utm-label">
+          Short link path
+          <span className="utm-label-hint">
+            optional — what comes after the slash. Keep it tiny: “yt”, “ig”, “ad1”.
+            Leave blank and it's built from source + campaign.
+          </span>
+        </label>
+        <div className="utm-slug-row">
+          <span className="utm-slug-prefix">{shortBase}/</span>
+          <input className="utm-input" placeholder="yt" value={form.slug} onChange={set('slug')} />
+        </div>
+
+        <label className="utm-label">
           Nickname <span className="utm-label-hint">optional — only shown here</span>
         </label>
         <input className="utm-input" placeholder="YouTube — Aug 17 webinar" value={form.label} onChange={set('label')} />
@@ -268,22 +284,16 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
                 {link.label && <div className="utm-link-label">{link.label}</div>}
 
                 <div className="utm-url-row">
-                  <code className="utm-url">{link.tagged_url}</code>
-                  <CopyButton value={link.tagged_url} />
+                  <span className="utm-url-tag utm-url-tag-short">short</span>
+                  <code className="utm-url">{link.short_url}</code>
+                  <CopyButton value={link.short_url} />
                 </div>
 
-                <details className="utm-short">
-                  <summary>Short link (optional)</summary>
-                  <p className="utm-hint">
-                    Redirects through the dashboard, so it also counts clicks and lets you
-                    repoint the destination after you've already posted it. Handy for a
-                    YouTube description you don't want to re-edit.
-                  </p>
-                  <div className="utm-url-row">
-                    <code className="utm-url">{link.short_url}</code>
-                    <CopyButton value={link.short_url} />
-                  </div>
-                </details>
+                <div className="utm-url-row">
+                  <span className="utm-url-tag">full</span>
+                  <code className="utm-url utm-url-muted">{link.tagged_url}</code>
+                  <CopyButton value={link.tagged_url} />
+                </div>
               </div>
             ))}
           </div>

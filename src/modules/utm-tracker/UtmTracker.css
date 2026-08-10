@@ -345,19 +345,54 @@
   border-color: var(--success);
 }
 
-.utm-short {
-  margin-top: 2px;
-}
-
-.utm-short summary {
-  font-size: var(--fs-xs);
+/* Short vs full link labels — the short one is the default choice, so it reads
+   first and the full tagged URL is visibly secondary. */
+.utm-url-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   color: var(--text-tertiary);
-  cursor: pointer;
-  padding: 2px 0;
+  width: 34px;
+  flex-shrink: 0;
 }
 
-.utm-short summary:hover { color: var(--text-secondary); }
-.utm-short > * { margin-top: 6px; }
+.utm-url-tag-short { color: var(--orange); }
+
+.utm-url-muted { opacity: 0.65; }
+
+/* Slug field renders as "go.kerryegeler.com/[ yt ]" so the result is obvious */
+.utm-slug-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.utm-slug-row:focus-within { border-color: var(--orange); }
+
+.utm-slug-prefix {
+  font-size: var(--fs-xs);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-tertiary);
+  padding: 0 2px 0 9px;
+  white-space: nowrap;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.utm-slug-row .utm-input {
+  border: none;
+  background: none;
+  padding-left: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.utm-slug-row .utm-input:focus { outline: none; }
 
 /* ── Metrics ── */
 

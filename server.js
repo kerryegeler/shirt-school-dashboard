@@ -7609,11 +7609,27 @@ app.post('/api/utm/links', requireAuth, async (req, res) => {
   if (!source) return res.status(400).json({ error: 'Source is required' })
 
   // Slugs are the public /go/ path, so keep them url-safe and collision-free.
-  const base = `${source}-${campaign}`.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
-  let slug = base || 'link'
-  const { data: existing } = await supabase.from('utm_links').select('slug').like('slug', `${slug}%`)
-  if ((existing || []).some((r) => r.slug === slug)) {
-    slug = `${slug}-${crypto.randomBytes(2).toString('hex')}`
+  // A custom slug is the whole point of the short link ("/yt" beats
+  // "/youtube-live-class"), so take one when given and only fall back to
+  // source-campaign otherwise.
+  const sanitizeSlug = (s) => String(s || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+
+  const requestedSlug = sanitizeSlug(b.slug)
+  let slug
+  if (requestedSlug) {
+    // A custom slug that silently became something else would send traffic to
+    // the wrong place, so a collision is an error rather than a rename.
+    const { data: taken } = await supabase.from('utm_links')
+      .select('slug').eq('slug', requestedSlug).maybeSingle()
+    if (taken) return res.status(409).json({ error: `The short link /${requestedSlug} is already used by another link. Pick a different one.` })
+    slug = requestedSlug
+  } else {
+    slug = sanitizeSlug(`${source}-${campaign}`) || 'link'
+    const { data: existing } = await supabase.from('utm_links').select('slug').like('slug', `${slug}%`)
+    if ((existing || []).some((r) => r.slug === slug)) {
+      slug = `${slug}-${crypto.randomBytes(2).toString('hex')}`
+    }
   }
 
   const { data, error } = await supabase.from('utm_links').insert({
