@@ -718,8 +718,11 @@ export async function deleteUtmLink(id) {
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete link') }
 }
 
-export async function fetchUtmStats({ days = 30, campaign = '' } = {}) {
-  const qs = new URLSearchParams({ days: String(days) })
+// range is 'today' or a number of days (7 / 30 / 90).
+export async function fetchUtmStats({ range = 30, campaign = '' } = {}) {
+  const qs = range === 'today'
+    ? new URLSearchParams({ range: 'today' })
+    : new URLSearchParams({ days: String(range) })
   if (campaign) qs.set('campaign', campaign)
   const r = await apiFetch(`/api/utm/stats?${qs}`)
   const d = await r.json()

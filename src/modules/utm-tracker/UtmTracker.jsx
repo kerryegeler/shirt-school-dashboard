@@ -305,23 +305,31 @@ function LinkBuilder({ embedBase, onEmbedBase }) {
 
 // ─── Metrics tab ──────────────────────────────────────────────────────────────
 
+// "Today" is since midnight Central, not a rolling 24 hours — see the server.
+const RANGES = [
+  { value: 'today', label: 'Today' },
+  { value: 7, label: '7d' },
+  { value: 30, label: '30d' },
+  { value: 90, label: '90d' },
+]
+
 function LeadMetrics() {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [days, setDays] = useState(30)
+  const [range, setRange] = useState(30)
   const [campaign, setCampaign] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      setStats(await fetchUtmStats({ days, campaign }))
+      setStats(await fetchUtmStats({ range, campaign }))
       setError('')
     } catch (err) {
       setError(err.message)
     }
     setLoading(false)
-  }, [days, campaign])
+  }, [range, campaign])
 
   useEffect(() => { load() }, [load])
 
@@ -336,13 +344,13 @@ function LeadMetrics() {
           {(stats?.campaigns || []).map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
         <div className="utm-range">
-          {[7, 30, 90].map((d) => (
+          {RANGES.map((r) => (
             <button
-              key={d}
-              className={`utm-range-btn ${days === d ? 'utm-range-active' : ''}`}
-              onClick={() => setDays(d)}
+              key={r.value}
+              className={`utm-range-btn ${range === r.value ? 'utm-range-active' : ''}`}
+              onClick={() => setRange(r.value)}
             >
-              {d}d
+              {r.label}
             </button>
           ))}
         </div>

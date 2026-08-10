@@ -7406,6 +7406,25 @@ function utmIpHash(req) {
   return crypto.createHmac('sha256', SESSION_SECRET).update(`${ip}|${ua}`).digest('hex').slice(0, 32)
 }
 
+// Midnight today, Central time, as a real UTC instant. Chicago is UTC-5 (CDT)
+// or UTC-6 (CST) depending on the season, so rather than hardcode an offset,
+// try both and keep whichever actually lands on 00:00 local.
+function startOfTodayCT() {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date()).map(({ type, value }) => [type, value])
+  )
+  for (const offsetHours of [5, 6]) {
+    const candidate = new Date(Date.UTC(+p.year, +p.month - 1, +p.day, offsetHours, 0, 0))
+    const hour = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', hour: 'numeric', hour12: false,
+    }).format(candidate)
+    if (parseInt(hour, 10) % 24 === 0) return candidate
+  }
+  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day, 5, 0, 0))
+}
+
 function cleanUtmValue(v) {
   if (v === null || v === undefined) return null
   const s = String(v).trim().toLowerCase()
@@ -7691,10 +7710,16 @@ app.delete('/api/utm/links/:id', requireAuth, async (req, res) => {
 app.get('/api/utm/stats', requireAuth, async (req, res) => {
   if (!supabase) return res.json({ totals: {}, bySource: [], daily: [], recentLeads: [], campaigns: [] })
 
-  const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365)
   const campaign = cleanUtmValue(req.query.campaign)
   const toIso = new Date().toISOString()
-  const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+
+  // "Today" means since midnight Central, not the last 24 hours — at 9am those
+  // are very different numbers, and the second one quietly includes yesterday.
+  const isToday = req.query.range === 'today'
+  const days = isToday ? 1 : Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365)
+  const fromIso = isToday
+    ? startOfTodayCT().toISOString()
+    : new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
 
   try {
     // Campaign list for the filter dropdown is drawn from saved links plus
