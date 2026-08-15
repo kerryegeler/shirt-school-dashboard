@@ -538,13 +538,31 @@
   // iOS reports 100vh as the height with the browser chrome HIDDEN, so a panel
   // sized in vh is taller than what the visitor can actually see — it runs off
   // the top of the screen, and shifts as the URL bar collapses on scroll.
-  // visualViewport is the real visible box, and it also shrinks when the
-  // keyboard opens, which keeps the text field in view while typing.
+  // visualViewport is the real visible box.
+  //
+  // But the keyboard shrinks that same box by ~300px, and sizing the panel
+  // against THAT collapses it to a sliver you can't read. So track the height
+  // only while the keyboard is closed, and hold that value while it's open —
+  // iOS pans a fixed element to keep the focused field visible anyway, so the
+  // panel doesn't need to resize for the visitor to type.
   function trackViewport(root) {
     var vv = window.visualViewport
+    var stable = vv ? vv.height : window.innerHeight
+
     function apply() {
-      root.style.setProperty('--ssc-vh', (vv ? vv.height : window.innerHeight) + 'px')
+      if (vv) {
+        // A keyboard takes far more than any browser toolbar ever does, so the
+        // size of the gap is what separates the two cases. On Android the
+        // keyboard resizes the layout viewport too, leaving no gap — and there
+        // shrinking to fit is the correct behaviour, so this reads as "closed".
+        var keyboardOpen = (window.innerHeight - vv.height) > 150
+        if (!keyboardOpen) stable = vv.height
+      } else {
+        stable = window.innerHeight
+      }
+      root.style.setProperty('--ssc-vh', stable + 'px')
     }
+
     apply()
     if (vv) {
       vv.addEventListener('resize', apply)
