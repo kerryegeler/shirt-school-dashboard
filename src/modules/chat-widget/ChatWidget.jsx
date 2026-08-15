@@ -16,6 +16,7 @@ const NEW_WIDGET = {
   position: 'bottom-right',
   accent: '#e02b20',
   ask_email: true,
+  bottom_offset: 0,
   slack_channel_id: '',
 }
 
@@ -328,6 +329,21 @@ export default function ChatWidget() {
                   </div>
 
                   <label className="cw-label">
+                    Lift off the bottom of the page{' '}
+                    <span className="cw-hint">
+                      px of clearance for a sticky bar — a Deadline Funnel countdown is usually 50–70
+                    </span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="400"
+                    className="cw-input"
+                    value={editing.bottom_offset ?? 0}
+                    onChange={(e) => setField('bottom_offset', e.target.value === '' ? 0 : Number(e.target.value))}
+                  />
+
+                  <label className="cw-label">
                     Slack channel ID <span className="cw-hint">optional — leave blank to use the default chat channel</span>
                   </label>
                   <input
@@ -417,7 +433,10 @@ export default function ChatWidget() {
         {editing && (
           <div className="cw-preview-panel">
             <div className="cw-section-title">Preview</div>
-            <div className={`cw-preview-stage ${editing.position === 'bottom-left' ? 'left' : 'right'}`} style={{ '--cw-accent': editing.accent }}>
+            <div
+              className={`cw-preview-stage ${editing.position === 'bottom-left' ? 'left' : 'right'}`}
+              style={{ '--cw-accent': editing.accent, '--cw-offset': `${editing.bottom_offset || 0}px` }}
+            >
               {previewOpen && (
                 <div className="cw-preview-panel-box">
                   <div className="cw-preview-head">
@@ -448,6 +467,9 @@ export default function ChatWidget() {
               <button className="cw-preview-bubble" onClick={() => setPreviewOpen((o) => !o)} aria-label="Toggle preview">
                 <IconChat />
               </button>
+              {editing.bottom_offset > 0 && (
+                <div className="cw-preview-bar">your countdown bar</div>
+              )}
             </div>
             <div className="cw-preview-note">
               Click the bubble to see the closed state. This is a mock-up of the real widget —

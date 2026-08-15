@@ -7978,6 +7978,7 @@ app.get('/api/chat/config', async (req, res) => {
       position: widget.position,
       accent: widget.accent,
       askEmail: widget.ask_email,
+      bottomOffset: widget.bottom_offset || 0,
     },
   })
 })
@@ -8161,13 +8162,16 @@ app.get('/api/chat/widgets', async (req, res) => {
   })
 })
 
-const CHAT_WIDGET_FIELDS = ['name', 'title', 'subtitle', 'greeting', 'position', 'accent', 'ask_email', 'slack_channel_id', 'archived']
+const CHAT_WIDGET_FIELDS = ['name', 'title', 'subtitle', 'greeting', 'position', 'accent', 'ask_email', 'bottom_offset', 'slack_channel_id', 'archived']
 
 function cleanChatWidgetFields(body) {
   const out = {}
   for (const key of CHAT_WIDGET_FIELDS) {
     if (!(key in body)) continue
     if (key === 'ask_email' || key === 'archived') out[key] = !!body[key]
+    // Capped: a typo'd offset that pushed the bubble off-screen would look like
+    // the widget had simply stopped working.
+    else if (key === 'bottom_offset') out[key] = Math.min(Math.max(parseInt(body[key], 10) || 0, 0), 400)
     else if (key === 'position') out[key] = body[key] === 'bottom-left' ? 'bottom-left' : 'bottom-right'
     else if (key === 'slack_channel_id') out[key] = String(body[key] || '').trim() || null
     else out[key] = String(body[key] || '').trim().slice(0, 500)

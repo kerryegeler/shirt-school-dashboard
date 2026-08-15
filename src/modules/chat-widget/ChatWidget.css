@@ -309,6 +309,27 @@
   align-items: flex-end;
   justify-content: flex-end;
   gap: 12px;
+  padding-bottom: calc(16px + var(--cw-offset, 0px));
+}
+
+/* Stand-in for the visitor's sticky bar, so the clearance is something you can
+   see rather than a number you have to imagine. */
+.cw-preview-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--cw-offset, 0px);
+  background: repeating-linear-gradient(45deg, #cfcfcf 0 8px, #c2c2c2 8px 16px);
+  color: #4a4a4a;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 .cw-preview-stage.left { align-items: flex-start; }
 

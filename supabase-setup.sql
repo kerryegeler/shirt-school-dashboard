@@ -448,11 +448,14 @@ create table if not exists chat_widgets (
   position         text not null default 'bottom-right',  -- bottom-right | bottom-left
   accent           text not null default '#e02b20',
   ask_email        boolean not null default true,   -- collect name/email before the first message
+  bottom_offset    integer not null default 0,  -- px to lift the bubble clear of a sticky bottom bar
   slack_channel_id text,                       -- optional per-widget override
   archived         boolean not null default false,
   created_at       timestamptz not null default now()
 );
 alter table chat_widgets disable row level security;
+-- Added after the first release; create-table-if-not-exists won't backfill it.
+alter table chat_widgets add column if not exists bottom_offset integer not null default 0;
 
 -- One row per visitor conversation. slack_ts is the thread root Kerry replies in.
 -- visitor_token is the shared secret the widget presents to read its own thread;

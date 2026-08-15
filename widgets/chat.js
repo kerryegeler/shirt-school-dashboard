@@ -18,6 +18,9 @@
  *   data-title      header title
  *   data-greeting   the first bubble the visitor sees
  *   data-open       "1" = start with the panel open (handy for testing)
+ *   data-offset     pixels to lift the whole widget off the bottom of the page,
+ *                   so it clears a sticky bar (a Deadline Funnel countdown is
+ *                   usually 50–70px tall). Default 0.
  *
  * The conversation id + read token live in localStorage, so a visitor who
  * refreshes, or comes back an hour later, keeps the same thread instead of
@@ -65,6 +68,12 @@
     position: cfg.position === 'bottom-left' ? 'bottom-left' : 'bottom-right',
     accent: cfg.accent || '#e02b20',
     askEmail: true,
+    offset: 0,
+  }
+
+  function num(v, fallback) {
+    var n = parseFloat(v)
+    return isNaN(n) || n < 0 ? fallback : n
   }
 
   var els = {}
@@ -101,6 +110,7 @@
   // ── Network ───────────────────────────────────────────────────────────────
 
   function loadConfig(done) {
+    conf.offset = Math.min(num(cfg.offset, 0), 400)
     if (!WIDGET_ID) return done()
     var xhr = new XMLHttpRequest()
     xhr.open('GET', API_BASE + '/api/chat/config?widget=' + encodeURIComponent(WIDGET_ID), true)
@@ -116,6 +126,7 @@
           conf.position = cfg.position ? conf.position : (w.position === 'bottom-left' ? 'bottom-left' : 'bottom-right')
           conf.accent = cfg.accent || w.accent || conf.accent
           conf.askEmail = w.askEmail !== false
+          conf.offset = Math.min(cfg.offset != null ? num(cfg.offset, 0) : num(w.bottomOffset, 0), 400)
         }
       } catch (e) {}
       done()
@@ -202,13 +213,13 @@
   // ── UI ────────────────────────────────────────────────────────────────────
 
   var CSS = [
-    '.ssc-root{position:fixed;z-index:2147483000;bottom:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
+    '.ssc-root{position:fixed;z-index:2147483000;bottom:calc(20px + var(--ssc-offset,0px));font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}',
     '.ssc-root.ssc-right{right:20px}.ssc-root.ssc-left{left:20px}',
     '.ssc-bubble{width:58px;height:58px;border-radius:50%;border:0;cursor:pointer;background:var(--ssc-accent);color:#fff;box-shadow:0 6px 24px rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;transition:transform .18s ease;position:relative;padding:0}',
     '.ssc-bubble:hover{transform:scale(1.06)}',
     '.ssc-bubble svg{width:26px;height:26px}',
     '.ssc-badge{position:absolute;top:-2px;right:-2px;min-width:20px;height:20px;border-radius:10px;background:#111;color:#fff;font-size:12px;font-weight:700;line-height:20px;padding:0 5px;box-shadow:0 0 0 2px #fff}',
-    '.ssc-panel{position:absolute;bottom:74px;width:352px;max-width:calc(100vw - 32px);height:480px;max-height:calc(100vh - 120px);background:#fff;border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,.24);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .18s ease,transform .18s ease}',
+    '.ssc-panel{position:absolute;bottom:74px;width:352px;max-width:calc(100vw - 32px);height:480px;max-height:calc(100vh - 120px - var(--ssc-offset,0px));background:#fff;border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,.24);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .18s ease,transform .18s ease}',
     '.ssc-root.ssc-right .ssc-panel{right:0}.ssc-root.ssc-left .ssc-panel{left:0}',
     '.ssc-panel.ssc-show{opacity:1;transform:none;pointer-events:auto}',
     '.ssc-head{background:var(--ssc-accent);color:#fff;padding:16px 18px;display:flex;align-items:center;gap:10px;flex:0 0 auto}',
@@ -233,7 +244,7 @@
     '.ssc-send:disabled{opacity:.45;cursor:default}.ssc-send svg{width:18px;height:18px}',
     '.ssc-err{font-size:12px;color:#c02419;padding:0 2px}',
     '.ssc-foot{font-size:11px;color:#a0a0a6;text-align:center;padding:0 0 2px}',
-    '@media (max-width:420px){.ssc-panel{width:calc(100vw - 32px);height:calc(100vh - 130px)}}',
+    '@media (max-width:420px){.ssc-panel{width:calc(100vw - 32px);height:calc(100vh - 130px - var(--ssc-offset,0px))}}',
   ].join('')
 
   var ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 01-9 8.4 8.5 8.5 0 01-3.9-.9L3 21l1.9-5a8.4 8.4 0 01-.9-3.9 8.5 8.5 0 018.4-9h.6a8.5 8.5 0 018 8v.4z"/></svg>'
@@ -267,6 +278,9 @@
     var root = el('div', 'ssc-root ' + (conf.position === 'bottom-left' ? 'ssc-left' : 'ssc-right'))
     root.setAttribute('data-ss-chat', '1')
     root.style.setProperty('--ssc-accent', conf.accent)
+    // Lifts the bubble AND shrinks the panel's max height by the same amount,
+    // so clearing a bottom bar can't push the panel off the top of the screen.
+    root.style.setProperty('--ssc-offset', conf.offset + 'px')
 
     var panel = el('div', 'ssc-panel')
 
