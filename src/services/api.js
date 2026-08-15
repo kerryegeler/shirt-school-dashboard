@@ -729,3 +729,52 @@ export async function fetchUtmStats({ range = 30, campaign = '' } = {}) {
   if (!r.ok) throw new Error(d.error || 'Failed to load stats')
   return d
 }
+
+// ─── Chat Widget ──────────────────────────────────────────────────────────────
+
+export async function fetchChatWidgets() {
+  const r = await apiFetch('/api/chat/widgets')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load chat widgets')
+  return d // { widgets, embedBase, slackReady }
+}
+
+export async function createChatWidget(fields) {
+  const r = await apiFetch('/api/chat/widgets', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to create widget')
+  return d.widget
+}
+
+export async function updateChatWidget(id, updates) {
+  const r = await apiFetch(`/api/chat/widgets/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to update widget')
+  return d.widget
+}
+
+export async function deleteChatWidget(id) {
+  const r = await apiFetch(`/api/chat/widgets/${id}`, { method: 'DELETE' })
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to delete widget') }
+}
+
+export async function fetchChatConversations(widgetId) {
+  const qs = widgetId ? `?widget=${encodeURIComponent(widgetId)}` : ''
+  const r = await apiFetch(`/api/chat/conversations${qs}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load conversations')
+  return d.conversations
+}
+
+export async function fetchChatTranscript(id) {
+  const r = await apiFetch(`/api/chat/conversations/${id}`)
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to load transcript')
+  return d // { conversation, messages }
+}

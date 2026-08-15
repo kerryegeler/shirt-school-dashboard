@@ -9,6 +9,7 @@ import SalesAnalytics from './modules/sales-analytics/SalesAnalytics.jsx'
 import Reminders from './modules/reminders/Reminders.jsx'
 import SocialProof from './modules/social-proof/SocialProof.jsx'
 import UtmTracker from './modules/utm-tracker/UtmTracker.jsx'
+import ChatWidget from './modules/chat-widget/ChatWidget.jsx'
 import AuthCallback from './components/AuthCallback.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 import LiveEventModal from './components/LiveEventModal.jsx'
@@ -122,6 +123,7 @@ export default function App() {
           {activeModule === 'reminders' && <Reminders />}
           {activeModule === 'social-proof' && <SocialProof />}
           {activeModule === 'utm-tracker' && <UtmTracker />}
+          {activeModule === 'chat-widget' && <ChatWidget />}
         </main>
       </div>
 
@@ -150,6 +152,7 @@ const MOBILE_SECTIONS = [
   { id: 'reminders', label: 'Reminders', short: 'Reminders' },
   { id: 'social-proof', label: 'Social Proof', short: 'Proof' },
   { id: 'utm-tracker', label: 'Lead Tracking', short: 'Leads' },
+  { id: 'chat-widget', label: 'Chat Widget', short: 'Chat' },
 ]
 
 function MobileMenu({ activeModule, onSelect, unreadCount, onOpenLiveEvent }) {

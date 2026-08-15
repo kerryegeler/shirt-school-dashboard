@@ -74,6 +74,12 @@ const IconLinkChain = () => (
   </svg>
 )
 
+const IconChatBubble = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 7.5a5.6 5.6 0 01-6 5.6 5.7 5.7 0 01-2.6-.6L2 14l1.3-3.4A5.6 5.6 0 012.7 7 5.7 5.7 0 018.3 1.5h.4A5.7 5.7 0 0114 7.2v.3z" />
+  </svg>
+)
+
 const modules = [
   { id: 'email-agent', label: 'Email Agent', icon: IconEmail, comingSoon: false },
   { id: 'ai-feedback', label: 'AI Feedback', icon: IconFeedback, comingSoon: false },
@@ -84,6 +90,7 @@ const modules = [
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
   { id: 'social-proof', label: 'Social Proof', icon: IconMegaphone, comingSoon: false },
   { id: 'utm-tracker', label: 'Lead Tracking', icon: IconLinkChain, comingSoon: false },
+  { id: 'chat-widget', label: 'Chat Widget', icon: IconChatBubble, comingSoon: false },
 ]
 
 export default function Sidebar({ activeModule, onSelectModule, unreadCount, accountStatus, onDisconnect, onOpenLiveEvent }) {

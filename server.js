@@ -101,6 +101,9 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/stripe/webhook', // Called by Stripe, not the dashboard user
   '/api/social-proof/purchases', // Called by the popup widget on public landing pages; returns sanitized data only
   '/api/utm/collect',    // Called by the UTM tracker on public landing/thank-you pages (Kajabi + GHL)
+  '/api/chat/config',    // Called by the chat widget on public pages; returns appearance only
+  '/api/chat/message',   // Visitor sending a chat message from a public page
+  '/api/chat/poll',      // Visitor reading their own thread (guarded by a per-conversation token)
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -3940,7 +3943,9 @@ app.post('/api/slack/events', async (req, res) => {
 
   // Only handle plain messages that are replies in a thread (not bot messages, not edits)
   if (event.type !== 'message') { console.log(`[Slack Events] Ignoring: not a message event`); return }
-  if (event.subtype) { console.log(`[Slack Events] Ignoring: has subtype=${event.subtype}`); return }
+  // thread_broadcast is a normal thread reply that was also sent to the channel —
+  // still a real reply, so it must not be filtered out with edits and joins.
+  if (event.subtype && event.subtype !== 'thread_broadcast') { console.log(`[Slack Events] Ignoring: has subtype=${event.subtype}`); return }
   if (event.bot_id) { console.log(`[Slack Events] Ignoring: bot message`); return }
 
   // Sales report query: in the sales channel, a top-level message that contains
@@ -3975,8 +3980,13 @@ app.post('/api/slack/events', async (req, res) => {
 
   console.log(`[Slack Events] Thread reply from user ${event.user}: "${instruction.slice(0, 80)}" — looking up thread_ts=${event.thread_ts}`)
 
-  // Look up if this thread_ts matches a Slack notification
   if (!supabase) { console.error('[Slack Events] Supabase not configured'); return }
+
+  // Chat widget threads come first: a reply here is Kerry answering a website
+  // visitor, and it goes back out to their browser rather than into a draft.
+  if (await handleChatThreadReply(event)) return
+
+  // Look up if this thread_ts matches a Slack notification
   const { data: notif, error: notifErr } = await supabase
     .from('slack_notifications')
     .select('*')
@@ -7800,6 +7810,440 @@ app.get('/api/utm/stats', requireAuth, async (req, res) => {
     console.error('[UTM] stats error:', err.message)
     res.status(500).json({ error: err.message })
   }
+})
+
+// ─── Live Chat Widget ─────────────────────────────────────────────────────────
+// A visitor types in a bubble on a landing page; the message opens a Slack
+// thread; Kerry replies in that thread and the reply lands back in the bubble.
+//
+//   widget (browser)  ──POST /api/chat/message──▶  Slack thread (root or reply)
+//   widget (browser)  ◀──GET /api/chat/poll─────  agent replies, saved by
+//                                                 /api/slack/events
+//
+// The three /api/chat/* visitor endpoints are PUBLIC by necessity — they're
+// called from strangers' browsers on other domains. They're kept safe by:
+//   · a per-conversation visitor_token (you can only read the thread you own)
+//   · per-IP rate limits, so nobody can flood the Slack channel
+//   · never returning anything but the visitor's own transcript
+// The embeddable client lives in widgets/chat.js.
+
+const CHAT_MAX_BODY = 2000
+const CHAT_MAX_MESSAGES_PER_WINDOW = 20   // per IP per 10 minutes
+const CHAT_MAX_CONVERSATIONS_PER_WINDOW = 5
+const CHAT_RATE_WINDOW_MS = 10 * 60 * 1000
+
+// ip hash → { messages: [ts], conversations: [ts] }. In-memory on purpose: a
+// restart resetting someone's rate limit is harmless, and this avoids a DB
+// write on every keystroke-sized request.
+const chatRateBuckets = new Map()
+
+function safeJsonParse(str) {
+  try { return JSON.parse(str) } catch { return null }
+}
+
+function chatRateCheck(key, bucketName, max) {
+  if (!key) return true
+  const now = Date.now()
+  let bucket = chatRateBuckets.get(key)
+  if (!bucket) { bucket = { messages: [], conversations: [] }; chatRateBuckets.set(key, bucket) }
+  bucket[bucketName] = bucket[bucketName].filter((t) => now - t < CHAT_RATE_WINDOW_MS)
+  if (bucket[bucketName].length >= max) return false
+  bucket[bucketName].push(now)
+  // Bounded cleanup so a long-running process can't accumulate dead IPs
+  if (chatRateBuckets.size > 5000) {
+    for (const [k, b] of chatRateBuckets) {
+      if (![...b.messages, ...b.conversations].some((t) => now - t < CHAT_RATE_WINDOW_MS)) chatRateBuckets.delete(k)
+    }
+  }
+  return true
+}
+
+function chatChannelFor(widget) {
+  return widget?.slack_channel_id || process.env.SLACK_CHAT_CHANNEL_ID || process.env.SLACK_CHANNEL_ID || null
+}
+
+// Cache Slack user names so a busy thread doesn't call users.info per reply.
+const slackUserNameCache = new Map()
+async function slackDisplayName(userId) {
+  if (!userId || !slackClient) return null
+  if (slackUserNameCache.has(userId)) return slackUserNameCache.get(userId)
+  let name = null
+  try {
+    const info = await slackClient.users.info({ user: userId })
+    name = info?.user?.profile?.display_name || info?.user?.real_name || null
+  } catch (err) {
+    console.error('[Chat] users.info failed:', err.message)
+  }
+  slackUserNameCache.set(userId, name)
+  return name
+}
+
+function chatIdentityLine(conv) {
+  const bits = []
+  if (conv.visitor_name) bits.push(conv.visitor_name)
+  if (conv.visitor_email) bits.push(conv.visitor_email)
+  return bits.join(' · ') || 'Anonymous visitor'
+}
+
+// The Slack thread root. Everything Kerry needs to answer without clicking
+// through to the dashboard: who, what page, and the first thing they said.
+function buildChatSlackBlocks(conv, widgetName, firstMessage) {
+  const context = [`*${widgetName || 'Chat widget'}*`]
+  if (conv.page_url) context.push(`<${conv.page_url}|${String(conv.page_url).replace(/^https?:\/\//, '').slice(0, 60)}>`)
+  return [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `💬 *New chat* from ${chatIdentityLine(conv)}\n>${String(firstMessage).replace(/\n/g, '\n>')}` },
+    },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: context.join('  ·  ') }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '_Reply in this thread — your reply appears in their chat window. Start a reply with `!` to keep it private; send `!close` to end the chat._' }] },
+  ]
+}
+
+// Slack's wire format isn't meant for a plain <div>: unwrap links, drop user
+// mentions, and undo the HTML entities Slack escapes on the way in.
+function slackTextToPlain(text) {
+  return String(text || '')
+    .replace(/<https?:[^|>]+\|([^>]+)>/g, '$1')       // <https://x|label> → label
+    .replace(/<(https?:[^|>]+)>/g, '$1')              // <https://x> → https://x
+    .replace(/<@[UW][A-Z0-9]+(\|[^>]+)?>/g, '')       // strip @mentions
+    .replace(/<#C[A-Z0-9]+(\|([^>]*))?>/g, (_m, _p, name) => (name ? `#${name}` : ''))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+    .trim()
+}
+
+// Returns true when the event belonged to a chat widget thread (handled here),
+// false when it's some other thread the email flow should still get a look at.
+async function handleChatThreadReply(event) {
+  const { data: conv } = await supabase.from('chat_conversations')
+    .select('*').eq('slack_ts', event.thread_ts).maybeSingle()
+  if (!conv) return false
+
+  const raw = slackTextToPlain(event.text)
+  if (!raw) return true
+
+  // `!` prefix = internal note. It stays in Slack; the visitor never sees it.
+  if (raw.startsWith('!')) {
+    const command = raw.slice(1).trim().toLowerCase()
+    if (command === 'close' || command === 'end') {
+      await supabase.from('chat_conversations').update({ status: 'closed' }).eq('id', conv.id)
+      console.log(`[Chat] Conversation ${conv.id} closed from Slack`)
+      try {
+        await slackClient?.reactions?.add({ channel: event.channel, timestamp: event.ts, name: 'white_check_mark' })
+      } catch {}
+    }
+    return true
+  }
+
+  const author = await slackDisplayName(event.user)
+  // slack_ts is uniquely indexed, so Slack's retry of the same event can't
+  // deliver the reply to the visitor twice.
+  const { error } = await supabase.from('chat_messages').insert({
+    conversation_id: conv.id,
+    role: 'agent',
+    author: author || null,
+    body: raw.slice(0, CHAT_MAX_BODY),
+    slack_ts: event.ts,
+  })
+  if (error) {
+    if (error.code === '23505') console.log(`[Chat] Duplicate Slack event ${event.ts} ignored`)
+    else console.error('[Chat] agent message insert failed:', error.message)
+    return true
+  }
+
+  await supabase.from('chat_conversations')
+    .update({ last_message_at: new Date().toISOString(), status: 'open' }).eq('id', conv.id)
+  console.log(`[Chat] Reply delivered to conversation ${conv.id}: "${raw.slice(0, 60)}"`)
+  return true
+}
+
+async function loadChatWidget(id) {
+  if (!supabase || !id) return null
+  const { data } = await supabase.from('chat_widgets').select('*').eq('id', id).maybeSingle()
+  return data || null
+}
+
+// Public: the widget fetches its own appearance so the embed snippet stays a
+// single line and edits in the dashboard roll out without re-pasting code.
+app.get('/api/chat/config', async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=60')
+  const widget = await loadChatWidget(req.query.widget)
+  if (!widget || widget.archived) return res.status(404).json({ error: 'Widget not found' })
+  res.json({
+    widget: {
+      id: widget.id,
+      title: widget.title,
+      subtitle: widget.subtitle,
+      greeting: widget.greeting,
+      position: widget.position,
+      accent: widget.accent,
+      askEmail: widget.ask_email,
+    },
+  })
+})
+
+// Public: visitor sends a message. The first one creates the conversation and
+// the Slack thread; later ones post as replies in that same thread.
+app.post('/api/chat/message', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Chat is not configured' })
+  // Sent as text/plain to dodge a CORS preflight, same trick as widgets/utm.js
+  const body = typeof req.body === 'string' ? safeJsonParse(req.body) : (req.body || {})
+  if (!body) return res.status(400).json({ error: 'Bad request' })
+
+  const text = String(body.body || '').trim().slice(0, CHAT_MAX_BODY)
+  if (!text) return res.status(400).json({ error: 'Message is empty' })
+
+  const ipHash = utmIpHash(req)
+  if (!chatRateCheck(ipHash, 'messages', CHAT_MAX_MESSAGES_PER_WINDOW)) {
+    return res.status(429).json({ error: 'Too many messages. Please wait a few minutes.' })
+  }
+
+  let conv = null
+  if (body.conversationId && body.token) {
+    const { data } = await supabase.from('chat_conversations')
+      .select('*').eq('id', body.conversationId).maybeSingle()
+    if (data && data.visitor_token === body.token) conv = data
+  }
+
+  const widget = await loadChatWidget(conv?.widget_id || body.widgetId)
+  const channel = chatChannelFor(widget)
+
+  // ── First message: create the conversation and open the Slack thread ──
+  if (!conv) {
+    if (!chatRateCheck(ipHash, 'conversations', CHAT_MAX_CONVERSATIONS_PER_WINDOW)) {
+      return res.status(429).json({ error: 'Too many chats started. Please wait a few minutes.' })
+    }
+    const { data, error } = await supabase.from('chat_conversations').insert({
+      widget_id: widget?.id || null,
+      visitor_token: crypto.randomBytes(24).toString('hex'),
+      visitor_name: body.name ? String(body.name).trim().slice(0, 120) : null,
+      visitor_email: body.email ? String(body.email).trim().slice(0, 200) : null,
+      page_url: body.pageUrl ? String(body.pageUrl).slice(0, 500) : null,
+      referrer: body.referrer ? String(body.referrer).slice(0, 500) : null,
+      user_agent: (req.headers['user-agent'] || '').slice(0, 300),
+      ip_hash: ipHash,
+    }).select().single()
+    if (error) {
+      console.error('[Chat] conversation insert failed:', error.message)
+      return res.status(500).json({ error: 'Could not start the chat' })
+    }
+    conv = data
+  } else if (body.name || body.email) {
+    // Visitor filled in their details later in the conversation
+    const patch = {}
+    if (body.name && !conv.visitor_name) patch.visitor_name = String(body.name).trim().slice(0, 120)
+    if (body.email && !conv.visitor_email) patch.visitor_email = String(body.email).trim().slice(0, 200)
+    if (Object.keys(patch).length) {
+      await supabase.from('chat_conversations').update(patch).eq('id', conv.id)
+      Object.assign(conv, patch)
+    }
+  }
+
+  const { data: saved, error: msgErr } = await supabase.from('chat_messages').insert({
+    conversation_id: conv.id, role: 'visitor', body: text,
+  }).select('seq, created_at').single()
+  if (msgErr) {
+    console.error('[Chat] message insert failed:', msgErr.message)
+    return res.status(500).json({ error: 'Could not send the message' })
+  }
+  await supabase.from('chat_conversations')
+    .update({ last_message_at: new Date().toISOString(), status: 'open' }).eq('id', conv.id)
+
+  // Answer the browser before talking to Slack — the visitor shouldn't watch a
+  // spinner while we wait on someone else's API.
+  res.json({
+    conversationId: conv.id,
+    token: conv.visitor_token,
+    message: { seq: saved.seq, role: 'visitor', body: text, at: saved.created_at },
+  })
+
+  if (!slackClient || !channel) {
+    console.warn('[Chat] Slack not configured (SLACK_BOT_TOKEN / SLACK_CHAT_CHANNEL_ID) — message stored but not delivered')
+    return
+  }
+  deliverChatToSlack(conv, widget, channel, text)
+})
+
+// Slack delivery is serialized per conversation. Two messages sent in quick
+// succession would otherwise both read slack_ts as null and open two threads
+// for one visitor — and even once threaded, concurrent posts can land out of
+// order. Queueing costs nothing: the visitor's browser already has its reply.
+const chatSlackQueues = new Map()   // conversationId → promise of the last post
+const chatThreadTs = new Map()      // conversationId → slack_ts, avoids a re-read
+
+function deliverChatToSlack(conv, widget, channel, text) {
+  const prior = chatSlackQueues.get(conv.id) || Promise.resolve()
+  const next = prior.then(async () => {
+    const threadTs = conv.slack_ts || chatThreadTs.get(conv.id)
+    if (!threadTs) {
+      const posted = await slackClient.chat.postMessage({
+        channel,
+        text: `💬 New chat from ${chatIdentityLine(conv)}: ${text.slice(0, 140)}`,
+        blocks: buildChatSlackBlocks(conv, widget?.name, text),
+      })
+      chatThreadTs.set(conv.id, posted.ts)
+      await supabase.from('chat_conversations')
+        .update({ slack_ts: posted.ts, slack_channel_id: channel }).eq('id', conv.id)
+    } else {
+      await slackClient.chat.postMessage({
+        channel: conv.slack_channel_id || channel,
+        thread_ts: threadTs,
+        text: `*${conv.visitor_name || 'Visitor'}:* ${text}`,
+      })
+    }
+  }).catch((err) => {
+    console.error('[Chat] Slack post failed:', err.message)
+  }).finally(() => {
+    // Only the tail of the queue clears it, so a later message still chains
+    if (chatSlackQueues.get(conv.id) === next) chatSlackQueues.delete(conv.id)
+    if (chatThreadTs.size > 2000) chatThreadTs.clear()
+  })
+  chatSlackQueues.set(conv.id, next)
+}
+
+// Public: the widget's poll cursor. Returns only messages newer than `after`,
+// and only for the conversation whose token the caller holds.
+app.get('/api/chat/poll', async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  if (!supabase) return res.json({ messages: [] })
+  const { conversation, token } = req.query
+  if (!conversation || !token) return res.status(400).json({ error: 'Missing conversation' })
+
+  const { data: conv } = await supabase.from('chat_conversations')
+    .select('id, visitor_token, status').eq('id', conversation).maybeSingle()
+  if (!conv || conv.visitor_token !== token) return res.status(404).json({ error: 'Conversation not found' })
+
+  const after = parseInt(req.query.after, 10) || 0
+  const { data: rows, error } = await supabase.from('chat_messages')
+    .select('seq, role, author, body, created_at')
+    .eq('conversation_id', conv.id)
+    .gt('seq', after)
+    .order('seq', { ascending: true })
+    .limit(100)
+  if (error) return res.status(500).json({ error: 'Lookup failed' })
+
+  res.json({
+    status: conv.status,
+    messages: (rows || []).map((m) => ({ seq: m.seq, role: m.role, author: m.author, body: m.body, at: m.created_at })),
+  })
+})
+
+// The embeddable widget itself. Short cache so edits roll out quickly.
+app.get('/widgets/chat.js', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=300')
+  res.type('application/javascript')
+  res.sendFile(path.resolve('widgets/chat.js'))
+})
+
+// ── Dashboard routes (authenticated) ──
+
+app.get('/api/chat/widgets', async (req, res) => {
+  if (!supabase) return res.json({ widgets: [], embedBase: null, slackReady: false })
+  const { data, error } = await supabase.from('chat_widgets')
+    .select('*').order('created_at', { ascending: false })
+  if (error) return res.status(500).json({ error: error.message })
+
+  // Conversation counts per widget, so the list shows which embeds are alive
+  const { data: convs } = await supabase.from('chat_conversations')
+    .select('widget_id, last_message_at').order('last_message_at', { ascending: false }).limit(1000)
+  const counts = new Map()
+  for (const c of convs || []) {
+    const entry = counts.get(c.widget_id) || { conversations: 0, lastAt: null }
+    entry.conversations++
+    if (!entry.lastAt) entry.lastAt = c.last_message_at
+    counts.set(c.widget_id, entry)
+  }
+
+  res.json({
+    widgets: (data || []).map((w) => ({ ...w, ...(counts.get(w.id) || { conversations: 0, lastAt: null }) })),
+    embedBase: process.env.RAILWAY_PUBLIC_URL || `${req.protocol}://${req.get('host')}`,
+    slackReady: !!(slackClient && (process.env.SLACK_CHAT_CHANNEL_ID || process.env.SLACK_CHANNEL_ID)),
+  })
+})
+
+const CHAT_WIDGET_FIELDS = ['name', 'title', 'subtitle', 'greeting', 'position', 'accent', 'ask_email', 'slack_channel_id', 'archived']
+
+function cleanChatWidgetFields(body) {
+  const out = {}
+  for (const key of CHAT_WIDGET_FIELDS) {
+    if (!(key in body)) continue
+    if (key === 'ask_email' || key === 'archived') out[key] = !!body[key]
+    else if (key === 'position') out[key] = body[key] === 'bottom-left' ? 'bottom-left' : 'bottom-right'
+    else if (key === 'slack_channel_id') out[key] = String(body[key] || '').trim() || null
+    else out[key] = String(body[key] || '').trim().slice(0, 500)
+  }
+  return out
+}
+
+app.post('/api/chat/widgets', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const fields = cleanChatWidgetFields(req.body || {})
+  if (!fields.name) return res.status(400).json({ error: 'Name is required' })
+  // Blank strings would wipe the column defaults that the widget relies on
+  for (const key of ['title', 'subtitle', 'greeting']) if (!fields[key]) delete fields[key]
+  const { data, error } = await supabase.from('chat_widgets').insert(fields).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ widget: { ...data, conversations: 0, lastAt: null } })
+})
+
+app.patch('/api/chat/widgets/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const fields = cleanChatWidgetFields(req.body || {})
+  if (!Object.keys(fields).length) return res.status(400).json({ error: 'Nothing to update' })
+  const { data, error } = await supabase.from('chat_widgets')
+    .update(fields).eq('id', req.params.id).select().single()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ widget: data })
+})
+
+app.delete('/api/chat/widgets/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const { error } = await supabase.from('chat_widgets').delete().eq('id', req.params.id)
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true })
+})
+
+// Transcript browser: conversations, newest first, optionally for one widget.
+app.get('/api/chat/conversations', async (req, res) => {
+  if (!supabase) return res.json({ conversations: [] })
+  let query = supabase.from('chat_conversations')
+    .select('*').order('last_message_at', { ascending: false }).limit(100)
+  if (req.query.widget) query = query.eq('widget_id', req.query.widget)
+  const { data, error } = await query
+  if (error) return res.status(500).json({ error: error.message })
+
+  const ids = (data || []).map((c) => c.id)
+  const previews = new Map()
+  if (ids.length) {
+    const { data: msgs } = await supabase.from('chat_messages')
+      .select('conversation_id, role, body, seq').in('conversation_id', ids).order('seq', { ascending: true })
+    for (const m of msgs || []) {
+      const entry = previews.get(m.conversation_id) || { count: 0, first: null, last: null }
+      entry.count++
+      if (!entry.first) entry.first = m.body
+      entry.last = m.body
+      entry.awaitingReply = m.role === 'visitor'
+      previews.set(m.conversation_id, entry)
+    }
+  }
+
+  res.json({
+    conversations: (data || []).map((c) => {
+      const { visitor_token, ip_hash, ...safe } = c // never leak the read token to the UI
+      return { ...safe, ...(previews.get(c.id) || { count: 0, first: null, last: null, awaitingReply: false }) }
+    }),
+  })
+})
+
+app.get('/api/chat/conversations/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database not configured' })
+  const { data: conv } = await supabase.from('chat_conversations')
+    .select('*').eq('id', req.params.id).maybeSingle()
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' })
+  const { data: messages } = await supabase.from('chat_messages')
+    .select('seq, role, author, body, created_at').eq('conversation_id', conv.id).order('seq', { ascending: true })
+  const { visitor_token, ip_hash, ...safe } = conv
+  res.json({ conversation: safe, messages: messages || [] })
 })
 
 // ─── Health ───────────────────────────────────────────────────────────────────

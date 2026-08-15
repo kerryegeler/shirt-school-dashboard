@@ -434,3 +434,62 @@ create index if not exists idx_utm_events_type on utm_events(event_type, occurre
 create index if not exists idx_utm_events_campaign on utm_events(campaign, event_type, occurred_at desc);
 create index if not exists idx_utm_events_visitor on utm_events(visitor_id, occurred_at desc);
 create index if not exists idx_utm_events_iphash on utm_events(ip_hash, occurred_at desc);
+
+-- ─── Live Chat Widget ────────────────────────────────────────────────────────
+-- Embeddable chat bubble for landing/checkout pages. Visitor types on the web
+-- page, Kerry answers from a Slack thread. One row per embed, so a checkout
+-- page and a sales page can look and greet differently.
+create table if not exists chat_widgets (
+  id               uuid primary key default gen_random_uuid(),
+  name             text not null,             -- internal label, e.g. "Checkout page"
+  title            text not null default 'Chat with Kerry',
+  subtitle         text not null default 'Usually replies in a few minutes',
+  greeting         text not null default 'Hey! Question about the challenge? Ask away — this goes straight to my phone.',
+  position         text not null default 'bottom-right',  -- bottom-right | bottom-left
+  accent           text not null default '#e02b20',
+  ask_email        boolean not null default true,   -- collect name/email before the first message
+  slack_channel_id text,                       -- optional per-widget override
+  archived         boolean not null default false,
+  created_at       timestamptz not null default now()
+);
+alter table chat_widgets disable row level security;
+
+-- One row per visitor conversation. slack_ts is the thread root Kerry replies in.
+-- visitor_token is the shared secret the widget presents to read its own thread;
+-- without it a conversation id alone would let anyone read someone else's chat.
+create table if not exists chat_conversations (
+  id               uuid primary key default gen_random_uuid(),
+  widget_id        uuid references chat_widgets(id) on delete set null,
+  visitor_token    text not null,
+  visitor_name     text,
+  visitor_email    text,
+  page_url         text,
+  referrer         text,
+  user_agent       text,
+  ip_hash          text,
+  slack_ts         text,                       -- Slack thread root timestamp
+  slack_channel_id text,
+  status           text not null default 'open',   -- open | closed
+  last_message_at  timestamptz not null default now(),
+  created_at       timestamptz not null default now()
+);
+alter table chat_conversations disable row level security;
+create index if not exists idx_chat_conv_slack_ts on chat_conversations(slack_ts);
+create index if not exists idx_chat_conv_recent on chat_conversations(last_message_at desc);
+
+-- Every message in both directions. seq is the widget's poll cursor — a
+-- monotonic integer is unambiguous where two timestamps in the same millisecond
+-- would not be.
+create table if not exists chat_messages (
+  id              uuid primary key default gen_random_uuid(),
+  seq             bigserial,
+  conversation_id uuid not null references chat_conversations(id) on delete cascade,
+  role            text not null,              -- 'visitor' | 'agent'
+  author          text,                       -- Slack display name for agent messages
+  body            text not null,
+  slack_ts        text,                       -- set on agent messages, dedupes Slack retries
+  created_at      timestamptz not null default now()
+);
+alter table chat_messages disable row level security;
+create index if not exists idx_chat_msg_conv on chat_messages(conversation_id, seq);
+create unique index if not exists idx_chat_msg_slack_ts on chat_messages(slack_ts) where slack_ts is not null;
