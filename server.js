@@ -104,6 +104,7 @@ const DASHBOARD_PUBLIC_PATHS = new Set([
   '/api/chat/config',    // Called by the chat widget on public pages; returns appearance only
   '/api/chat/message',   // Visitor sending a chat message from a public page
   '/api/chat/poll',      // Visitor reading their own thread (guarded by a per-conversation token)
+  '/api/chat/nudge',     // Widget reporting that it promised the visitor a follow-up
 ])
 
 function requireDashboardAuth(req, res, next) {
@@ -8000,6 +8001,7 @@ app.post('/api/chat/message', async (req, res) => {
   }
 
   let conv = null
+  let capturedNote = null
   if (body.conversationId && body.token) {
     const { data } = await supabase.from('chat_conversations')
       .select('*').eq('id', body.conversationId).maybeSingle()
@@ -8037,6 +8039,10 @@ app.post('/api/chat/message', async (req, res) => {
     if (Object.keys(patch).length) {
       await supabase.from('chat_conversations').update(patch).eq('id', conv.id)
       Object.assign(conv, patch)
+      // Details that arrive mid-conversation (usually after the widget asked for
+      // an email so Kerry could follow up) are useless if they only land in the
+      // database — the thread is where he's reading.
+      capturedNote = `📇 Details added: ${chatIdentityLine(conv)}`
     }
   }
 
@@ -8062,7 +8068,7 @@ app.post('/api/chat/message', async (req, res) => {
     console.warn('[Chat] Slack not configured (SLACK_BOT_TOKEN / SLACK_CHAT_CHANNEL_ID) — message stored but not delivered')
     return
   }
-  deliverChatToSlack(conv, widget, channel, text)
+  deliverChatToSlack(conv, widget, channel, text, capturedNote)
 })
 
 // Slack delivery is serialized per conversation. Two messages sent in quick
@@ -8072,7 +8078,7 @@ app.post('/api/chat/message', async (req, res) => {
 const chatSlackQueues = new Map()   // conversationId → promise of the last post
 const chatThreadTs = new Map()      // conversationId → slack_ts, avoids a re-read
 
-function deliverChatToSlack(conv, widget, channel, text) {
+function deliverChatToSlack(conv, widget, channel, text, note) {
   const prior = chatSlackQueues.get(conv.id) || Promise.resolve()
   const next = prior.then(async () => {
     const threadTs = conv.slack_ts || chatThreadTs.get(conv.id)
@@ -8090,6 +8096,13 @@ function deliverChatToSlack(conv, widget, channel, text) {
         channel: conv.slack_channel_id || channel,
         thread_ts: threadTs,
         text: `*${conv.visitor_name || 'Visitor'}:* ${text}`,
+      })
+    }
+    if (note) {
+      await slackClient.chat.postMessage({
+        channel: conv.slack_channel_id || channel,
+        thread_ts: conv.slack_ts || chatThreadTs.get(conv.id),
+        text: note,
       })
     }
   }).catch((err) => {
@@ -8127,6 +8140,43 @@ app.get('/api/chat/poll', async (req, res) => {
     status: conv.status,
     messages: (rows || []).map((m) => ({ seq: m.seq, role: m.role, author: m.author, body: m.body, at: m.created_at })),
   })
+})
+
+// Public: the widget waited out its typing animation with no reply and told the
+// visitor they'd hear back. Kerry now owes someone an email, so that has to
+// surface in the thread — otherwise the promise is invisible to the only person
+// who can keep it.
+const chatNudgeSentAt = new Map() // conversationId → ts, cheap repeat guard
+
+app.post('/api/chat/nudge', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Chat is not configured' })
+  const body = typeof req.body === 'string' ? safeJsonParse(req.body) : (req.body || {})
+  if (!body || !body.conversationId || !body.token) return res.status(400).json({ error: 'Bad request' })
+
+  const { data: conv } = await supabase.from('chat_conversations')
+    .select('*').eq('id', body.conversationId).maybeSingle()
+  if (!conv || conv.visitor_token !== body.token) return res.status(404).json({ error: 'Conversation not found' })
+
+  res.json({ ok: true })
+
+  const last = chatNudgeSentAt.get(conv.id)
+  if (last && Date.now() - last < 5 * 60_000) return
+  chatNudgeSentAt.set(conv.id, Date.now())
+  if (chatNudgeSentAt.size > 2000) chatNudgeSentAt.clear()
+
+  if (!slackClient || !conv.slack_ts) return
+  const reach = conv.visitor_email
+    ? `you'd follow up by email at *${conv.visitor_email}*`
+    : `you'd get back to them — *no email captured*, so this thread is the only way to reach them`
+  try {
+    await slackClient.chat.postMessage({
+      channel: conv.slack_channel_id || chatChannelFor(null),
+      thread_ts: conv.slack_ts,
+      text: `⏳ No reply for a few minutes — ${conv.visitor_name || 'the visitor'} was told ${reach}.`,
+    })
+  } catch (err) {
+    console.error('[Chat] nudge post failed:', err.message)
+  }
 })
 
 // The embeddable widget itself. Short cache so edits roll out quickly.

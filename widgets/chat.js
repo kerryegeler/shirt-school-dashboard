@@ -18,6 +18,8 @@
  *   data-title      header title
  *   data-greeting   the first bubble the visitor sees
  *   data-open       "1" = start with the panel open (handy for testing)
+ *   data-wait       seconds the "typing" animation runs before the visitor is
+ *                   told they'll get a follow-up by email (default 180)
  *   data-offset     pixels to lift the whole widget off the bottom of the page,
  *                   so it clears a sticky bar (a Deadline Funnel countdown is
  *                   usually 50–70px tall). Default 0.
@@ -76,8 +78,17 @@
     return isNaN(n) || n < 0 ? fallback : n
   }
 
+  // After the visitor sends, a typing indicator runs so the chat feels answered
+  // rather than dropped. If nobody has replied by WAIT_MS, it's replaced by an
+  // honest note about following up — leaving dots pulsing forever would be a
+  // promise the page can't keep.
+  var TYPING_DELAY_MS = 1500
+  var WAIT_MS = num(cfg.wait, 180) * 1000
+
   var els = {}
   var pollTimer = null
+  var typingShowTimer = null
+  var noReplyTimer = null
 
   // ── Storage ───────────────────────────────────────────────────────────────
 
@@ -181,13 +192,13 @@
       for (var i = 0; i < d.messages.length; i++) {
         var m = d.messages[i]
         if (m.seq > state.cursor) state.cursor = m.seq
-        // Skip our own messages coming back around — they're already rendered
-        if (m.role === 'visitor' && state.messages.some(function (x) { return x.seq === m.seq })) continue
+        if (m.role === 'visitor' && adoptOwnMessage(m)) continue
         state.messages.push(m)
         appendBubble(m)
         if (m.role === 'agent') gotAgentReply = true
       }
       if (gotAgentReply) {
+        stopWaitingForReply()
         state.lastActivity = Date.now()
         if (!state.open) {
           state.unread++
@@ -197,6 +208,31 @@
       }
     }
     xhr.send()
+  }
+
+  // A message the visitor sent is drawn immediately, before the server has
+  // given it a seq. If a poll lands in the gap between the server storing it and
+  // the send response coming back, that same message arrives with a seq we've
+  // never seen — and drawing it would show the visitor their own message twice.
+  // So match on seq first, then on the still-unconfirmed bubble's text, and
+  // adopt it rather than appending.
+  function adoptOwnMessage(m) {
+    for (var i = 0; i < state.messages.length; i++) {
+      if (state.messages[i].seq === m.seq) return true
+    }
+    for (var j = state.messages.length - 1; j >= 0; j--) {
+      var entry = state.messages[j]
+      if (entry.seq == null && entry.body === m.body) {
+        entry.seq = m.seq
+        confirmBubble(entry)
+        return true
+      }
+    }
+    return false
+  }
+
+  function confirmBubble(entry) {
+    if (entry.node) entry.node.style.opacity = ''
   }
 
   function schedulePoll() {
@@ -234,6 +270,13 @@
     '.ssc-them{align-self:flex-start;background:#fff;color:#1a1a1a;border-bottom-left-radius:5px;box-shadow:0 1px 2px rgba(0,0,0,.08)}',
     '.ssc-me{align-self:flex-end;background:var(--ssc-accent);color:#fff;border-bottom-right-radius:5px}',
     '.ssc-meta{font-size:11px;color:#8a8a8f;align-self:center;padding:2px 0}',
+    '.ssc-auto{color:#6b6b73;font-style:italic}',
+    '.ssc-typing{display:flex;gap:4px;align-items:center;padding:12px 14px}',
+    '.ssc-typing span{width:7px;height:7px;border-radius:50%;background:#b4b4bb;animation:ssc-blink 1.4s infinite both}',
+    '.ssc-typing span:nth-child(2){animation-delay:.2s}',
+    '.ssc-typing span:nth-child(3){animation-delay:.4s}',
+    '@keyframes ssc-blink{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}',
+    '@media (prefers-reduced-motion:reduce){.ssc-typing span{animation-duration:0s;opacity:.6}}',
     '.ssc-form{flex:0 0 auto;padding:12px;background:#fff;border-top:1px solid #ececef;display:flex;flex-direction:column;gap:8px}',
     '.ssc-fields{display:flex;gap:8px}',
     '.ssc-input{width:100%;border:1px solid #ddd;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;color:#1a1a1a;background:#fff}',
@@ -364,7 +407,9 @@
 
   function appendBubble(m) {
     var node = el('div', 'ssc-msg ' + (m.role === 'agent' ? 'ssc-them' : 'ssc-me'), linkify(m.body))
-    els.log.appendChild(node)
+    // Keep the typing dots pinned to the bottom of the log
+    if (els.typing && els.typing.parentNode === els.log) els.log.insertBefore(node, els.typing)
+    else els.log.appendChild(node)
     els.log.scrollTop = els.log.scrollHeight
     return node
   }
@@ -372,6 +417,62 @@
   function appendMeta(text) {
     els.log.appendChild(el('div', 'ssc-meta', escapeHtml(text)))
     els.log.scrollTop = els.log.scrollHeight
+  }
+
+  function showTyping() {
+    if (els.typing) return
+    els.typing = el('div', 'ssc-msg ssc-them ssc-typing', '<span></span><span></span><span></span>')
+    els.typing.setAttribute('aria-label', 'Kerry is typing')
+    els.log.appendChild(els.typing)
+    els.log.scrollTop = els.log.scrollHeight
+  }
+
+  function hideTyping() {
+    if (els.typing && els.typing.parentNode) els.typing.parentNode.removeChild(els.typing)
+    els.typing = null
+  }
+
+  function startWaitingForReply() {
+    stopWaitingForReply()
+    typingShowTimer = setTimeout(showTyping, TYPING_DELAY_MS)
+    noReplyTimer = setTimeout(onNoReply, WAIT_MS)
+  }
+
+  function stopWaitingForReply() {
+    clearTimeout(typingShowTimer)
+    clearTimeout(noReplyTimer)
+    typingShowTimer = noReplyTimer = null
+    hideTyping()
+  }
+
+  // Nobody answered in time. What we can honestly promise depends on whether we
+  // have a way to reach them, so say the true version of it either way.
+  function onNoReply() {
+    hideTyping()
+    var node = el('div', 'ssc-msg ssc-them ssc-auto')
+    if (state.email) {
+      node.textContent = 'Kerry’s away from his desk right now — he’ll follow up with you by email at ' + state.email + '.'
+    } else if (conf.askEmail) {
+      node.textContent = 'Kerry’s away from his desk right now. Add your email below and he’ll follow up there.'
+      els.fields.style.display = ''
+      // Re-open detail capture so the next send actually reads these fields
+      state.askedDetails = false
+    } else {
+      node.textContent = 'Kerry’s away from his desk right now — he’ll get back to you as soon as he can.'
+    }
+    els.log.appendChild(node)
+    els.log.scrollTop = els.log.scrollHeight
+    notifyNoReply()
+  }
+
+  // Tell the Slack thread the visitor was promised a follow-up. Without this the
+  // promise is invisible to the person who has to keep it.
+  function notifyNoReply() {
+    if (!state.conversationId || !state.token) return
+    var xhr = new XMLHttpRequest()
+    xhr.open('POST', API_BASE + '/api/chat/nudge', true)
+    xhr.setRequestHeader('Content-Type', 'text/plain')
+    xhr.send(JSON.stringify({ conversationId: state.conversationId, token: state.token }))
   }
 
   function renderBadge() {
@@ -456,29 +557,36 @@
     els.ta.value = ''
     els.ta.style.height = 'auto'
 
-    var pending = appendBubble({ role: 'visitor', body: text })
-    pending.style.opacity = '0.6'
+    // Tracked in state.messages from the moment it's drawn, with seq null until
+    // the server assigns one — that's what lets a poll adopt it (see
+    // adoptOwnMessage) instead of drawing a duplicate.
+    var entry = { seq: null, role: 'visitor', body: text }
+    entry.node = appendBubble(entry)
+    entry.node.style.opacity = '0.6'
+    state.messages.push(entry)
     var isFirst = !state.conversationId
 
     postMessage(text, function (error, data) {
       state.sending = false
       els.send.disabled = false
       if (error) {
-        pending.remove()
+        var at = state.messages.indexOf(entry)
+        if (at !== -1) state.messages.splice(at, 1)
+        entry.node.remove()
         els.ta.value = text
         showError(error)
         return
       }
-      pending.style.opacity = ''
       state.conversationId = data.conversationId
       state.token = data.token
-      if (data.message) {
-        state.messages.push(data.message)
-        if (data.message.seq > state.cursor) state.cursor = data.message.seq
-      }
+      // A poll may have adopted this entry already, in which case it has its seq
+      if (data.message && entry.seq == null) entry.seq = data.message.seq
+      confirmBubble(entry)
+      if (data.message && data.message.seq > state.cursor) state.cursor = data.message.seq
       state.lastActivity = Date.now()
       persist()
       if (isFirst) appendMeta('Sent — you’ll get a reply right here.')
+      startWaitingForReply()
       schedulePoll()
     })
   }
