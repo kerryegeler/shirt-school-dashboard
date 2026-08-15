@@ -172,12 +172,22 @@
     }))
   }
 
+  // Only ever one poll in flight. Three things can ask for one — the timer,
+  // opening the panel, and coming back to the tab — and two overlapping requests
+  // both carry the same cursor, so both come back with the same new messages.
+  var polling = false
+
   function poll() {
-    if (!state.conversationId || !state.token) return
+    if (!state.conversationId || !state.token || polling) return
+    polling = true
     var xhr = new XMLHttpRequest()
     xhr.open('GET', API_BASE + '/api/chat/poll?conversation=' + encodeURIComponent(state.conversationId) +
       '&token=' + encodeURIComponent(state.token) + '&after=' + state.cursor, true)
+    xhr.timeout = 15000
+    xhr.ontimeout = function () { polling = false }
+    xhr.onerror = function () { polling = false }
     xhr.onload = function () {
+      polling = false
       if (xhr.status === 404) {
         // The conversation was deleted server-side — forget it and start clean
         try { localStorage.removeItem(STORE_KEY) } catch (e) {}
@@ -192,7 +202,7 @@
       for (var i = 0; i < d.messages.length; i++) {
         var m = d.messages[i]
         if (m.seq > state.cursor) state.cursor = m.seq
-        if (m.role === 'visitor' && adoptOwnMessage(m)) continue
+        if (alreadyShown(m)) continue
         state.messages.push(m)
         appendBubble(m)
         if (m.role === 'agent') gotAgentReply = true
@@ -210,16 +220,19 @@
     xhr.send()
   }
 
-  // A message the visitor sent is drawn immediately, before the server has
-  // given it a seq. If a poll lands in the gap between the server storing it and
-  // the send response coming back, that same message arrives with a seq we've
-  // never seen — and drawing it would show the visitor their own message twice.
-  // So match on seq first, then on the still-unconfirmed bubble's text, and
-  // adopt it rather than appending.
-  function adoptOwnMessage(m) {
+  // Every message is checked against what's already on screen, in BOTH
+  // directions. Anything already drawn is skipped by seq — a reply that arrived
+  // twice must not be shown twice.
+  //
+  // The visitor's own messages need one extra step: they're drawn the instant
+  // they're sent, before the server has assigned a seq. When that seq finally
+  // arrives, match the unconfirmed bubble on its text and adopt it rather than
+  // drawing a second copy.
+  function alreadyShown(m) {
     for (var i = 0; i < state.messages.length; i++) {
       if (state.messages[i].seq === m.seq) return true
     }
+    if (m.role !== 'visitor') return false
     for (var j = state.messages.length - 1; j >= 0; j--) {
       var entry = state.messages[j]
       if (entry.seq == null && entry.body === m.body) {
@@ -255,7 +268,7 @@
     '.ssc-bubble:hover{transform:scale(1.06)}',
     '.ssc-bubble svg{width:26px;height:26px}',
     '.ssc-badge{position:absolute;top:-2px;right:-2px;min-width:20px;height:20px;border-radius:10px;background:#111;color:#fff;font-size:12px;font-weight:700;line-height:20px;padding:0 5px;box-shadow:0 0 0 2px #fff}',
-    '.ssc-panel{position:absolute;bottom:74px;width:352px;max-width:calc(100vw - 32px);height:480px;max-height:calc(100vh - 120px - var(--ssc-offset,0px));background:#fff;border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,.24);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .18s ease,transform .18s ease}',
+    '.ssc-panel{position:absolute;bottom:74px;width:352px;max-width:calc(100vw - 32px);height:480px;max-height:calc(var(--ssc-vh,100vh) - 120px - var(--ssc-offset,0px));background:#fff;border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,.24);display:flex;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .18s ease,transform .18s ease}',
     '.ssc-root.ssc-right .ssc-panel{right:0}.ssc-root.ssc-left .ssc-panel{left:0}',
     '.ssc-panel.ssc-show{opacity:1;transform:none;pointer-events:auto}',
     '.ssc-head{background:var(--ssc-accent);color:#fff;padding:16px 18px;display:flex;align-items:center;gap:10px;flex:0 0 auto}',
@@ -287,7 +300,17 @@
     '.ssc-send:disabled{opacity:.45;cursor:default}.ssc-send svg{width:18px;height:18px}',
     '.ssc-err{font-size:12px;color:#c02419;padding:0 2px}',
     '.ssc-foot{font-size:11px;color:#a0a0a6;text-align:center;padding:0 0 2px}',
-    '@media (max-width:420px){.ssc-panel{width:calc(100vw - 32px);height:calc(100vh - 130px - var(--ssc-offset,0px))}}',
+    // 480px, not 420px: the big iPhones are 428-430 CSS px wide and were falling
+    // through to the desktop sizing. The panel is measured against the VISIBLE
+    // viewport and capped at 68% of it, so it can't run under Safari's toolbars
+    // or reach the top of the screen.
+    '@media (max-width:480px){',
+    '  .ssc-panel{width:calc(100vw - 24px);max-width:calc(100vw - 24px);',
+    '    height:calc(var(--ssc-vh,100vh) - 168px - var(--ssc-offset,0px));',
+    '    max-height:68vh;max-height:calc(var(--ssc-vh,100vh) * 0.68)}',
+    '  .ssc-log{padding:14px 12px}',
+    '  .ssc-msg{max-width:88%}',
+    '}',
   ].join('')
 
   var ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 01-9 8.4 8.5 8.5 0 01-3.9-.9L3 21l1.9-5a8.4 8.4 0 01-.9-3.9 8.5 8.5 0 018.4-9h.6a8.5 8.5 0 018 8v.4z"/></svg>'
@@ -324,6 +347,7 @@
     // Lifts the bubble AND shrinks the panel's max height by the same amount,
     // so clearing a bottom bar can't push the panel off the top of the screen.
     root.style.setProperty('--ssc-offset', conf.offset + 'px')
+    trackViewport(root)
 
     var panel = el('div', 'ssc-panel')
 
@@ -509,6 +533,25 @@
       osc.stop(ctx.currentTime + 0.34)
       setTimeout(function () { try { ctx.close() } catch (e) {} }, 600)
     } catch (e) {}
+  }
+
+  // iOS reports 100vh as the height with the browser chrome HIDDEN, so a panel
+  // sized in vh is taller than what the visitor can actually see — it runs off
+  // the top of the screen, and shifts as the URL bar collapses on scroll.
+  // visualViewport is the real visible box, and it also shrinks when the
+  // keyboard opens, which keeps the text field in view while typing.
+  function trackViewport(root) {
+    var vv = window.visualViewport
+    function apply() {
+      root.style.setProperty('--ssc-vh', (vv ? vv.height : window.innerHeight) + 'px')
+    }
+    apply()
+    if (vv) {
+      vv.addEventListener('resize', apply)
+      vv.addEventListener('scroll', apply)
+    }
+    window.addEventListener('resize', apply)
+    window.addEventListener('orientationchange', function () { setTimeout(apply, 250) })
   }
 
   function toggle(open) {
