@@ -4,7 +4,7 @@ import { useToast } from '../../components/ui/Toast.jsx'
 import {
   fetchSalesSummary, fetchRevenueEntries, addRevenueEntry,
   deleteRevenueEntry, backfillKajabi, backfillStripe, cleanupStripeDuplicates,
-  fetchSalesProducts, repairKajabi,
+  fetchSalesProducts, repairKajabi, fetchSalesAlertSettings, updateSalesAlertSettings,
 } from '../../services/api.js'
 import './SalesAnalytics.css'
 
@@ -260,6 +260,127 @@ function AddEntryModal({ onClose, onAdded }) {
   )
 }
 
+// ─── Slack alert toggles ──────────────────────────────────────────────────────
+// Every Kajabi product that has ever sold, each with an on/off switch for the
+// real-time Slack sale alert, plus a master switch. Changes save immediately.
+
+function Switch({ on, onChange, disabled, label }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      className={`sa-switch ${on ? 'sa-switch--on' : ''}`}
+      onClick={() => onChange(!on)}
+      disabled={disabled}
+    >
+      <span className="sa-switch-knob" />
+    </button>
+  )
+}
+
+function SlackAlertsModal({ onClose }) {
+  const toast = useToast()
+  const [settings, setSettings] = useState(null)
+  const [error, setError] = useState('')
+  const [savingKey, setSavingKey] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchSalesAlertSettings()
+      .then((d) => { if (!cancelled) setSettings(d) })
+      .catch((err) => { if (!cancelled) setError(err.message) })
+    return () => { cancelled = true }
+  }, [])
+
+  async function setMaster(on) {
+    const prev = settings
+    setSettings({ ...settings, enabled: on })
+    setSavingKey('__master__')
+    try {
+      await updateSalesAlertSettings({ enabled: on })
+      toast.show(on ? 'Slack sale alerts on' : 'Slack sale alerts paused')
+    } catch (err) {
+      setSettings(prev)
+      toast.show(`Save failed: ${err.message}`, { variant: 'danger' })
+    }
+    setSavingKey(null)
+  }
+
+  async function setProduct(key, on) {
+    const prev = settings
+    setSettings({ ...settings, products: settings.products.map((p) => (p.key === key ? { ...p, enabled: on } : p)) })
+    setSavingKey(key)
+    try {
+      await updateSalesAlertSettings({ products: { [key]: on } })
+    } catch (err) {
+      setSettings(prev)
+      toast.show(`Save failed: ${err.message}`, { variant: 'danger' })
+    }
+    setSavingKey(null)
+  }
+
+  const amountsLabel = (p) => p.typical_amounts_cents?.length
+    ? p.typical_amounts_cents.map((c) => formatMoney(c).replace('.00', '')).join(' / ')
+    : ''
+
+  return (
+    <div className="sa-modal-overlay" onClick={onClose}>
+      <div className="sa-modal sa-modal--wide" onClick={(e) => e.stopPropagation()}>
+        <div className="sa-modal-header">
+          <h3>Slack Sale Alerts</h3>
+          <button type="button" className="sa-icon-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="sa-modal-body sa-alerts-body">
+          {error && <div className="sa-error">{error}</div>}
+          {!settings && !error && <div className="sa-loading"><div className="sa-spinner" /></div>}
+          {settings && (
+            <>
+              <div className="sa-alert-row sa-alert-row--master">
+                <div className="sa-alert-info">
+                  <div className="sa-alert-name">Post Kajabi sales to Slack</div>
+                  <div className="sa-alert-meta">Master switch. Turn off to pause every sale alert.</div>
+                </div>
+                <Switch on={settings.enabled} onChange={setMaster} disabled={savingKey === '__master__'} label="All sale alerts" />
+              </div>
+
+              <div className={`sa-alert-list ${settings.enabled ? '' : 'sa-alert-list--muted'}`}>
+                <div className="sa-label">Per product</div>
+                {settings.products.length === 0 && (
+                  <div className="sa-empty">No Kajabi sales recorded yet. Products appear here after their first sale.</div>
+                )}
+                {settings.products.map((p) => (
+                  <div key={p.key} className="sa-alert-row">
+                    <div className="sa-alert-info">
+                      <div className="sa-alert-name">{p.name}</div>
+                      <div className="sa-alert-meta">
+                        {amountsLabel(p) && <span>{amountsLabel(p)}</span>}
+                        {p.sales > 0 && <span>{p.sales} {p.sales === 1 ? 'sale' : 'sales'}</span>}
+                        {p.last_sale && <span>last {formatDate(p.last_sale)}</span>}
+                      </div>
+                    </div>
+                    <Switch
+                      on={p.enabled}
+                      onChange={(on) => setProduct(p.key, on)}
+                      disabled={savingKey === p.key}
+                      label={`Alerts for ${p.name}`}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="sa-alert-hint">New products alert by default and show up here after their first sale.</div>
+            </>
+          )}
+        </div>
+        <div className="sa-modal-footer">
+          <button type="button" className="btn btn-primary" onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main module ──────────────────────────────────────────────────────────────
 
 export default function SalesAnalytics() {
@@ -271,6 +392,7 @@ export default function SalesAnalytics() {
   const [filterSource, setFilterSource] = useState('')
   const [filterProduct, setFilterProduct] = useState('')
   const [showAdd, setShowAdd] = useState(false)
+  const [showAlerts, setShowAlerts] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [confirmAction, setConfirmAction] = useState(null) // 'cleanup' | 'repair' | null
@@ -408,6 +530,7 @@ export default function SalesAnalytics() {
           <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ Add Entry</button>
           <button className="btn btn-ghost" onClick={handleBackfillStripe} disabled={syncing}>Sync Stripe (12mo)</button>
           <button className="btn btn-ghost" onClick={() => setConfirmAction('repair')} disabled={syncing}>Repair Kajabi</button>
+          <button className="btn btn-ghost" onClick={() => setShowAlerts(true)}>Slack Alerts</button>
           <button className="btn btn-ghost" onClick={load} disabled={loading}>Refresh</button>
           {syncMsg && <span className="sa-msg">{syncMsg}</span>}
         </div>
@@ -551,6 +674,7 @@ export default function SalesAnalytics() {
       </div>
 
       {showAdd && <AddEntryModal onClose={() => setShowAdd(false)} onAdded={load} />}
+      {showAlerts && <SlackAlertsModal onClose={() => setShowAlerts(false)} />}
     </div>
   )
 }

@@ -615,6 +615,24 @@ export async function repairKajabi() {
   return d
 }
 
+export async function fetchSalesAlertSettings() {
+  const r = await apiFetch('/api/sales/alert-settings')
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to fetch alert settings')
+  return d
+}
+
+// Partial update: { enabled?: boolean, products?: { [key]: boolean } }
+export async function updateSalesAlertSettings(patch) {
+  const r = await apiFetch('/api/sales/alert-settings', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || 'Failed to save alert settings')
+  return d
+}
+
 // ─── Business Reminders ───────────────────────────────────────────────────────
 
 export async function fetchReminders(includeDone = false) {

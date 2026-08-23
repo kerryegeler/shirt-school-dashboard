@@ -442,6 +442,90 @@
   margin-top: 4px;
 }
 
+/* ─── Slack alert toggles ─────────────────────────────────────── */
+.sa-modal--wide { max-width: 560px; max-height: calc(100vh - 32px); }
+
+.sa-alerts-body {
+  overflow-y: auto;
+  gap: 12px;
+}
+
+.sa-alert-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #3a3a3c);
+  border-radius: 8px;
+  background: var(--bg-elevated, #1c1c1e);
+}
+
+.sa-alert-row--master {
+  border-color: var(--orange-dim, rgba(245,166,35,0.15));
+  background: var(--orange-light, rgba(245,166,35,0.07));
+}
+
+.sa-alert-info { min-width: 0; flex: 1; }
+
+.sa-alert-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text, #fff);
+  overflow-wrap: anywhere;
+}
+
+.sa-alert-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-secondary, #8e8e93);
+}
+
+.sa-alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: opacity 0.15s;
+}
+.sa-alert-list .sa-label { margin-bottom: 2px; }
+.sa-alert-list--muted { opacity: 0.45; }
+
+.sa-alert-hint {
+  font-size: 12px;
+  color: var(--text-tertiary, #8a8a8a);
+}
+
+.sa-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  border: none;
+  padding: 0;
+  background: var(--border-strong, #383838);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+.sa-switch--on { background: var(--orange, #f5a623); }
+.sa-switch:disabled { opacity: 0.6; cursor: default; }
+.sa-switch:focus-visible { outline: 2px solid var(--orange, #f5a623); outline-offset: 2px; }
+
+.sa-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+}
+.sa-switch--on .sa-switch-knob { transform: translateX(18px); }
+
 .sa-modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -537,5 +621,7 @@
   .sa-desc { white-space: normal; }
 
   .sa-modal { max-width: 100%; max-height: 100vh; height: 100%; border-radius: 0; }
+  .sa-modal--wide { max-height: 100vh; }
+  .sa-alert-row { padding: 12px; }
   .sa-modal-overlay { padding: 0; align-items: stretch; }
 }

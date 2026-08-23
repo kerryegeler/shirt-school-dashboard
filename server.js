@@ -5599,9 +5599,30 @@ async function syncKajabiFailureEmails() {
           const offerSlug = offer.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60)
           const kajabiId = `email-fail-${customerEmail}-${offerSlug}`
 
+          const emailDate = new Date(parseInt(msgRes.data.internalDate))
+
           // Check if this row already existed (and was already Slack-notified)
           const { data: existing } = await supabase.from('kajabi_payments')
-            .select('id, slack_notified_at, ignored').eq('kajabi_id', kajabiId).maybeSingle()
+            .select('id, slack_notified_at, ignored, status, failed_at').eq('kajabi_id', kajabiId).maybeSingle()
+
+          // Don't resurrect a failure that has since been paid. This scan re-reads
+          // the same 30 days of email every tick, and the upsert below would
+          // otherwise stamp status='failed' back onto a row the success webhook
+          // had already flipped to 'success' — so recovered customers kept
+          // reappearing in the Failed Payments tab.
+          if (existing?.status === 'success' && existing.failed_at && new Date(existing.failed_at) >= emailDate) continue
+          const { data: paidSince } = await supabase.from('kajabi_payments')
+            .select('id').eq('status', 'success').ilike('customer_email', customerEmail)
+            .ilike('product_name', `%${offer.replace(/^"+|"+$/g, '').trim()}%`)
+            .gt('synced_at', emailDate.toISOString()).limit(1)
+          if (paidSince?.length) {
+            if (existing && existing.status === 'failed') {
+              await supabase.from('kajabi_payments')
+                .update({ status: 'success', synced_at: new Date().toISOString() }).eq('id', existing.id)
+              console.log(`[Kajabi Email] ${customerEmail} paid after the failure email — marked recovered`)
+            }
+            continue
+          }
 
           const { data: upserted, error: upsertErr } = await supabase.from('kajabi_payments').upsert({
             kajabi_id: kajabiId,
@@ -5610,7 +5631,7 @@ async function syncKajabiFailureEmails() {
             customer_email: customerEmail,
             customer_name: customerName || null,
             product_name: offer,
-            failed_at: new Date(parseInt(msgRes.data.internalDate)).toISOString(),
+            failed_at: emailDate.toISOString(),
             raw_data: {
               source: 'gmail',
               gmail_message_id: m.id,
@@ -6100,14 +6121,19 @@ app.post('/api/kajabi/webhook', async (req, res) => {
       }, { onConflict: 'kajabi_id' })
       console.log(`[Kajabi Webhook] ✓ Recorded successful payment for ${customerEmail}`)
 
-      // Also record into the revenue ledger so it shows up in Sales Analytics
+      // Also record into the revenue ledger so it shows up in Sales Analytics.
+      // Date it by when the webhook ARRIVED, not by the payload's created_at:
+      // Kajabi fires payment.succeeded the moment a charge clears, but for a
+      // retried payment-plan charge, payment_transaction.created_at still holds
+      // the original (failed) attempt date — days earlier. Using it booked sales
+      // on the wrong day and made them vanish from "Today"/"Yesterday".
       if (amountCents) {
         await insertRevenueEntry({
           source: 'kajabi',
           source_external_id: eventId,
           amount_cents: amountCents,
           currency,
-          received_at: chicagoDate(occurredAt),
+          received_at: chicagoDate(),
           description: productName || 'Kajabi payment',
           customer_email: customerEmail,
           product_name: productName,
@@ -6115,8 +6141,8 @@ app.post('/api/kajabi/webhook', async (req, res) => {
         })
       }
 
-      // Fire a Slack alert for high-value/configured products
-      const alertConfig = findAlertConfig(productName)
+      // Fire a Slack alert unless this product has been muted in Sales Analytics
+      const alertConfig = await findAlertConfig(productName)
       if (alertConfig) {
         await postSaleAlert({ config: alertConfig, customerName, customerEmail, productName, amountCents, currency })
       }
@@ -6687,19 +6713,72 @@ function salesChannelId() {
   return process.env.SLACK_SALES_CHANNEL_ID || process.env.SLACK_CHANNEL_ID
 }
 
-// Products that fire a real-time Slack alert when they sell. Each entry has a
-// case-insensitive substring `match`, plus a custom emoji + label for the alert.
-// Add more entries here to be pinged on additional high-value products.
-const SALES_ALERT_PRODUCTS = [
-  { match: 'Launch Your Brand Challenge VIP Experience', emoji: '💎', label: 'VIP Experience' },
-  { match: 'Shirt School Implementation', emoji: '🚀', label: 'Implementation Program' },
-  { match: 'Shirt School + Elite Coaching', emoji: '👑', label: 'Elite Coaching' },
+// ── Which sales ping Slack ──
+//
+// Every Kajabi sale fires a Slack alert unless it has been switched off in
+// Sales Analytics → Slack Alerts. Settings live in content_config (the generic
+// key/value store) under one JSON key, so no migration was needed:
+//   { enabled: true, products: { "<normalized product name>": false, ... } }
+// A product that isn't listed defaults to ON, so a brand-new offer alerts on
+// its first sale and then shows up in the list to be toggled off if wanted.
+const SALES_ALERT_SETTINGS_KEY = 'sales_alert_settings'
+
+// Cosmetic overrides for the higher-ticket products; everything else gets 💰
+// and its own name as the label.
+const SALES_ALERT_STYLES = [
+  { match: 'launch your brand challenge vip experience', emoji: '💎', label: 'VIP Experience' },
+  { match: 'shirt school implementation', emoji: '🚀', label: 'Implementation Program' },
+  { match: 'shirt school + elite coaching', emoji: '👑', label: 'Elite Coaching' },
 ]
 
-function findAlertConfig(productName) {
-  if (!productName) return null
-  const norm = productName.toLowerCase().trim()
-  return SALES_ALERT_PRODUCTS.find((p) => norm.includes(p.match.toLowerCase())) || null
+// Settings are keyed by normalizeProductKey() (defined with the social-proof
+// widget below — lowercase alphanumerics only), so the quoted and unquoted
+// spellings of the same Kajabi offer share one toggle. Unnamed sales share the
+// '__unknown__' key.
+function productAlertKey(productName) {
+  return normalizeProductKey(productName) || '__unknown__'
+}
+
+// Display name with the stray wrapping quotes Kajabi sometimes sends stripped off.
+function cleanProductName(productName) {
+  return String(productName || '').replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+/g, ' ').trim()
+}
+
+async function getSalesAlertSettings() {
+  const defaults = { enabled: true, products: {} }
+  if (!supabase) return defaults
+  try {
+    const { data } = await supabase.from('content_config').select('value').eq('key', SALES_ALERT_SETTINGS_KEY).maybeSingle()
+    if (!data?.value) return defaults
+    const parsed = JSON.parse(data.value)
+    return {
+      enabled: parsed.enabled !== false,
+      products: (parsed.products && typeof parsed.products === 'object') ? parsed.products : {},
+    }
+  } catch (err) {
+    console.error('[Sales Alert] settings read error:', err.message)
+    return defaults
+  }
+}
+
+async function saveSalesAlertSettings(settings) {
+  const { error } = await supabase.from('content_config').upsert({
+    key: SALES_ALERT_SETTINGS_KEY,
+    value: JSON.stringify({ enabled: settings.enabled !== false, products: settings.products || {} }),
+    updated_at: new Date().toISOString(),
+  })
+  if (error) throw new Error(error.message)
+}
+
+// Decide whether this sale should ping Slack, and how to style the alert.
+// Returns null when alerts are off globally or for this product.
+async function findAlertConfig(productName) {
+  const settings = await getSalesAlertSettings()
+  if (!settings.enabled) return null
+  const key = productAlertKey(productName)
+  if (settings.products[key] === false) return null
+  const style = SALES_ALERT_STYLES.find((p) => key.includes(normalizeProductKey(p.match)))
+  return style || { emoji: '💰', label: cleanProductName(productName) || 'Kajabi' }
 }
 
 async function postSaleAlert({ config, customerName, customerEmail, productName, amountCents, currency }) {
@@ -6714,7 +6793,7 @@ async function postSaleAlert({ config, customerName, customerEmail, productName,
       channel,
       text: `${config.emoji} New ${config.label} sale: ${customerEmail || 'unknown'} (${amount})`,
       blocks: [
-        { type: 'header', text: { type: 'plain_text', text: `${config.emoji} ${config.label} Sale!` } },
+        { type: 'header', text: { type: 'plain_text', text: `${config.emoji} ${config.label} Sale!`.slice(0, 150) } },
         {
           type: 'section',
           text: {
@@ -6993,6 +7072,67 @@ app.get('/api/sales/products', requireAuth, async (_req, res) => {
   if (error) return res.status(500).json({ error: error.message })
   const unique = [...new Set((data || []).map((r) => r.product_name).filter(Boolean))].sort()
   res.json({ products: unique })
+})
+
+// Slack sale-alert toggles. Lists every Kajabi product that has ever sold
+// (merged across quoted/unquoted spellings) with its current on/off state, plus
+// the master switch. Products default to ON.
+app.get('/api/sales/alert-settings', requireAuth, async (_req, res) => {
+  if (!supabase) return res.json({ enabled: true, products: [] })
+  const settings = await getSalesAlertSettings()
+  const { data, error } = await supabase.from('revenue_entries')
+    .select('product_name, amount_cents, received_at').eq('source', 'kajabi')
+    .order('received_at', { ascending: false }).limit(5000)
+  if (error) return res.status(500).json({ error: error.message })
+
+  const byKey = new Map()
+  for (const r of data || []) {
+    if (String(r.product_name || '').trim().startsWith('{')) continue // one legacy row stored a JSON blob as the name
+    const key = productAlertKey(r.product_name)
+    if (!byKey.has(key)) {
+      byKey.set(key, { key, name: cleanProductName(r.product_name) || 'Unnamed Kajabi sale', sales: 0, last_sale: r.received_at, amounts: new Map() })
+    }
+    const e = byKey.get(key)
+    e.sales++
+    e.amounts.set(r.amount_cents, (e.amounts.get(r.amount_cents) || 0) + 1)
+  }
+  // Anything toggled off that hasn't sold yet still needs to be visible so it can be turned back on
+  for (const [key, on] of Object.entries(settings.products)) {
+    if (on === false && !byKey.has(key)) byKey.set(key, { key, name: key === '__unknown__' ? 'Unnamed Kajabi sale' : key, sales: 0, last_sale: null, amounts: new Map() })
+  }
+  const products = [...byKey.values()]
+    .map((e) => ({
+      key: e.key,
+      name: e.name,
+      enabled: settings.products[e.key] !== false,
+      sales: e.sales,
+      last_sale: e.last_sale,
+      // The amounts this product usually sells for, most common first — so "$5 / $7" is visible next to the challenge ticket
+      typical_amounts_cents: [...e.amounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([cents]) => cents),
+    }))
+    .sort((a, b) => (b.last_sale || '').localeCompare(a.last_sale || '') || a.name.localeCompare(b.name))
+  res.json({ enabled: settings.enabled, products })
+})
+
+app.put('/api/sales/alert-settings', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: 'No database' })
+  const body = req.body || {}
+  const current = await getSalesAlertSettings()
+  const next = { enabled: current.enabled, products: { ...current.products } }
+  if (typeof body.enabled === 'boolean') next.enabled = body.enabled
+  if (body.products && typeof body.products === 'object') {
+    for (const [key, on] of Object.entries(body.products)) {
+      if (typeof key !== 'string' || key.length > 200) continue
+      if (on === false) next.products[key] = false
+      else delete next.products[key] // ON is the default, so don't store it
+    }
+  }
+  try {
+    await saveSalesAlertSettings(next)
+    res.json({ success: true, enabled: next.enabled, products: next.products })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 app.post('/api/sales/entries', requireAuth, async (req, res) => {
