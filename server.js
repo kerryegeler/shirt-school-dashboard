@@ -2089,6 +2089,50 @@ function parseDraftJson(rawText) {
   return null
 }
 
+// Does this line read like the opening of an email? Used to tell the reply
+// apart from any analysis the model wrote ahead of it.
+const GREETING_RE = /^(?:hey|hi|hello|dear|good (?:morning|afternoon|evening)|hi there|hey there)\b[^\n]{0,80}$|^[A-Z][a-z]+(?: [A-Z][a-z]+)?,\s*$/i
+// Phrases that only appear in the model talking ABOUT the reply, not in one.
+const PREAMBLE_MARKER_RE = /\b(?:the reply should|key facts?|good context|she'?s asking|he'?s asking|they'?re asking|this (?:email|customer|person) (?:is|needs|wants)|existing (?:customer|student|member)|let me draft|here'?s (?:a|the|my) (?:draft|reply))\b/i
+
+// Strip analysis the model wrote ahead of the email. Seen in the wild:
+//   "Good context. Darice is an existing VIP student… The reply should
+//    clarify… \n\n---\n\nHey Darice,\n\nGood to hear from you!…"
+// Adaptive thinking now keeps that reasoning out of the text block, but this
+// makes sure it never reaches the draft box even if the model narrates anyway.
+function stripDraftPreamble(text) {
+  const lines = text.split('\n')
+  const firstLine = lines.find((l) => l.trim())?.trim() || ''
+  if (GREETING_RE.test(firstLine)) return text // already starts like an email
+
+  // Case 1: a horizontal rule separates the notes from the reply. Keep the
+  // last segment that opens with a greeting.
+  const ruleRe = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/
+  if (lines.some((l) => ruleRe.test(l))) {
+    const segments = []
+    let cur = []
+    for (const l of lines) {
+      if (ruleRe.test(l)) { segments.push(cur.join('\n')); cur = [] } else cur.push(l)
+    }
+    segments.push(cur.join('\n'))
+    for (let i = segments.length - 1; i > 0; i--) {
+      const seg = segments[i].trim()
+      const open = seg.split('\n').find((l) => l.trim())?.trim() || ''
+      if (seg.length >= 40 && GREETING_RE.test(open)) return seg
+    }
+  }
+
+  // Case 2: no rule, but the text before the first greeting line is clearly
+  // commentary about the reply rather than part of it.
+  const greetIdx = lines.findIndex((l) => GREETING_RE.test(l.trim()))
+  if (greetIdx > 0) {
+    const before = lines.slice(0, greetIdx).join('\n')
+    const after = lines.slice(greetIdx).join('\n').trim()
+    if (after.length >= 40 && PREAMBLE_MARKER_RE.test(before)) return after
+  }
+  return text
+}
+
 // The last line of defence before a draft is stored, posted to Slack, or handed
 // to the dashboard. Everything upstream should already be clean; this catches
 // whatever got through so no draft ever reaches Kerry wearing JSON punctuation.
@@ -2113,7 +2157,7 @@ function sanitizeDraftText(text) {
   // Literal escape sequences that never got unescaped.
   if (!s.includes('\n') && /\\n/.test(s)) s = unescapeJsonString(s)
 
-  s = s.trim()
+  s = stripDraftPreamble(s.trim()).trim()
 
   // One redundant pair of wrapping quotes. Only stripped when the body has no
   // other quote characters, so a draft that legitimately quotes the customer is
@@ -3026,10 +3070,19 @@ async function executeAgentTool(name, input, ctx = {}) {
   }
 }
 
+// Adaptive thinking gives the model somewhere to reason that is NOT the reply.
+// Without it, Sonnet narrates its analysis of the tool results ("Good context.
+// Darice is an existing VIP student… The reply should…") in the visible text
+// ahead of the actual email, and that narration lands in Kerry's draft box.
+// Every call that continues a draft `conversation` must pass the same value.
+const DRAFT_THINKING = { type: 'adaptive' }
+// Thinking tokens count against max_tokens, so the ceiling covers both.
+const DRAFT_MAX_TOKENS = 8000
+
 // ── Agent loop: send → if tool_use, execute → loop. Caches across iterations
 // because the system + tools array stay identical (Anthropic key is the
 // prefix bytes). Returns { finalText, conversation, usage }.
-async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, label = 'agent', threadId = null }) {
+async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = DRAFT_MAX_TOKENS, label = 'agent', threadId = null }) {
   const conversation = [{ role: 'user', content: userContent }]
   let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheCreate = 0
   let finalText = ''
@@ -3041,6 +3094,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
+      thinking: DRAFT_THINKING,
       system: systemBlocks,
       tools: AGENT_TOOLS,
       messages: conversation,
@@ -3056,9 +3110,10 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, 
     conversation.push({ role: 'assistant', content: response.content })
 
     if (response.stop_reason !== 'tool_use') {
-      // Final answer reached. Find the text block and return.
-      const textBlock = response.content.find((b) => b.type === 'text')
-      finalText = textBlock?.text || ''
+      // Final answer reached. Take the LAST text block: if the model split
+      // narration and reply into separate blocks, the reply is the later one.
+      const textBlocks = response.content.filter((b) => b.type === 'text')
+      finalText = textBlocks.at(-1)?.text || ''
       stopReason = response.stop_reason
       // A reply cut off at max_tokens is half a JSON object. Callers used to
       // hand that straight to Kerry; now they know to recover instead.
@@ -3094,6 +3149,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, 
     const finalResp = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
+      thinking: DRAFT_THINKING,
       system: systemBlocks,
       messages: [...conversation, { role: 'user', content: 'You\'ve used enough tool calls. Now write the final reply. No more tool calls.' }],
     })
@@ -3101,7 +3157,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, 
       totalIn += finalResp.usage.input_tokens || 0
       totalOut += finalResp.usage.output_tokens || 0
     }
-    finalText = finalResp.content.find((b) => b.type === 'text')?.text || ''
+    finalText = finalResp.content.filter((b) => b.type === 'text').at(-1)?.text || ''
     stopReason = finalResp.stop_reason
     conversation.push({ role: 'assistant', content: finalResp.content })
   }
@@ -3119,13 +3175,13 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, 
 async function recoverDraftAsPlainText({ systemBlocks, conversation, label = 'agent' }) {
   try {
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
+      model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
       messages: [
         ...conversation,
         { role: 'user', content: 'Your last response could not be parsed as JSON. Send the reply again as ONLY the plain email body — no JSON, no field names, no surrounding quotes, no markdown fences, no explanation. Start directly with the greeting.' },
       ],
     })
-    const body = sanitizeDraftText(msg.content.find((b) => b.type === 'text')?.text || '')
+    const body = sanitizeDraftText(msg.content.filter((b) => b.type === 'text').at(-1)?.text || '')
     if (!body) return null
     console.log(`[Draft] ${label} recovered as plain text (${body.length} chars)`)
     return {
@@ -3158,7 +3214,8 @@ async function generateDraftForSlack(thread) {
 ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n` : ''}${learnedBehaviors ? `--- What You've Learned from Kerry's Real Emails ---\n${learnedBehaviors}\n---\nUse both documents above to write exactly how Kerry would write this reply.\n` : ''}${buildHardRulesBlock(linksLib, learnedUrls)}`
   const dynamicSystem = `${feedbackContext}${customerBlock}${eventBlock}
 Return ONLY valid JSON (no markdown fences, no explanation) in exactly this format:
-{"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}`
+{"draft":"full reply body","summary":"2-3 sentences about what this email needs","confidence":"high","confidence_reason":null}
+The "draft" value is pasted straight into the reply box: it must be only the finished email body, starting with the greeting. Put any analysis or key facts in "summary", never in "draft".`
   const systemBlocks = [
     { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: dynamicSystem },
@@ -3208,7 +3265,7 @@ Return JSON only.`
   // lookup_payment_status, etc. before drafting. Loop caps at 5 iterations.
   const label = `slack/${thread.threadId?.slice(-8) || 'unknown'}`
   const { finalText: text, conversation, stopReason } = await draftWithToolLoop({
-    systemBlocks, userContent, maxTokens: 4000, threadId: thread.threadId, label,
+    systemBlocks, userContent, maxTokens: DRAFT_MAX_TOKENS, threadId: thread.threadId, label,
   })
 
   // An email body is prose, so the JSON wrapper the model is asked for breaks
@@ -3241,13 +3298,13 @@ Return JSON only.`
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
       const fixMsg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
+        model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
         messages: [
           ...conversation,
           { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations. No more tool calls.` },
         ],
       })
-      const fixText = fixMsg.content.find((b) => b.type === 'text')?.text || ''
+      const fixText = fixMsg.content.filter((b) => b.type === 'text').at(-1)?.text || ''
       const fixed = parseDraftJson(fixText)
       // A retry we can't parse is worse than the draft we already have — the
       // original at least reads like an email. Keep it and log the miss.
@@ -3795,7 +3852,7 @@ ${kerryBrain ? `--- Kerry's Brand and Business Context ---\n${kerryBrain}\n---\n
 The email you are replying to is categorized as: ${category}
 ${feedbackContext}${customerBlock}
 ${eventBlock}
-Write only the email body. No subject line, no "From:", no metadata. Start directly with the greeting.`
+Your entire response is pasted straight into the reply box, so it must be ONLY the email body. No subject line, no "From:", no metadata. Do not include any analysis, notes, key facts, reasoning, or a summary of the situation before or after the email, and never separate sections with "---". Think through the context privately, then output only the finished reply, starting directly with the greeting.`
   const systemBlocks = [
     { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: dynamicSystem },
@@ -3839,7 +3896,7 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
     // Phase 2: agent tool loop. Same tools available as the Slack flow.
     const label = `dashboard/${(email.threadId || email.id || '').slice(-8)}`
     const { finalText: initialDraft, conversation, stopReason } = await draftWithToolLoop({
-      systemBlocks, userContent, maxTokens: 4000, threadId: email.threadId || email.id, label,
+      systemBlocks, userContent, maxTokens: DRAFT_MAX_TOKENS, threadId: email.threadId || email.id, label,
     })
     if (stopReason === 'max_tokens') console.warn(`[Draft] ${label} draft was truncated at the token limit`)
     // This pipeline asks for plain prose, but the model still sometimes wraps
@@ -3853,13 +3910,13 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
       console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
       try {
         const fixMsg = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
+          model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
           messages: [
             ...conversation,
             { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations. No more tool calls.` },
           ],
         })
-        const fixed = sanitizeDraftText(fixMsg.content.find((b) => b.type === 'text')?.text || '')
+        const fixed = sanitizeDraftText(fixMsg.content.filter((b) => b.type === 'text').at(-1)?.text || '')
         // An empty retry would blank out a draft that was merely imperfect.
         if (!fixed) {
           console.error('[Draft Validator] Dashboard flow retry came back empty — keeping the original draft')
