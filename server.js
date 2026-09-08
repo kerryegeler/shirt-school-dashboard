@@ -2093,7 +2093,7 @@ function parseDraftJson(rawText) {
 // apart from any analysis the model wrote ahead of it.
 const GREETING_RE = /^(?:hey|hi|hello|dear|good (?:morning|afternoon|evening)|hi there|hey there)\b[^\n]{0,80}$|^[A-Z][a-z]+(?: [A-Z][a-z]+)?,\s*$/i
 // Phrases that only appear in the model talking ABOUT the reply, not in one.
-const PREAMBLE_MARKER_RE = /\b(?:the reply should|key facts?|good context|she'?s asking|he'?s asking|they'?re asking|this (?:email|customer|person) (?:is|needs|wants)|existing (?:customer|student|member)|let me draft|here'?s (?:a|the|my) (?:draft|reply))\b/i
+const PREAMBLE_MARKER_RE = /\b(?:the reply should|key facts?|good context|she'?s asking|he'?s asking|they'?re asking|this (?:email|customer|person) (?:is|needs|wants)|existing (?:customer|student|member)|let me draft|here(?:'s| is| are) (?:a |the |my |your )?(?:drafted |revised |updated |suggested |corrected )?(?:draft|reply|response|email))\b/i
 
 // Strip analysis the model wrote ahead of the email. Seen in the wild:
 //   "Good context. Darice is an existing VIP student… The reply should
@@ -3076,6 +3076,11 @@ async function executeAgentTool(name, input, ctx = {}) {
 // ahead of the actual email, and that narration lands in Kerry's draft box.
 // Every call that continues a draft `conversation` must pass the same value.
 const DRAFT_THINKING = { type: 'adaptive' }
+// Medium effort: enough thinking to keep the narration out of the reply,
+// without the ~2,700-token deliberations default effort spent on a 200-word
+// email (which pushed regenerate past the dashboard's request timeout).
+// "low" was measured to leak "Here is the drafted reply:" back into the text.
+const DRAFT_OUTPUT_CONFIG = { effort: 'medium' }
 // Thinking tokens count against max_tokens, so the ceiling covers both.
 const DRAFT_MAX_TOKENS = 8000
 
@@ -3095,6 +3100,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = DRAFT_
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
       thinking: DRAFT_THINKING,
+      output_config: DRAFT_OUTPUT_CONFIG,
       system: systemBlocks,
       tools: AGENT_TOOLS,
       messages: conversation,
@@ -3150,6 +3156,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = DRAFT_
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
       thinking: DRAFT_THINKING,
+      output_config: DRAFT_OUTPUT_CONFIG,
       system: systemBlocks,
       messages: [...conversation, { role: 'user', content: 'You\'ve used enough tool calls. Now write the final reply. No more tool calls.' }],
     })
@@ -3175,7 +3182,7 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = DRAFT_
 async function recoverDraftAsPlainText({ systemBlocks, conversation, label = 'agent' }) {
   try {
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
+      model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, output_config: DRAFT_OUTPUT_CONFIG, system: systemBlocks,
       messages: [
         ...conversation,
         { role: 'user', content: 'Your last response could not be parsed as JSON. Send the reply again as ONLY the plain email body — no JSON, no field names, no surrounding quotes, no markdown fences, no explanation. Start directly with the greeting.' },
@@ -3298,7 +3305,7 @@ Return JSON only.`
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
       const fixMsg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
+        model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, output_config: DRAFT_OUTPUT_CONFIG, system: systemBlocks,
         messages: [
           ...conversation,
           { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations. No more tool calls.` },
@@ -3910,7 +3917,7 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
       console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
       try {
         const fixMsg = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, system: systemBlocks,
+          model: 'claude-sonnet-4-6', max_tokens: DRAFT_MAX_TOKENS, thinking: DRAFT_THINKING, output_config: DRAFT_OUTPUT_CONFIG, system: systemBlocks,
           messages: [
             ...conversation,
             { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations. No more tool calls.` },

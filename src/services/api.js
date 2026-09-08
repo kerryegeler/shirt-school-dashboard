@@ -90,10 +90,14 @@ export async function reclassifyEmail(id, category) {
 }
 
 export async function generateReply(email, category) {
+  // Drafting runs an agent loop (Kit / payment lookups, thinking, validator
+  // retry) and can legitimately take a minute. The default 30s wrapper timeout
+  // was cutting it off client-side while the server finished the job anyway.
   const response = await apiFetch('/api/generate-reply', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, category }),
+    signal: AbortSignal.timeout(180000),
   })
 
   const data = await response.json()
