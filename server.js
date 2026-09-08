@@ -181,7 +181,10 @@ const GMAIL_SCOPES = [
 ]
 
 // ─── Anthropic ────────────────────────────────────────────────────────────────
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+// .trim() because a key pasted into a Railway variable often carries a trailing
+// newline or space, which Anthropic rejects as an invalid key on every request.
+// maxRetries covers the 429s and 529s that used to surface as "check your API key".
+const anthropic = new Anthropic({ apiKey: (process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 3 })
 
 // ─── Supabase client ──────────────────────────────────────────────────────────
 const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
@@ -1945,6 +1948,183 @@ async function buildCustomerDossier(email, currentThreadId = null) {
   return '\n' + lines.join('\n') + '\n'
 }
 
+// Every failed draft used to come back as "Check your API key", so an
+// overloaded model, a rate limit, a network blip or a bad request all looked
+// like broken credentials. Map the SDK's typed errors to what really happened —
+// only a genuine 401/403 should ever mention the key.
+function describeAnthropicError(error) {
+  if (error instanceof Anthropic.AuthenticationError) {
+    return { status: 401, message: 'Claude rejected the API key. Check that ANTHROPIC_API_KEY is set correctly.' }
+  }
+  if (error instanceof Anthropic.PermissionDeniedError) {
+    return { status: 403, message: 'This API key cannot access the model. Check the key\'s permissions and billing.' }
+  }
+  if (error instanceof Anthropic.RateLimitError) {
+    return { status: 429, message: 'Claude is rate limiting us. Wait a few seconds and try again.' }
+  }
+  if (error instanceof Anthropic.APIConnectionTimeoutError) {
+    return { status: 504, message: 'Claude took too long to respond. Try again.' }
+  }
+  if (error instanceof Anthropic.APIConnectionError) {
+    return { status: 502, message: 'Could not reach Claude. Check the connection and try again.' }
+  }
+  if (error instanceof Anthropic.InternalServerError) {
+    // 529 is "overloaded" — by far the most common transient failure here.
+    return {
+      status: 503,
+      message: error.status === 529
+        ? 'Claude is overloaded right now. Try again in a moment.'
+        : 'Claude hit a server error. Try again in a moment.',
+    }
+  }
+  if (error instanceof Anthropic.BadRequestError) {
+    return { status: 400, message: `Claude rejected the request: ${error.message}` }
+  }
+  if (error instanceof Anthropic.APIError) {
+    return { status: 502, message: `Claude API error${error.status ? ` (${error.status})` : ''}: ${error.message}` }
+  }
+  return { status: 500, message: `Something went wrong: ${error?.message || 'unknown error'}` }
+}
+
+// ─── Draft output hygiene ─────────────────────────────────────────────────────
+// Two failure modes used to leak raw model plumbing into Kerry's draft box:
+//
+//   1. The Slack pipeline asks the model for JSON ({"draft":"...","summary":…}).
+//      An email body is prose, so it routinely contains the exact characters
+//      that break JSON: real line breaks inside the string, and quotes. A long
+//      reply could also run past max_tokens and cut the object off mid-string.
+//      Either way JSON.parse threw, and the old catch assigned the RAW TEXT to
+//      the draft — so Kerry got `{"draft":"Hi Sarah,\n\nThanks for reaching…`
+//      brackets, quotes and literal \n and all.
+//   2. The plain-text pipelines never stripped markdown fences, so a draft the
+//      model decided to wrap in ``` arrived with the fence still attached.
+//
+// parseDraftJson recovers the body in every one of those cases;
+// sanitizeDraftText is the last-resort scrub applied on every draft path.
+
+// Strip markdown code fences wherever they sit. The old inline regexes only
+// matched a fence at the very start/end of the string, so a response like
+// "Here's the draft:\n```json\n{…}\n```" slipped through untouched.
+function stripCodeFences(text) {
+  if (!text) return ''
+  const s = String(text).trim()
+  const fenced = s.match(/```(?:json|text|markdown)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/i)
+  if (fenced) {
+    const before = s.slice(0, fenced.index).trim()
+    const after = s.slice(fenced.index + fenced[0].length).trim()
+    // Only unwrap when the fence IS the response: nothing after it, and at most
+    // a short one-line lead-in ("Here's the draft:") before it. A draft that
+    // merely contains a fenced block keeps everything outside that block.
+    if (!after && !before.includes('\n') && before.length <= 80) return fenced[1].trim()
+  }
+  return s.replace(/^```(?:json|text|markdown)?[ \t]*\r?\n?/i, '').replace(/\r?\n?```[ \t]*$/i, '').trim()
+}
+
+// Turn a JSON string body back into real text. Used when we recover the draft
+// from a truncated object that JSON.parse could never accept.
+function unescapeJsonString(s) {
+  if (!s) return ''
+  const trimmed = s.replace(/\\+$/, (m) => (m.length % 2 ? m.slice(0, -1) : m)) // drop a dangling escape
+  try { return JSON.parse(`"${trimmed}"`) } catch { /* fall through */ }
+  return trimmed
+    .replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/\\\\/g, '\\')
+}
+
+// JSON.parse rejects raw control characters inside string literals. Walk the
+// candidate and escape any that appear between quotes, so a model that wrote a
+// real line break inside "draft" (by far the most common failure) still parses.
+function escapeControlCharsInJsonStrings(json) {
+  let out = ''
+  let inString = false
+  let escaped = false
+  for (const ch of json) {
+    if (escaped) { out += ch; escaped = false; continue }
+    if (ch === '\\') { out += ch; escaped = true; continue }
+    if (ch === '"') { inString = !inString; out += ch; continue }
+    if (inString) {
+      if (ch === '\n') { out += '\\n'; continue }
+      if (ch === '\r') { out += '\\r'; continue }
+      if (ch === '\t') { out += '\\t'; continue }
+      if (ch < ' ') continue // drop the remaining control chars outright
+    }
+    out += ch
+  }
+  return out
+}
+
+// Pull the reply body out of a JSON-ish model response. Returns null when
+// there is nothing recoverable — callers MUST then fall back rather than
+// handing Kerry the raw text, which is what caused the gibberish drafts.
+function parseDraftJson(rawText) {
+  const stripped = stripCodeFences(rawText || '')
+  if (!stripped) return null
+
+  const start = stripped.indexOf('{')
+  const end = stripped.lastIndexOf('}')
+  const candidate = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped
+
+  for (const attempt of [candidate, escapeControlCharsInJsonStrings(candidate)]) {
+    try {
+      const obj = JSON.parse(attempt)
+      if (obj && typeof obj === 'object' && typeof obj.draft === 'string' && obj.draft.trim()) return obj
+    } catch { /* try the next repair */ }
+  }
+
+  // Truncated object — the closing quote/brace never arrived because the reply
+  // ran past max_tokens. Take the "draft" value up to the next unescaped quote,
+  // or to end-of-string when it was cut off mid-sentence.
+  const m = stripped.match(/"draft"\s*:\s*"((?:[^"\\]|\\.)*)/)
+  if (m) {
+    const body = unescapeJsonString(m[1])
+    if (body.trim()) {
+      return {
+        draft: body,
+        summary: '',
+        confidence: 'low',
+        confidence_reason: 'The model response was malformed or ran past the token limit; only the reply body could be recovered.',
+      }
+    }
+  }
+  return null
+}
+
+// The last line of defence before a draft is stored, posted to Slack, or handed
+// to the dashboard. Everything upstream should already be clean; this catches
+// whatever got through so no draft ever reaches Kerry wearing JSON punctuation.
+function sanitizeDraftText(text) {
+  if (!text) return ''
+  let s = stripCodeFences(String(text))
+
+  // Still a whole JSON object? Take the draft field out of it.
+  if (/^\{[\s\S]*"draft"\s*:/.test(s)) {
+    const recovered = parseDraftJson(s)
+    if (recovered && recovered.draft) s = recovered.draft
+  }
+
+  // A fragment of an object whose braces never closed.
+  const head = s.match(/^\{?\s*"draft"\s*:\s*"([\s\S]*)$/)
+  if (head) s = unescapeJsonString(head[1])
+
+  // Sibling keys trailing a partially recovered object.
+  s = s.replace(/"\s*,\s*"(?:summary|confidence|confidence_reason)"\s*:[\s\S]*$/, '')
+  s = s.replace(/"\s*\}\s*$/, '')
+
+  // Literal escape sequences that never got unescaped.
+  if (!s.includes('\n') && /\\n/.test(s)) s = unescapeJsonString(s)
+
+  s = s.trim()
+
+  // One redundant pair of wrapping quotes. Only stripped when the body has no
+  // other quote characters, so a draft that legitimately quotes the customer is
+  // left exactly as written.
+  if (s.length > 1 && s.startsWith('"') && s.endsWith('"') && !s.slice(1, -1).includes('"')) {
+    s = s.slice(1, -1).trim()
+  }
+
+  return s
+}
+
 // Validate a draft against the HARD RULES. Returns an array of violation
 // strings (empty if the draft is clean). Used by the draft endpoints so they
 // can re-prompt the model with the specific complaint, or surface the issues
@@ -2849,10 +3029,11 @@ async function executeAgentTool(name, input, ctx = {}) {
 // ── Agent loop: send → if tool_use, execute → loop. Caches across iterations
 // because the system + tools array stay identical (Anthropic key is the
 // prefix bytes). Returns { finalText, conversation, usage }.
-async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, label = 'agent', threadId = null }) {
+async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 4000, label = 'agent', threadId = null }) {
   const conversation = [{ role: 'user', content: userContent }]
   let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheCreate = 0
   let finalText = ''
+  let stopReason = null
   let iterations = 0
 
   while (iterations < AGENT_TOOL_MAX_ITERATIONS) {
@@ -2878,6 +3059,12 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, 
       // Final answer reached. Find the text block and return.
       const textBlock = response.content.find((b) => b.type === 'text')
       finalText = textBlock?.text || ''
+      stopReason = response.stop_reason
+      // A reply cut off at max_tokens is half a JSON object. Callers used to
+      // hand that straight to Kerry; now they know to recover instead.
+      if (stopReason === 'max_tokens') {
+        console.warn(`[Agent] ${label} hit max_tokens (${maxTokens}) — response is truncated`)
+      }
       break
     }
 
@@ -2915,14 +3102,43 @@ async function draftWithToolLoop({ systemBlocks, userContent, maxTokens = 1500, 
       totalOut += finalResp.usage.output_tokens || 0
     }
     finalText = finalResp.content.find((b) => b.type === 'text')?.text || ''
+    stopReason = finalResp.stop_reason
     conversation.push({ role: 'assistant', content: finalResp.content })
   }
 
   console.log(`[Agent] ${label} done — iters:${iterations} in:${totalIn} out:${totalOut} cache_create:${totalCacheCreate} cache_read:${totalCacheRead}`)
-  return { finalText, conversation, usage: { totalIn, totalOut, totalCacheRead, totalCacheCreate } }
+  return { finalText, conversation, stopReason, usage: { totalIn, totalOut, totalCacheRead, totalCacheCreate } }
 }
 
 // ─── Slack workflow helpers ───────────────────────────────────────────────────
+
+// When the model's JSON is beyond repair, ask it once for the reply body as
+// plain text instead. The email itself is almost always fine — it was only the
+// JSON wrapper that broke — so this recovers a usable draft rather than showing
+// Kerry a wall of braces.
+async function recoverDraftAsPlainText({ systemBlocks, conversation, label = 'agent' }) {
+  try {
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
+      messages: [
+        ...conversation,
+        { role: 'user', content: 'Your last response could not be parsed as JSON. Send the reply again as ONLY the plain email body — no JSON, no field names, no surrounding quotes, no markdown fences, no explanation. Start directly with the greeting.' },
+      ],
+    })
+    const body = sanitizeDraftText(msg.content.find((b) => b.type === 'text')?.text || '')
+    if (!body) return null
+    console.log(`[Draft] ${label} recovered as plain text (${body.length} chars)`)
+    return {
+      draft: body,
+      summary: '',
+      confidence: 'low',
+      confidence_reason: 'The first response was malformed; this draft was recovered on a retry. Worth a closer read.',
+    }
+  } catch (err) {
+    console.error(`[Draft] ${label} plain-text recovery failed:`, err.message)
+    return null
+  }
+}
 
 async function generateDraftForSlack(thread) {
   const category = thread.category
@@ -2990,14 +3206,31 @@ Return JSON only.`
 
   // Phase 2: agent tool loop. The model may call lookup_kit_subscriber,
   // lookup_payment_status, etc. before drafting. Loop caps at 5 iterations.
-  const { finalText: text, conversation } = await draftWithToolLoop({
-    systemBlocks, userContent, maxTokens: 1500, threadId: thread.threadId,
-    label: `slack/${thread.threadId?.slice(-8) || 'unknown'}`,
+  const label = `slack/${thread.threadId?.slice(-8) || 'unknown'}`
+  const { finalText: text, conversation, stopReason } = await draftWithToolLoop({
+    systemBlocks, userContent, maxTokens: 4000, threadId: thread.threadId, label,
   })
 
-  const clean = text.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-  let parsed
-  try { parsed = JSON.parse(clean) } catch { parsed = { draft: clean, summary: '', confidence: 'low', confidence_reason: 'Could not parse JSON response' } }
+  // An email body is prose, so the JSON wrapper the model is asked for breaks
+  // often (raw line breaks inside the string, or the object cut off at
+  // max_tokens). parseDraftJson repairs both; if it still can't recover a body
+  // we re-ask in plain text. What we must never do is fall back to the raw
+  // text — that is what put `{"draft":"Hi Sarah,\n\n…` in Kerry's draft box.
+  let parsed = parseDraftJson(text)
+  if (!parsed) {
+    console.warn(`[Draft] ${label} returned unparseable JSON (stop_reason=${stopReason}); retrying as plain text`)
+    parsed = await recoverDraftAsPlainText({ systemBlocks, conversation, label })
+  }
+  if (!parsed) {
+    console.error(`[Draft] ${label} could not produce a usable draft`)
+    parsed = {
+      draft: '',
+      summary: 'Draft generation failed — the AI response could not be parsed. This one needs to be written by hand.',
+      confidence: 'low',
+      confidence_reason: 'No draft could be recovered from the model response.',
+    }
+  }
+  parsed.draft = sanitizeDraftText(parsed.draft)
 
   // Validate the draft against the HARD RULES. If it violates (e.g. banned
   // phrase, em dash, fabricated URL), do ONE re-prompt with the specific
@@ -3008,19 +3241,25 @@ Return JSON only.`
     console.log(`[Draft Validator] Slack flow violations: ${issues.join(' | ')}`)
     try {
       const fixMsg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6', max_tokens: 1500, system: systemBlocks,
+        model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
         messages: [
           ...conversation,
           { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn a corrected JSON object in the same shape. Fix all violations. No more tool calls.` },
         ],
       })
-      const fixText = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
-      const fixClean = fixText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
-      const fixed = JSON.parse(fixClean)
-      const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent, learnedUrls)
-      if (fixIssues.length) console.log(`[Draft Validator] Slack flow STILL violating after retry: ${fixIssues.join(' | ')}`)
-      else console.log('[Draft Validator] Slack flow violations corrected on retry')
-      parsed = fixed
+      const fixText = fixMsg.content.find((b) => b.type === 'text')?.text || ''
+      const fixed = parseDraftJson(fixText)
+      // A retry we can't parse is worse than the draft we already have — the
+      // original at least reads like an email. Keep it and log the miss.
+      if (!fixed) {
+        console.error('[Draft Validator] Slack flow retry was unparseable — keeping the original draft')
+      } else {
+        fixed.draft = sanitizeDraftText(fixed.draft)
+        const fixIssues = validateDraftAgainstRules(fixed.draft || '', linksLib, liveEvent, learnedUrls)
+        if (fixIssues.length) console.log(`[Draft Validator] Slack flow STILL violating after retry: ${fixIssues.join(' | ')}`)
+        else console.log('[Draft Validator] Slack flow violations corrected on retry')
+        parsed = fixed
+      }
     } catch (err) {
       console.error('[Draft Validator] retry failed:', err.message)
     }
@@ -3088,7 +3327,10 @@ function extractQuotedContext(text, maxChars = 1500) {
 }
 
 function buildSlackBlocks(thread, draft, summary, confidence, confidenceReason, status, checkIfNeeded = false, emailBody = '') {
-  const truncDraft = draft.length > 2800 ? draft.slice(0, 2800) + '…' : draft
+  const safeDraft = (draft || '').trim()
+  const truncDraft = safeDraft
+    ? (safeDraft.length > 2800 ? safeDraft.slice(0, 2800) + '…' : safeDraft)
+    : '(No draft — the AI response could not be parsed. Write this reply in the dashboard.)'
   const dashUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:5173'
   const capConf = (confidence || 'medium').charAt(0).toUpperCase() + (confidence || 'medium').slice(1)
   const headerText = checkIfNeeded ? '📧 New Email — Reply needed?' : '📧 New Email — Action Required'
@@ -3538,7 +3780,7 @@ function startSlackPolling() {
 app.post('/api/generate-reply', async (req, res) => {
   const { email, category } = req.body
   if (!email || !category) return res.status(400).json({ error: 'Missing email or category' })
-  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured' })
+  if (!(process.env.ANTHROPIC_API_KEY || '').trim()) return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured' })
 
   const personaName = PERSONA_NAMES[category] || 'Kerry'
   const { kerryBrain, learnedBehaviors, linksLib, liveEvent, eventBlock, learnedUrls, feedbackContext, customerBlock } =
@@ -3595,11 +3837,14 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
       : (attachmentSummary ? userPrompt + attachmentSummary : userPrompt)
 
     // Phase 2: agent tool loop. Same tools available as the Slack flow.
-    const { finalText: initialDraft, conversation } = await draftWithToolLoop({
-      systemBlocks, userContent, maxTokens: 1024, threadId: email.threadId || email.id,
-      label: `dashboard/${(email.threadId || email.id || '').slice(-8)}`,
+    const label = `dashboard/${(email.threadId || email.id || '').slice(-8)}`
+    const { finalText: initialDraft, conversation, stopReason } = await draftWithToolLoop({
+      systemBlocks, userContent, maxTokens: 4000, threadId: email.threadId || email.id, label,
     })
-    let draft = initialDraft
+    if (stopReason === 'max_tokens') console.warn(`[Draft] ${label} draft was truncated at the token limit`)
+    // This pipeline asks for plain prose, but the model still sometimes wraps
+    // the body in a markdown fence or quotes. Scrub it before Kerry sees it.
+    let draft = sanitizeDraftText(initialDraft)
 
     // Validate against HARD RULES. If violations, re-prompt ONCE with the
     // specific complaint. This is what stops "Have a blessed day" et al.
@@ -3608,17 +3853,22 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
       console.log(`[Draft Validator] Dashboard flow violations: ${issues.join(' | ')}`)
       try {
         const fixMsg = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemBlocks,
+          model: 'claude-sonnet-4-6', max_tokens: 4000, system: systemBlocks,
           messages: [
             ...conversation,
             { role: 'user', content: `Your draft violated these HARD RULES:\n${issues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations. No more tool calls.` },
           ],
         })
-        const fixed = (fixMsg.content.find((b) => b.type === 'text')?.text || '').trim()
-        const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent, learnedUrls)
-        if (fixIssues.length) console.log(`[Draft Validator] Dashboard flow STILL violating after retry: ${fixIssues.join(' | ')}`)
-        else console.log('[Draft Validator] Dashboard flow violations corrected on retry')
-        draft = fixed
+        const fixed = sanitizeDraftText(fixMsg.content.find((b) => b.type === 'text')?.text || '')
+        // An empty retry would blank out a draft that was merely imperfect.
+        if (!fixed) {
+          console.error('[Draft Validator] Dashboard flow retry came back empty — keeping the original draft')
+        } else {
+          const fixIssues = validateDraftAgainstRules(fixed, linksLib, liveEvent, learnedUrls)
+          if (fixIssues.length) console.log(`[Draft Validator] Dashboard flow STILL violating after retry: ${fixIssues.join(' | ')}`)
+          else console.log('[Draft Validator] Dashboard flow violations corrected on retry')
+          draft = fixed
+        }
       } catch (err) {
         console.error('[Draft Validator] retry failed:', err.message)
       }
@@ -3626,8 +3876,9 @@ Draft a reply that directly addresses the LATEST message above. The prior conver
 
     res.json({ draft, persona: personaName })
   } catch (error) {
-    console.error('Anthropic API error:', error.message)
-    res.status(500).json({ error: 'Failed to generate reply. Check your API key.' })
+    const { status, message } = describeAnthropicError(error)
+    console.error(`[Draft] generate-reply failed (${status}):`, error?.message || error)
+    res.status(status).json({ error: message })
   }
 })
 
@@ -4014,11 +4265,12 @@ app.post('/api/slack/events', async (req, res) => {
     const regenUserContent = `Original email:\n---\nFrom: ${meta.from || 'unknown'}\nSubject: ${meta.subject || 'unknown'}\n${meta.bodyText ? meta.bodyText.slice(0, 600) : ''}\n---\n\nCurrent draft:\n---\n${currentDraft}\n---\n\nKerry's edit instruction: ${instruction}\n\nReturn ONLY the revised draft text.`
     const regenMsg = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1500,
+      max_tokens: 4000,
       system: regenSystem,
       messages: [{ role: 'user', content: regenUserContent }],
     })
-    let revisedDraft = regenMsg.content[0].text.trim()
+    let revisedDraft = sanitizeDraftText(regenMsg.content.find((b) => b.type === 'text')?.text || '')
+    if (!revisedDraft) throw new Error('The model returned an empty draft')
 
     // Re-validate after regeneration — Kerry's instruction could still leave
     // the model with a banned phrase or invented URL.
@@ -4027,14 +4279,16 @@ app.post('/api/slack/events', async (req, res) => {
       console.log(`[Draft Validator] Edit-in-Slack violations: ${regenIssues.join(' | ')}`)
       try {
         const fixMsg = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6', max_tokens: 1500, system: regenSystem,
+          model: 'claude-sonnet-4-6', max_tokens: 4000, system: regenSystem,
           messages: [
             { role: 'user', content: regenUserContent },
             { role: 'assistant', content: revisedDraft },
             { role: 'user', content: `Your revised draft violated these HARD RULES:\n${regenIssues.map((s) => `- ${s}`).join('\n')}\n\nReturn the corrected reply body only. Fix all violations.` },
           ],
         })
-        revisedDraft = fixMsg.content[0].text.trim()
+        const regenFixed = sanitizeDraftText(fixMsg.content.find((b) => b.type === 'text')?.text || '')
+        if (regenFixed) revisedDraft = regenFixed
+        else console.error('[Draft Validator] Edit-in-Slack retry came back empty — keeping the revised draft')
       } catch (err) {
         console.error('[Draft Validator] Edit-in-Slack retry failed:', err.message)
       }
@@ -4081,12 +4335,13 @@ app.post('/api/slack/events', async (req, res) => {
 
     console.log(`[Slack] Draft regenerated for thread ${notif.thread_id}: "${instruction.slice(0, 60)}"`)
   } catch (err) {
+    const { message } = describeAnthropicError(err)
     console.error('[Slack] Edit handler error:', err.message)
     if (slackClient && notif.channel_id) {
       await slackClient.chat.postMessage({
         channel: notif.channel_id,
         thread_ts: notif.slack_ts,
-        text: `⚠️ Failed to regenerate draft: ${err.message}`,
+        text: `⚠️ Failed to regenerate draft: ${message}`,
       }).catch(() => {})
     }
   }
@@ -5322,8 +5577,9 @@ app.post('/api/content/cards/:id/regenerate', requireAuth, async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
     res.json({ sections: mergedSections })
   } catch (err) {
-    console.error('[ContentBoard] Regenerate error:', err.message)
-    res.status(500).json({ error: 'AI generation failed' })
+    const { status, message } = describeAnthropicError(err)
+    console.error(`[ContentBoard] Regenerate error (${status}):`, err.message)
+    res.status(status).json({ error: message })
   }
 })
 
