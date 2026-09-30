@@ -3830,6 +3830,12 @@ async function runSlackPoll() {
 }
 
 function startSlackPolling() {
+  // Customer-service email moved to Eddie (Claude Code) on 2026-09-30. The
+  // inbox poll stays off unless EMAIL_POLL=on; the rest of Slack keeps working.
+  if (process.env.EMAIL_POLL !== 'on') {
+    console.log('  Email poll: OFF (customer service now handled by Eddie; set EMAIL_POLL=on to re-enable)')
+    return
+  }
   if (!slackClient || !process.env.SLACK_CHANNEL_ID) {
     console.log('  Slack: not configured (set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID to enable)')
     return
