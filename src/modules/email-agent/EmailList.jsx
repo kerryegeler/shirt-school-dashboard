@@ -12,7 +12,7 @@ const CATEGORY_BADGE_CLASS = {
   general: 'badge badge-general',
 }
 
-const EDDIE_STATUS_LABELS = { replied: 'Eddie replied', ignored: 'Ignored', skipped: 'Eddie skipped' }
+const EDDIE_STATUS_LABELS = { replied: 'Eddie replied', ignored: 'Ignored', skipped: 'Eddie skipped', no_reply: 'No reply needed' }
 
 const AVATAR_COLORS = [
   '#2563eb', '#7c3aed', '#059669', '#dc2626',

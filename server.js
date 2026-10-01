@@ -995,6 +995,8 @@ app.get('/api/emails', requireAuth, async (req, res) => {
           if (obj && eddieLabelIds) {
             const ids = new Set((t.messages || []).flatMap((m) => m.labelIds || []))
             obj.eddieStatus = Object.entries(eddieLabelIds).find(([id]) => ids.has(id))?.[1] || null
+            // Labelled Replied earlier, but the customer's newest message was closed without a reply
+            if (obj.eddieStatus === 'replied' && !obj.messages.at(-1)?.isOutgoing) obj.eddieStatus = 'no_reply'
           }
           return obj
         }).filter(Boolean)
