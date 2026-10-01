@@ -993,10 +993,10 @@ app.get('/api/emails', requireAuth, async (req, res) => {
         return threads.map((t) => {
           const obj = buildThreadObject(t, account)
           if (obj && eddieLabelIds) {
-            const ids = new Set((t.messages || []).flatMap((m) => m.labelIds || []))
-            obj.eddieStatus = Object.entries(eddieLabelIds).find(([id]) => ids.has(id))?.[1] || null
-            // Labelled Replied earlier, but the customer's newest message was closed without a reply
-            if (obj.eddieStatus === 'replied' && !obj.messages.at(-1)?.isOutgoing) obj.eddieStatus = 'no_reply'
+            // What Eddie did with the newest message wins (e.g. replied earlier, then closed a thank-you)
+            const pick = (ids) => Object.entries(eddieLabelIds).find(([id]) => ids.includes(id))?.[1]
+            const newest = [...(t.messages || [])].sort((a, b) => b.internalDate - a.internalDate)[0]
+            obj.eddieStatus = pick(newest?.labelIds || []) || pick((t.messages || []).flatMap((m) => m.labelIds || [])) || null
           }
           return obj
         }).filter(Boolean)
