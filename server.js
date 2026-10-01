@@ -909,6 +909,44 @@ function deduplicateThreads(threadsByAccount) {
 }
 
 // Inject forward events as synthetic messages into each thread
+// Eddie answers kerry@ emails from support@, so the reply lives in support@'s mailbox,
+// not in the kerry@ thread. Pull those replies in (matched by In-Reply-To) so the
+// thread shows the whole conversation.
+async function injectSupportReplies(threads) {
+  const SUPPORT = 'support@shirtschool.com'
+  if (!connectedAccounts().includes(SUPPORT)) return threads
+  const gmail = google.gmail({ version: 'v1', auth: clients[SUPPORT] })
+  await Promise.all(threads.filter((t) => !(t.accounts || [t.account]).includes(SUPPORT)).map(async (thread) => {
+    try {
+      const ids = new Set(thread.messages.map((m) => m.messageId).filter(Boolean))
+      const customers = [...new Set(thread.messages.filter((m) => !m.isOutgoing)
+        .map((m) => (m.from.match(/<(.+?)>/)?.[1] || m.from).trim().toLowerCase()))].filter(Boolean)
+      if (!ids.size || !customers.length) return
+      const after = Math.floor(new Date(thread.messages[0].timestamp).getTime() / 1000) - 60
+      const { data } = await gmail.users.messages.list({
+        userId: 'me', maxResults: 10, q: `in:sent after:${after} {${customers.map((c) => `to:${c}`).join(' ')}}`,
+      })
+      const found = []
+      for (const { id } of data.messages || []) {
+        const meta = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['In-Reply-To'] })
+        const inReplyTo = getHeader(meta.data.payload?.headers || [], 'In-Reply-To').trim()
+        if (!ids.has(inReplyTo)) continue
+        const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' })
+        const msg = buildMessageObject(full.data, SUPPORT)
+        if (msg && !ids.has(msg.messageId)) found.push(msg)
+      }
+      if (!found.length) return
+      thread.messages = [...thread.messages, ...found].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+      const latest = thread.messages[thread.messages.length - 1]
+      thread.timestamp = latest.timestamp
+      thread.preview = latest.preview
+    } catch (err) {
+      console.error(`[SupportReplies] ${thread.id}:`, err.message)
+    }
+  }))
+  return threads
+}
+
 async function injectForwardsIntoThreads(threads) {
   if (!supabase || !threads.length) return threads
   const threadIds = threads.map((t) => t.id).filter(Boolean)
@@ -1006,7 +1044,7 @@ app.get('/api/emails', requireAuth, async (req, res) => {
     // Filter out Kajabi billing notifications — those live in Payment Recovery, not the inbox.
     // Catches both direct emails (from kajabimail.net) and forwarded ones (body contains marker).
     const filteredThreads = dedupedThreads.filter((thread) => !isKajabiNotificationThread(thread))
-    const emails = await injectForwardsIntoThreads(filteredThreads)
+    const emails = await injectForwardsIntoThreads(await injectSupportReplies(filteredThreads))
     res.json({
       emails,
       nextPageTokens: Object.keys(nextPageTokens).length ? nextPageTokens : null,
@@ -1116,7 +1154,7 @@ app.get('/api/emails/search', requireAuth, async (req, res) => {
         return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
       })
     )
-    const emails = deduplicateThreads(threadsByAccount)
+    const emails = await injectSupportReplies(deduplicateThreads(threadsByAccount))
     res.json({ emails })
   } catch (error) {
     console.error('Gmail search error:', error.message)
@@ -1177,7 +1215,7 @@ app.get('/api/emails/:id', requireAuth, async (req, res) => {
       const gmail = google.gmail({ version: 'v1', auth: clients[acct] })
       const threadRes = await gmail.users.threads.get({ userId: 'me', id, format: 'full' })
       const thread = buildThreadObject(threadRes.data, acct)
-      if (thread) return res.json({ thread })
+      if (thread) return res.json({ thread: (await injectSupportReplies([thread]))[0] })
     } catch (err) {
       if (err.code !== 404) console.error(`Thread ${id} fetch error for ${acct}:`, err.message)
     }
