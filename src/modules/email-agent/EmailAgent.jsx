@@ -108,6 +108,7 @@ const NAV_STATUS_VIEWS = [
   { id: 'inbox',    label: 'Inbox' },
   { id: 'archived', label: 'Archived' },
   { id: 'sent',     label: 'Sent' },
+  { id: 'eddie',    label: 'Eddie Handled' },
 ]
 
 const NAV_CATEGORY_VIEWS = [
@@ -269,7 +270,9 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
     setError('')
 
     try {
-      const base = currentMode === 'archived' ? '/api/emails?archived=true' : '/api/emails'
+      const base = currentMode === 'archived' ? '/api/emails?archived=true'
+        : currentMode === 'eddie' ? '/api/emails?view=eddie'
+        : '/api/emails'
       const sep = base.includes('?') ? '&' : '?'
       const url = pageTokens
         ? `${base}${sep}pageTokens=${encodeURIComponent(JSON.stringify(pageTokens))}`
@@ -388,17 +391,17 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
         setLoadingSent(true)
         fetchSentEmails().then(setSentEmails).catch((err) => { console.error('[Sent] fetch failed:', err); setSentEmails([]) }).finally(() => setLoadingSent(false))
       }
-    } else if (viewId === 'archived') {
-      if (viewMode !== 'archived') {
-        setViewMode('archived')
+    } else if (viewId === 'archived' || viewId === 'eddie') {
+      if (viewMode !== viewId) {
+        setViewMode(viewId)
         setSelectedEmail(null)
         setSidebarView('inbox')
         setEmails([])
         setViewSwitching(true)
-        fetchEmails(true, 'archived')
+        fetchEmails(true, viewId)
       }
     } else {
-      if (viewMode === 'archived' || viewMode === 'sent') {
+      if (viewMode === 'archived' || viewMode === 'eddie' || viewMode === 'sent') {
         setViewMode('inbox')
         setSelectedEmail(null)
         setEmails([])
@@ -460,7 +463,7 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   const filteredEmails = useMemo(() => {
     if (viewMode === 'sent') return sentEmails
-    if (viewMode === 'archived') return emails
+    if (viewMode === 'archived' || viewMode === 'eddie') return emails
     switch (sidebarView) {
       case 'student_support': return emails.filter((e) => e.category === 'student_support')
       case 'sponsorship':     return emails.filter((e) => e.category === 'sponsorship')
@@ -672,12 +675,13 @@ export default function EmailAgent({ onUnreadChange, connectedAccounts = [] }) {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const activeNavId = viewMode === 'sent' ? 'sent' : viewMode === 'archived' ? 'archived' : sidebarView
+  const activeNavId = ['sent', 'archived', 'eddie'].includes(viewMode) ? viewMode : sidebarView
   const anySelected = selectedIds.size > 0
 
   const activeNavLabel = useMemo(() => {
     if (viewMode === 'sent') return 'Sent'
     if (viewMode === 'archived') return 'Archived'
+    if (viewMode === 'eddie') return 'Eddie Handled'
     return NAV_CATEGORY_VIEWS.find((v) => v.id === sidebarView)?.label
       || NAV_STATUS_VIEWS.find((v) => v.id === sidebarView)?.label
       || folders.find((f) => f.id === sidebarView)?.name

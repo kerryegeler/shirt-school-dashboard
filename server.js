@@ -952,8 +952,19 @@ async function injectForwardsIntoThreads(threads) {
   return threads
 }
 
+// Gmail labels Eddie (Claude Code, ~/Business/Shirt School Copywriter/scripts/support.py)
+// puts on customer-service threads it has finished; those threads are archived.
+const EDDIE_LABELS = { 'Eddie/Replied': 'replied', 'Eddie/Ignored': 'ignored', 'Eddie/Skipped': 'skipped' }
+
+async function eddieLabelMap(gmail) {
+  const { data } = await gmail.users.labels.list({ userId: 'me' })
+  const map = {}
+  for (const l of data.labels || []) if (EDDIE_LABELS[l.name]) map[l.id] = EDDIE_LABELS[l.name]
+  return map
+}
+
 app.get('/api/emails', requireAuth, async (req, res) => {
-  const { archived, pageTokens: pageTokensParam } = req.query
+  const { archived, view, pageTokens: pageTokensParam } = req.query
   let pageTokens = {}
   try { if (pageTokensParam) pageTokens = JSON.parse(pageTokensParam) } catch {}
   const connected = connectedAccounts()
@@ -963,7 +974,9 @@ app.get('/api/emails', requireAuth, async (req, res) => {
     const threadsByAccount = await Promise.all(
       connected.map(async (account) => {
         const gmail = google.gmail({ version: 'v1', auth: clients[account] })
-        const q = archived === 'true' ? '-in:inbox -in:trash -in:spam -in:draft' : 'in:inbox'
+        const q = view === 'eddie'
+          ? `{${Object.keys(EDDIE_LABELS).map((l) => `label:${l.toLowerCase().replace('/', '-')}`).join(' ')}}`
+          : archived === 'true' ? '-in:inbox -in:trash -in:spam -in:draft' : 'in:inbox'
         const listRes = await gmail.users.threads.list({
           userId: 'me', maxResults: 25, q,
           ...(pageTokens[account] ? { pageToken: pageTokens[account] } : {}),
@@ -976,7 +989,15 @@ app.get('/api/emails', requireAuth, async (req, res) => {
             gmail.users.threads.get({ userId: 'me', id: t.id, format: 'full' }).then((r) => r.data)
           )
         )
-        return threads.map((t) => buildThreadObject(t, account)).filter(Boolean)
+        const eddieLabelIds = view === 'eddie' ? await eddieLabelMap(gmail) : null
+        return threads.map((t) => {
+          const obj = buildThreadObject(t, account)
+          if (obj && eddieLabelIds) {
+            const ids = new Set((t.messages || []).flatMap((m) => m.labelIds || []))
+            obj.eddieStatus = Object.entries(eddieLabelIds).find(([id]) => ids.has(id))?.[1] || null
+          }
+          return obj
+        }).filter(Boolean)
       })
     )
     const dedupedThreads = deduplicateThreads(threadsByAccount)

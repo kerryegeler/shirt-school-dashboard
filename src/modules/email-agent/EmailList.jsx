@@ -12,6 +12,8 @@ const CATEGORY_BADGE_CLASS = {
   general: 'badge badge-general',
 }
 
+const EDDIE_STATUS_LABELS = { replied: 'Eddie replied', ignored: 'Ignored', skipped: 'Eddie skipped' }
+
 const AVATAR_COLORS = [
   '#2563eb', '#7c3aed', '#059669', '#dc2626',
   '#0891b2', '#d97706', '#db2777', '#65a30d',
@@ -156,6 +158,11 @@ export default function EmailList({
                   {viewMode !== 'sent' && (
                     <span className={CATEGORY_BADGE_CLASS[email.category]}>
                       {CATEGORY_LABELS[email.category]}
+                    </span>
+                  )}
+                  {email.eddieStatus && (
+                    <span className={`badge badge-eddie badge-eddie-${email.eddieStatus}`}>
+                      {EDDIE_STATUS_LABELS[email.eddieStatus]}
                     </span>
                   )}
                   {email.hasDraft && (

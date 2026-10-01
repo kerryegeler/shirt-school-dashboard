@@ -673,7 +673,7 @@ export default function EmailDetail({ email, connectedAccounts = [], onMarkUnrea
                 Archive
               </button>
             )}
-            {viewMode === 'archived' && (
+            {(viewMode === 'archived' || viewMode === 'eddie') && (
               <button
                 className="btn-archive-detail"
                 onClick={() => onUnarchive?.(email)}

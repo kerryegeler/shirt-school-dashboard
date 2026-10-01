@@ -626,6 +626,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   color: var(--cat-general-text);
 }
 
+.badge-eddie-replied { background: var(--success-dim); color: var(--success); }
+.badge-eddie-ignored,
+.badge-eddie-skipped { background: var(--cat-general-bg); color: var(--cat-general-text); }
+
 /* ─── Utility ───────────────────────────────────────────────────── */
 .visually-hidden {
   position: absolute;
