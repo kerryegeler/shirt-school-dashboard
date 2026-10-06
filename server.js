@@ -908,45 +908,49 @@ function deduplicateThreads(threadsByAccount) {
   return [...threadMap.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
 }
 
-// Inject forward events as synthetic messages into each thread
-// Eddie answers kerry@ emails from support@, so the reply lives in support@'s mailbox,
-// not in the kerry@ thread. Pull those replies in (matched by In-Reply-To) so the
-// thread shows the whole conversation.
+// Eddie sometimes answers from the other mailbox (kerry@ emails from support@, and sales
+// leads that wrote to support@ from kerry@), so the reply lives in the other mailbox's
+// sent mail, not in this thread. Pull those replies in (matched by In-Reply-To) so the
+// thread shows the whole conversation, whichever inbox it came to.
 async function injectSupportReplies(threads) {
-  const SUPPORT = 'support@shirtschool.com'
-  if (!connectedAccounts().includes(SUPPORT)) return threads
-  const gmail = google.gmail({ version: 'v1', auth: clients[SUPPORT] })
-  await Promise.all(threads.filter((t) => !(t.accounts || [t.account]).includes(SUPPORT)).map(async (thread) => {
-    try {
-      const ids = new Set(thread.messages.map((m) => m.messageId).filter(Boolean))
-      const customers = [...new Set(thread.messages.filter((m) => !m.isOutgoing)
-        .map((m) => (m.from.match(/<(.+?)>/)?.[1] || m.from).trim().toLowerCase()))].filter(Boolean)
-      if (!ids.size || !customers.length) return
-      const after = Math.floor(new Date(thread.messages[0].timestamp).getTime() / 1000) - 60
-      const { data } = await gmail.users.messages.list({
-        userId: 'me', maxResults: 10, q: `in:sent after:${after} {${customers.map((c) => `to:${c}`).join(' ')}}`,
-      })
-      const found = []
-      for (const { id } of data.messages || []) {
-        const meta = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['In-Reply-To'] })
-        const inReplyTo = getHeader(meta.data.payload?.headers || [], 'In-Reply-To').trim()
-        if (!ids.has(inReplyTo)) continue
-        const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' })
-        const msg = buildMessageObject(full.data, SUPPORT)
-        if (msg && !ids.has(msg.messageId)) found.push(msg)
+  const accounts = connectedAccounts()
+  await Promise.all(threads.flatMap((thread) => accounts
+    .filter((acct) => !(thread.accounts || [thread.account]).includes(acct))
+    .map(async (acct) => {
+      try {
+        const gmail = google.gmail({ version: 'v1', auth: clients[acct] })
+        const ids = new Set(thread.messages.map((m) => m.messageId).filter(Boolean))
+        const customers = [...new Set(thread.messages.filter((m) => !m.isOutgoing)
+          .map((m) => (m.from.match(/<(.+?)>/)?.[1] || m.from).trim().toLowerCase()))].filter(Boolean)
+        if (!ids.size || !customers.length) return
+        const after = Math.floor(new Date(thread.messages[0].timestamp).getTime() / 1000) - 60
+        const { data } = await gmail.users.messages.list({
+          userId: 'me', maxResults: 10, q: `in:sent after:${after} {${customers.map((c) => `to:${c}`).join(' ')}}`,
+        })
+        const found = []
+        for (const { id } of data.messages || []) {
+          const meta = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['In-Reply-To'] })
+          const inReplyTo = getHeader(meta.data.payload?.headers || [], 'In-Reply-To').trim()
+          if (!ids.has(inReplyTo)) continue
+          const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' })
+          const msg = buildMessageObject(full.data, acct)
+          if (msg && !ids.has(msg.messageId)) found.push(msg)
+        }
+        if (!found.length) return
+        const seen = new Set(thread.messages.map((m) => m.messageId).filter(Boolean))
+        thread.messages = [...thread.messages, ...found.filter((m) => !seen.has(m.messageId))]
+          .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+        const latest = thread.messages[thread.messages.length - 1]
+        thread.timestamp = latest.timestamp
+        thread.preview = latest.preview
+      } catch (err) {
+        console.error(`[CrossInboxReplies] ${thread.id} (${acct}):`, err.message)
       }
-      if (!found.length) return
-      thread.messages = [...thread.messages, ...found].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      const latest = thread.messages[thread.messages.length - 1]
-      thread.timestamp = latest.timestamp
-      thread.preview = latest.preview
-    } catch (err) {
-      console.error(`[SupportReplies] ${thread.id}:`, err.message)
-    }
-  }))
+    })))
   return threads
 }
 
+// Inject forward events as synthetic messages into each thread
 async function injectForwardsIntoThreads(threads) {
   if (!supabase || !threads.length) return threads
   const threadIds = threads.map((t) => t.id).filter(Boolean)
