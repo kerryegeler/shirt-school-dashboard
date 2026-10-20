@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import SalesAnalytics from '../sales-analytics/SalesAnalytics.jsx'
 import './pnl.css'
 
@@ -43,7 +44,22 @@ function presetRange(preset, custom) {
   return { from: `${y}-${pad(m)}-01`, to: t }
 }
 
+// Requests in flight → the top loading bar
+let inflight = 0
+const inflightListeners = new Set()
+const setInflight = (d) => { inflight += d; inflightListeners.forEach((fn) => fn(inflight)) }
+function useInflight() {
+  const [n, setN] = useState(inflight)
+  useEffect(() => { inflightListeners.add(setN); return () => inflightListeners.delete(setN) }, [])
+  return n > 0
+}
+
 async function api(url, opts = {}) {
+  setInflight(1)
+  try { return await apiRequest(url, opts) } finally { setInflight(-1) }
+}
+
+async function apiRequest(url, opts = {}) {
   const res = await fetch(url, { signal: AbortSignal.timeout(60000), headers: opts.body ? { 'Content-Type': 'application/json' } : undefined, ...opts })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`)
@@ -163,13 +179,15 @@ function TrendChart({ monthly }) {
             onClick={(e) => setTip({ m, x: e.clientX, y: e.clientY })} />
         ))}
       </svg>
-      {tip && (
+      {/* Rendered at the page root: the cards' blur effect would otherwise trap it behind the next card */}
+      {tip && createPortal(
         <div className="pnl-tip" style={{ left: Math.min(tip.x + 14, window.innerWidth - 200), top: tip.y - 20 }}>
           <b>{monthName(tip.m.month)} {tip.m.month.slice(0, 4)}{tip.m.partial ? ' (to date)' : ''}</b>
           <div className="row"><span>Revenue</span><span className="num">{money(tip.m.revenue)}</span></div>
           <div className="row"><span>Expenses</span><span className="num">{money(tip.m.expenses)}</span></div>
           <div className="row"><span>Profit</span><span className="num">{money(tip.m.profit)}</span></div>
-        </div>
+        </div>,
+        document.querySelector('.pnl') || document.body,
       )}
     </div>
   )
@@ -252,8 +270,9 @@ function TxTable({ txs, options, onChanged, showControls }) {
 // ─── Tabs ────────────────────────────────────────────────────────────────────
 
 function Overview({ s, range, business, animKey, onPickBusiness, onPickCategory }) {
-  const [activity, setActivity] = useState([])
+  const [activity, setActivity] = useState(null)
   useEffect(() => {
+    setActivity(null)
     api(`/api/pnl/lines?from=${range.from}&to=${range.to}${business ? `&business=${encodeURIComponent(business)}` : ''}`)
       .then((d) => setActivity(d.lines.filter((l) => !/fee/i.test(l.label || '') || l.account !== 'kajabi' && l.account !== 'stripe').slice(0, 8)))
       .catch(() => setActivity([]))
@@ -261,12 +280,13 @@ function Overview({ s, range, business, animKey, onPickBusiness, onPickCategory 
 
   const t = s.totals; const p = s.previous
   const margin = t.revenue > 0 ? Math.round((t.profit / t.revenue) * 100) : null
-  const isMtd = range.from.endsWith('-01') && range.to === chicagoToday()
-  const prevLabel = isMtd ? `same point ${monthName(p.from)}` : 'previous'
+  const isMtd = range.from === `${chicagoToday().slice(0, 7)}-01` && range.to === chicagoToday()
+  const oneMonth = range.from.slice(0, 7) === range.to.slice(0, 7) // month-over-month compare only makes sense within a month
+  const prevLabel = isMtd ? `same point ${monthName(p.from)}` : monthName(p.from)
   return (
     <section className="pnl-grid">
-      <Kpi title="Revenue" cents={t.revenue} delay={0.05} animKey={animKey} meta={`${shortDate(range.from)} – ${shortDate(range.to)}`} right={<Delta now={t.revenue} prev={p.revenue} label={prevLabel} />} />
-      <Kpi title="Expenses" cents={t.expenses} delay={0.12} animKey={animKey} meta={business ? 'Direct costs only (shared costs not split)' : `${s.expenseCount} bank & card charges`} right={<Delta now={t.expenses} prev={p.expenses} label={prevLabel} goodWhenUp={false} />} />
+      <Kpi title="Revenue" cents={t.revenue} delay={0.05} animKey={animKey} meta={`${shortDate(range.from)} – ${shortDate(range.to)}`} right={oneMonth ? <Delta now={t.revenue} prev={p.revenue} label={prevLabel} /> : <span />} />
+      <Kpi title="Expenses" cents={t.expenses} delay={0.12} animKey={animKey} meta={business ? 'Direct costs only (shared costs not split)' : `${s.expenseCount} bank & card charges`} right={oneMonth ? <Delta now={t.expenses} prev={p.expenses} label={prevLabel} goodWhenUp={false} /> : <span />} />
       <Kpi title="Profit" cents={t.profit} delay={0.19} animKey={animKey} className={t.profit >= 0 ? 'profit' : 'loss'}
         extra={margin != null && <span className="pnl-margin">{margin}% margin</span>}
         meta={isMtd ? 'Month to date' : 'For this period'} right={<span>{range.to.slice(0, 4)} so far: <b className="num">{money(s.ytd.profit)}</b></span>} />
@@ -297,7 +317,9 @@ function Overview({ s, range, business, animKey, onPickBusiness, onPickCategory 
 
       <div className="pnl-card s7" style={{ animationDelay: '.47s' }}>
         <div className="pnl-head"><div><h3>Latest activity</h3><div className="pnl-sub">Sales, income and costs in one feed</div></div></div>
-        {activity.length ? (
+        {activity == null ? (
+          <div className="pnl-list">{[0, 1, 2, 3, 4].map((i) => <div key={i} className="pnl-skel line" />)}</div>
+        ) : activity.length ? (
           <table><tbody>
             {activity.map((l) => (
               <tr key={l.ref}>
@@ -465,6 +487,8 @@ export default function PnL() {
   const [preset, setPreset] = useState('mtd')
   const [custom, setCustom] = useState({ from: '', to: '' })
   const [s, setS] = useState(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const busy = useInflight()
   const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
   const [animKey, setAnimKey] = useState(0)
@@ -473,11 +497,12 @@ export default function PnL() {
   const range = useMemo(() => presetRange(preset, custom), [preset, custom])
 
   const load = useCallback(async () => {
+    setRefreshing(true)
     try {
       setError(null)
       const d = await api(`/api/pnl/summary?from=${range.from}&to=${range.to}${business ? `&business=${encodeURIComponent(business)}` : ''}`)
       setS(d); setAnimKey((k) => k + 1)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(e.message) } finally { setRefreshing(false) }
   }, [range.from, range.to, business])
   useEffect(() => { load() }, [load])
   useEffect(() => { api('/api/pnl/options').then(setOptions).catch(() => {}) }, [])
@@ -491,7 +516,8 @@ export default function PnL() {
 
   return (
     <div className="pnl">
-      <div className="pnl-wrap">
+      <div className={`pnl-loadbar${busy ? ' on' : ''}`} role="progressbar" aria-hidden={!busy} aria-label="Loading" />
+      <div className={`pnl-wrap${refreshing && s ? ' pnl-dim' : ''}`}>
         <header className="pnl-header">
           <div>
             <h1>Profit &amp; Loss</h1>

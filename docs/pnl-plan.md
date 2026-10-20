@@ -127,3 +127,4 @@ Built and tested locally on real data; **not deployed**.
 - Kerry: no Slack summaries (removed). Dashboard login: kerry@shirtschool.com (only email allowed on the P&L).
 - Kajabi check vs Kajabi's report: Jul–Oct exact; May/Jun within $95; **Jan ($2,127) and Feb ($1,707) missing**; Mar/Apr are "Kajabi Backfill" lumps (no product). Proposed: replace lumps with per-product monthly totals from Kajabi (needs Kerry's OK, since it deletes 2 rows).
 - Still to do: Kerry's OK → Railway vars (SIMPLEFIN_ACCESS_URL, SUPABASE_SERVICE_ROLE_KEY) → deploy; Jan–Jul card/bank CSV import.
+- 2026-10-20 evening: **Live** at go.kerryegeler.com → Profit & Loss. Jan–Jul history imported from CSV for all 6 business accounts (`scripts/pnl-import-csv.mjs`, files in `~/Business/_finance-imports/`); Kajabi Jan–Apr replaced with per-product monthly totals. Review queue: ~104 suggestions + 55 for Kerry.

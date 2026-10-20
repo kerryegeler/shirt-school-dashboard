@@ -171,13 +171,19 @@ export async function seedRules() {
 export async function reapplyRules() {
   const rules = await loadRules()
   const accounts = Object.fromEntries((await selectAll('bank_accounts', (q) => q.select('*'))).map((a) => [a.id, a]))
-  const rows = await selectAll('bank_transactions', (q) => q.select('id,account_id,amount_cents,payee,description,status').in('status', ['rule', 'review', 'suggested']))
+  const rows = await selectAll('bank_transactions', (q) => q.select('id,account_id,posted_on,amount_cents,payee,description,kind,category,business,rule_id,status').in('status', ['rule', 'review', 'suggested']))
+  // Only write lines whose sorting actually changes, in batches
   const changed = []
   for (const t of rows) {
     const hit = R.applyRules(t, accounts[t.account_id], rules)
-    if (hit) changed.push({ id: t.id, ...hit })
+    if (!hit) continue
+    if (['kind', 'category', 'business', 'rule_id', 'status'].every((k) => (t[k] ?? null) === (hit[k] ?? null))) continue
+    changed.push({ ...t, ...hit, updated_at: new Date().toISOString() })
   }
-  for (const c of changed) await sb.from('bank_transactions').update({ ...c, updated_at: new Date().toISOString() }).eq('id', c.id)
+  for (let i = 0; i < changed.length; i += 500) {
+    const { error } = await sb.from('bank_transactions').upsert(changed.slice(i, i + 500))
+    if (error) throw new Error(`reapply: ${error.message}`)
+  }
   return changed.length
 }
 
