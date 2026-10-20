@@ -113,7 +113,7 @@ export default function Sidebar({ activeModule, onSelectModule, unreadCount, acc
               title={mod.comingSoon ? 'Coming soon' : mod.label}
             >
               <span className="sidebar-item-icon"><Icon /></span>
-              {mod.label}
+              <span className="sidebar-label">{mod.label}</span>
               {mod.comingSoon && <span className="sidebar-badge-pill">Soon</span>}
               {!mod.comingSoon && mod.id === 'email-agent' && unreadCount > 0 && (
                 <span className="sidebar-unread-dot">{unreadCount}</span>
@@ -129,7 +129,7 @@ export default function Sidebar({ activeModule, onSelectModule, unreadCount, acc
           title="Configure current live event info the AI uses"
         >
           <span className="sidebar-item-icon"><IconCalendar /></span>
-          Live Event
+          <span className="sidebar-label">Live Event</span>
         </div>
       </nav>
 

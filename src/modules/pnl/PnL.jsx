@@ -405,7 +405,9 @@ function ReviewGroups({ txs, options, onChanged }) {
   const groups = useMemo(() => {
     const m = new Map()
     for (const t of txs) {
-      const key = `${(t.payee || t.description || '').toLowerCase()}|${t.amount_cents < 0 ? 'out' : 'in'}|${t.bank_accounts?.institution}`
+      // Same merchant even when the bank adds a booking code ("AIRBNB * HMJ8…"); matches the server's rule pattern
+      const merchant = (t.payee || t.description || '').toLowerCase().replace(/[#*].*$/, '').replace(/\s+\d[\d\s-]*$/, '').trim()
+      const key = `${merchant}|${t.amount_cents < 0 ? 'out' : 'in'}|${t.bank_accounts?.institution}`
       const g = m.get(key) || { key, first: t, items: [], cents: 0 }
       g.items.push(t); g.cents += t.amount_cents
       m.set(key, g)
@@ -524,7 +526,7 @@ export default function PnL() {
             <div className="pnl-fresh">
               <span><i className="pnl-dot" />Stripe &amp; Kajabi live</span>
               <span>Banks &amp; cards synced {ago(s?.freshness?.bankSyncedAt)}</span>
-              {stale.length > 0 && <span title={stale.map((a) => `${a.name}: newest charge ${a.newest}`).join('\n')}>No new charges lately: {[...new Set(stale.map((a) => a.name.split(' · ')[0].replace('American Express', 'Amex').replace(' Bank', '')))].join(', ')}</span>}
+              {stale.length > 0 && <span className="hide-sm" title={stale.map((a) => `${a.name}: newest charge ${a.newest}`).join('\n')}>No new charges lately: {[...new Set(stale.map((a) => a.name.split(' · ')[0].replace('American Express', 'Amex').replace(' Bank', '')))].join(', ')}</span>}
             </div>
           </div>
           <div className="pnl-actions">
@@ -534,9 +536,9 @@ export default function PnL() {
         </header>
 
         <nav className="pnl-tabs">
-          {[['overview', 'Overview'], ['revenue', 'Revenue'], ['expenses', 'Expenses'], ['review', 'Needs review'], ['export', 'Export']].map(([id, label]) => (
+          {[['overview', 'Overview'], ['revenue', 'Revenue'], ['expenses', 'Expenses'], ['review', 'Needs review', 'Review'], ['export', 'Export']].map(([id, label, short]) => (
             <button key={id} className={`pnl-tab${tab === id ? ' on' : ''}`} onClick={() => setTab(id)}>
-              {label}{id === 'review' && s?.reviewCount > 0 && <span className="pnl-badge">{s.reviewCount}</span>}
+              {short ? <><span className="pnl-full">{label}</span><span className="pnl-short">{short}</span></> : label}{id === 'review' && s?.reviewCount > 0 && <span className="pnl-badge">{s.reviewCount}</span>}
             </button>
           ))}
         </nav>
@@ -548,10 +550,14 @@ export default function PnL() {
               {BUSINESSES.map((b) => <button key={b} className={`pnl-chip${business === b ? ' on' : ''}`} onClick={() => setBusiness(business === b ? null : b)}>{b}</button>)}
             </div>
             <div className="pnl-period">
+              <select className="pnl-biz-select" value={business || ''} onChange={(e) => setBusiness(e.target.value || null)} aria-label="Business">
+                <option value="">All businesses</option>
+                {BUSINESSES.map((b) => <option key={b}>{b}</option>)}
+              </select>
               <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-                <option value="mtd">This month (to date)</option>
+                <option value="mtd">This month</option>
                 <option value="last">Last month</option>
-                <option value="ytd">This year (to date)</option>
+                <option value="ytd">This year</option>
                 <option value="lastyear">Last year</option>
                 <option value="custom">Custom range…</option>
               </select>

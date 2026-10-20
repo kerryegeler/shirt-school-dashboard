@@ -17,6 +17,7 @@
 
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   color: var(--p-text);
   font-family: -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -62,6 +63,7 @@
 .pnl-chip:hover { color: var(--p-text); border-color: rgba(255,255,255,0.18); }
 .pnl-chip.on { color: #fff; border-color: rgba(144,133,233,.6); background: rgba(144,133,233,.14); box-shadow: 0 0 18px rgba(144,133,233,.25); }
 .pnl-period { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pnl .pnl-biz-select, .pnl .pnl-short { display: none; }
 .pnl select, .pnl input[type=date], .pnl input[type=search], .pnl input[type=text] {
   background: var(--p-surface); color: var(--p-text); border: 1px solid var(--p-border); border-radius: 12px; padding: 8px 12px; font-size: 13px; font-family: inherit; color-scheme: dark; outline: none; }
 .pnl select:focus, .pnl input:focus { border-color: rgba(144,133,233,.6); }
@@ -168,15 +170,28 @@
   .pnl-header h1 { font-size: 22px; }
   .pnl-actions .hide-sm, .pnl .hide-sm { display: none; }
   .pnl-grid { gap: 12px; }
-  .pnl .s4, .pnl .s4.profit { grid-column: span 12; }
-  .pnl-kpi .val { font-size: 34px; }
-  .pnl-kpi .meta { flex-direction: column; gap: 4px; }
+  .pnl .s4 { grid-column: span 12; }
+  .pnl .pnl-kpi.s4 { grid-column: span 6; padding: 16px; }
+  .pnl .pnl-kpi.s4.profit, .pnl .pnl-kpi.s4.loss { grid-column: span 12; }
+  .pnl-kpi .val { font-size: 26px; margin-top: 6px; }
+  .pnl-kpi.profit .val, .pnl-kpi.loss .val { font-size: 34px; }
+  .pnl-kpi .meta { flex-direction: column; gap: 4px; font-size: 12px; }
   .pnl-card { padding: 18px; }
-  .pnl-filters { flex-direction: column; align-items: stretch; }
-  .pnl-period { margin-left: 0; }
-  .pnl-period { width: 100%; }
-  .pnl-period select { flex: 1; min-width: 0; width: 100%; }
-  .pnl-chips { margin: 0 -16px; padding: 0 16px; max-width: none; }
+  /* Phone: tabs share the full width; business chips become a dropdown beside the period */
+  .pnl-header { align-items: flex-start; }
+  .pnl-tabs { width: 100%; margin-top: 18px; }
+  .pnl-tab { flex: 1; padding: 8px 4px; font-size: 13px; }
+  .pnl-badge { margin-left: 4px; padding: 1px 5px; }
+  .pnl .pnl-full { display: none; }
+  .pnl .pnl-short { display: inline; }
+  .pnl-chips { display: none; }
+  .pnl-filters { margin-top: 12px; }
+  .pnl-period { margin-left: 0; width: 100%; }
+  .pnl .pnl-biz-select { display: block; }
+  .pnl-period select, .pnl-period input[type=date] { flex: 1 1 40%; min-width: 0; }
+  .pnl-review-ctrls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pnl-review-ctrls select.compact { width: 100%; min-width: 0; }
+  .pnl-review-ctrls .pnl-btn { grid-column: span 2; padding: 10px; }
   .pnl-trend { height: 240px; }
   .pnl-legend { gap: 10px; }
 }
