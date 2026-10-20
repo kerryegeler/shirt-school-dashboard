@@ -9,6 +9,7 @@ import { WebClient as SlackWebClient } from '@slack/web-api'
 import fs from 'fs'
 import path from 'path'
 import sharp from 'sharp'
+import { registerPnl, startPnlScheduler } from './pnl/index.js'
 
 // ─── Global error guards — prevent a single failed call from crashing the server ─
 process.on('uncaughtException', (err) => {
@@ -7572,6 +7573,9 @@ app.post('/api/sales/backfill-stripe', requireAuth, async (req, res) => {
 // Diagnostic: inspect raw Kajabi webhook payloads. Filter by ?email= or ?amount_cents=
 // Returns up to 3 recent matching payloads so we can see exactly what fields
 // Kajabi is sending and why amounts come out wrong.
+// ─── Profit & Loss (bank/card sync, P&L, CPA export) — see pnl/ and docs/pnl-plan.md ─
+registerPnl(app)
+
 app.get('/api/sales/inspect-kajabi', requireAuth, async (req, res) => {
   if (!supabase) return res.json({ error: 'No database' })
   const email = req.query.email
@@ -9003,6 +9007,7 @@ async function init() {
   startPaymentRecoveryWorkers()
   startDailySalesReportScheduler()
   startReminderScheduler()
+  startPnlScheduler()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`  Server → http://localhost:${PORT}\n`)

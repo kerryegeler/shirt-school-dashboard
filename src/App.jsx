@@ -5,7 +5,7 @@ import FeedbackTab from './modules/feedback/FeedbackTab.jsx'
 import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
-import SalesAnalytics from './modules/sales-analytics/SalesAnalytics.jsx'
+import PnL from './modules/pnl/PnL.jsx'
 import Reminders from './modules/reminders/Reminders.jsx'
 import SocialProof from './modules/social-proof/SocialProof.jsx'
 import UtmTracker from './modules/utm-tracker/UtmTracker.jsx'
@@ -119,7 +119,7 @@ export default function App() {
           {activeModule === 'content-agent' && <ContentAgent />}
           {activeModule === 'content-board' && <ContentBoard />}
           {activeModule === 'payment-recovery' && <PaymentRecovery />}
-          {activeModule === 'sales-analytics' && <SalesAnalytics />}
+          {activeModule === 'sales-analytics' && <PnL />}
           {activeModule === 'reminders' && <Reminders />}
           {activeModule === 'social-proof' && <SocialProof />}
           {activeModule === 'utm-tracker' && <UtmTracker />}
@@ -148,7 +148,7 @@ const MOBILE_SECTIONS = [
   { id: 'content-agent', label: 'Content Agent', short: 'Content' },
   { id: 'content-board', label: 'Content Board', short: 'Board' },
   { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
-  { id: 'sales-analytics', label: 'Sales Analytics', short: 'Sales' },
+  { id: 'sales-analytics', label: 'Profit & Loss', short: 'P&L' },
   { id: 'reminders', label: 'Reminders', short: 'Reminders' },
   { id: 'social-proof', label: 'Social Proof', short: 'Proof' },
   { id: 'utm-tracker', label: 'Lead Tracking', short: 'Leads' },

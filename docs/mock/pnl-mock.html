@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Profit & Loss — design mock</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #07090d;
+    --surface: rgba(255,255,255,0.035);
+    --surface-hi: rgba(255,255,255,0.06);
+    --border: rgba(255,255,255,0.08);
+    --text-primary: #f2f3f5;
+    --text-secondary: #a9aebb;
+    --text-muted: #6d7381;
+    --accent: #9085e9;
+    --series-rev: #3987e5;
+    --series-exp: #d95926;
+    --series-profit: #199e70;
+    --good: #0ca30c;
+    --grid: rgba(255,255,255,0.06);
+    --radius: 18px;
+    --ease: cubic-bezier(.2,.8,.2,1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
+    min-height: 100vh;
+    background-image:
+      radial-gradient(900px 500px at 85% -10%, rgba(144,133,233,0.16), transparent 60%),
+      radial-gradient(700px 420px at -5% 10%, rgba(57,135,229,0.12), transparent 60%),
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: auto, auto, 44px 44px, 44px 44px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 32px 48px; }
+
+  /* Header */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .title h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
+  .fresh { display: flex; gap: 14px; margin-top: 6px; font-size: 13px; color: var(--text-secondary); flex-wrap: wrap; }
+  .fresh span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 0 rgba(12,163,12,.6); animation: pulse 2.4s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(12,163,12,.55);} 70% { box-shadow: 0 0 0 8px rgba(12,163,12,0);} 100% { box-shadow: 0 0 0 0 rgba(12,163,12,0);} }
+  .actions { display: flex; gap: 10px; }
+  .btn { border: 1px solid var(--border); background: var(--surface); color: var(--text-primary); padding: 9px 14px; border-radius: 12px; font-size: 13px; font-weight: 550; cursor: pointer; transition: background .2s, border-color .2s; }
+  .btn:hover { background: var(--surface-hi); border-color: rgba(255,255,255,0.16); }
+  .btn { white-space: nowrap; }
+  .btn.primary { background: linear-gradient(135deg, #7c6ff0, #4f8df0); border-color: transparent; }
+
+  /* Tabs + filters */
+  nav.tabs { display: flex; gap: 4px; margin-top: 24px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; width: fit-content; max-width: 100%; overflow-x: auto; }
+  .tab { padding: 8px 16px; border-radius: 10px; font-size: 14px; color: var(--text-secondary); white-space: nowrap; cursor: pointer; transition: color .2s, background .2s; }
+  .tab.on { background: var(--surface-hi); color: var(--text-primary); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+  .badge { display: inline-block; margin-left: 6px; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: rgba(144,133,233,.22); color: #cfc9ff; }
+  .filters { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+  .chip { padding: 7px 14px; border-radius: 99px; border: 1px solid var(--border); font-size: 13px; color: var(--text-secondary); white-space: nowrap; cursor: pointer; transition: all .2s var(--ease); }
+  .chip:hover { color: var(--text-primary); border-color: rgba(255,255,255,0.18); }
+  .chip.on { color: #fff; border-color: rgba(144,133,233,.6); background: rgba(144,133,233,.14); box-shadow: 0 0 18px rgba(144,133,233,.25); }
+  .period { margin-left: auto; }
+  .period select { appearance: none; background: var(--surface); color: var(--text-primary); border: 1px solid var(--border); border-radius: 12px; padding: 8px 32px 8px 14px; font-size: 13px; font-family: inherit;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%), linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+    background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
+
+  /* Cards */
+  .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+  .card { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; backdrop-filter: blur(12px);
+    opacity: 0; transform: translateY(12px); animation: rise .7s var(--ease) forwards; }
+  .card::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+    background: linear-gradient(160deg, rgba(255,255,255,0.14), transparent 40%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  .card { min-width: 0; }
+  .filters, .chips { min-width: 0; max-width: 100%; }
+  .card h3 { font-size: 13px; font-weight: 550; color: var(--text-secondary); letter-spacing: .01em; }
+  .card .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-7 { grid-column: span 7; } .span-8 { grid-column: span 8; } .span-6 { grid-column: span 6; }
+
+  /* KPI tiles */
+  .kpi .val { font-size: 40px; font-weight: 650; margin-top: 10px; }
+  .kpi .meta { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+  .delta { color: #4cc38a; } .delta.neg { color: #ec835a; }
+  .kpi .spark { margin-top: 14px; height: 36px; width: 100%; }
+  .kpi.profit { background: linear-gradient(160deg, rgba(25,158,112,0.16), rgba(255,255,255,0.03) 55%); }
+  .kpi.profit .val { text-shadow: 0 0 28px rgba(25,158,112,.45); }
+  .margin { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px; background: rgba(25,158,112,.18); color: #7fe0b9; margin-left: 8px; vertical-align: middle; }
+
+  /* Chart */
+  .chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .legend i.line { height: 2px; border-radius: 2px; vertical-align: 3px; width: 14px; }
+  #trend { width: 100%; height: 300px; margin-top: 14px; display: block; overflow: visible; }
+  .axis text { fill: var(--text-muted); font-size: 11px; }
+  .bar { transform-box: fill-box; transform-origin: bottom; transform: scaleY(0); animation: grow .9s var(--ease) forwards; }
+  @keyframes grow { to { transform: scaleY(1); } }
+  .pline { stroke-dasharray: 1400; stroke-dashoffset: 1400; animation: draw 1.6s .5s var(--ease) forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .pdot { opacity: 0; animation: fade .4s 1.6s forwards; }
+  @keyframes fade { to { opacity: 1; } }
+  .hit { fill: transparent; cursor: pointer; }
+  .hit:hover { fill: rgba(255,255,255,0.035); }
+  .tip { position: fixed; pointer-events: none; background: rgba(16,18,24,.96); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font-size: 12px; min-width: 170px; opacity: 0; transform: translateY(4px); transition: opacity .15s, transform .15s; z-index: 10; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+  .tip.show { opacity: 1; transform: none; }
+  .tip b { display: block; font-size: 13px; margin-bottom: 6px; }
+  .tip .row { display: flex; justify-content: space-between; gap: 16px; color: var(--text-secondary); margin-top: 3px; }
+  .tip .row span:last-child { color: var(--text-primary); }
+
+  /* Bar lists */
+  .list { margin-top: 16px; display: grid; gap: 13px; }
+  .li .top { display: flex; justify-content: space-between; font-size: 13px; }
+  .li .top span:first-child { color: var(--text-primary); }
+  .li .top span:last-child { color: var(--text-secondary); }
+  .track { height: 8px; border-radius: 99px; background: rgba(255,255,255,0.05); margin-top: 7px; overflow: hidden; }
+  .fill { height: 100%; border-radius: 99px; width: 0; transition: width 1.1s var(--ease); }
+
+  /* Transactions */
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  td { padding: 11px 0; border-top: 1px solid rgba(255,255,255,0.05); }
+  td.amt { text-align: right; }
+  .muted { color: var(--text-muted); font-size: 12px; }
+  .tag { font-size: 11px; padding: 3px 9px; border-radius: 99px; background: rgba(255,255,255,0.06); color: var(--text-secondary); white-space: nowrap; }
+  .tag.review { background: rgba(250,178,25,.14); color: #f5c45e; }
+  .income { color: #4cc38a; }
+
+  /* Screenshot mode (#still): show the end state of every animation */
+  .still *, .still *::before { animation: none !important; transition: none !important; }
+  .still .card { opacity: 1; transform: none; }
+  .still .bar { transform: none; } .still .pline { stroke-dashoffset: 0; } .still .pdot { opacity: 1; }
+  .note { margin-top: 26px; font-size: 12px; color: var(--text-muted); text-align: center; }
+
+  /* Responsive: desktop first, great on phone */
+  @media (max-width: 1080px) {
+    .span-4 { grid-column: span 6; } .span-4.kpi.profit { grid-column: span 12; }
+    .span-8, .span-7, .span-5, .span-6 { grid-column: span 12; }
+  }
+  @media (max-width: 640px) {
+    .wrap { padding: 18px 16px 40px; }
+    .title h1 { font-size: 22px; }
+    .actions .btn:not(.primary) { display: none; }
+    .grid { gap: 12px; }
+    .span-4, .span-4.kpi.profit { grid-column: span 12; }
+    .kpi .val { font-size: 34px; }
+    .card { padding: 18px; }
+    .filters { flex-direction: column; align-items: stretch; }
+    .period { margin-left: 0; }
+    .period select { width: 100%; }
+    .chips { margin: 0 -16px; padding: 0 16px; }
+    #trend { height: 240px; }
+    .legend { gap: 10px; }
+    .kpi .meta { flex-direction: column; gap: 4px; }
+    header { flex-wrap: nowrap; }
+    .hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="title">
+      <h1>Profit &amp; Loss</h1>
+      <div class="fresh">
+        <span><i class="dot"></i>Stripe &amp; Kajabi live</span>
+        <span>Banks &amp; cards synced 2h ago</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn">Sync now</button>
+      <button class="btn primary">Export<span class="hide-sm"> for CPA</span></button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <div class="tab on">Overview</div>
+    <div class="tab">Revenue</div>
+    <div class="tab">Expenses</div>
+    <div class="tab">Needs review<span class="badge">3</span></div>
+    <div class="tab">Export</div>
+  </nav>
+
+  <div class="filters">
+    <div class="chips">
+      <div class="chip on">All businesses</div>
+      <div class="chip">Shirt School</div>
+      <div class="chip">Elite</div>
+      <div class="chip">Drop Studio</div>
+      <div class="chip">Brand Brain</div>
+      <div class="chip">Consulting</div>
+    </div>
+    <div class="period">
+      <select><option>October 2026 (month to date)</option><option>September 2026</option><option>2026 year to date</option><option>Custom range…</option></select>
+    </div>
+  </div>
+
+  <section class="grid">
+    <div class="card kpi span-4" style="animation-delay:.05s">
+      <h3>Revenue</h3>
+      <div class="val num" data-count="21973">$0</div>
+      <div class="meta"><span>Oct 1 – 20</span><span class="delta">▲ 18% vs same point Sep</span></div>
+    </div>
+    <div class="card kpi span-4" style="animation-delay:.12s">
+      <h3>Expenses</h3>
+      <div class="val num" data-count="8740">$0</div>
+      <div class="meta"><span>142 transactions</span><span class="delta neg">▲ 6% vs same point Sep</span></div>
+    </div>
+    <div class="card kpi profit span-4" style="animation-delay:.19s">
+      <h3>Profit <span class="margin">60% margin</span></h3>
+      <div class="val num" data-count="13233">$0</div>
+      <div class="meta"><span>Month to date</span><span>2026 so far: <b class="num">$157,323</b></span></div>
+    </div>
+
+    <div class="card span-8" style="animation-delay:.26s">
+      <div class="chart-head">
+        <div><h3>2026 by month</h3><div class="sub">October is month to date</div></div>
+        <div class="legend">
+          <span><i style="background:var(--series-rev)"></i>Revenue</span>
+          <span><i style="background:var(--series-exp)"></i>Expenses</span>
+          <span><i class="line" style="background:var(--series-profit)"></i>Profit</span>
+        </div>
+      </div>
+      <svg id="trend" role="img" aria-label="Revenue, expenses and profit by month, 2026"></svg>
+    </div>
+
+    <div class="card span-4" style="animation-delay:.33s">
+      <h3>Revenue by business</h3>
+      <div class="sub">October to date</div>
+      <div class="list" id="biz"></div>
+    </div>
+
+    <div class="card span-5" style="animation-delay:.4s">
+      <h3>Expenses by category</h3>
+      <div class="sub">October to date</div>
+      <div class="list" id="cats"></div>
+    </div>
+
+    <div class="card span-7" style="animation-delay:.47s">
+      <div class="chart-head"><div><h3>Latest activity</h3><div class="sub">Every bank, card and sale in one feed</div></div><button class="btn">View all</button></div>
+      <table>
+        <tr><td>Kajabi payout<div class="muted">MidFirst Business · Oct 20 · already counted as sales</div></td><td class="hide-sm"><span class="tag">Payout · matched</span></td><td class="hide-sm"><span class="tag">Shirt School</span></td><td class="amt num muted">$855.74</td></tr>
+        <tr><td>Stripe payout<div class="muted">MidFirst Business · Oct 20 · already counted as sales</div></td><td class="hide-sm"><span class="tag">Payout · matched</span></td><td class="hide-sm"><span class="tag">Drop Studio</span></td><td class="amt num muted">$70.96</td></tr>        <tr><td>Superwhisper<div class="muted">Capital One Spark · Oct 19</div></td><td class="hide-sm"><span class="tag">Software</span></td><td class="hide-sm"><span class="tag">Shared</span></td><td class="amt num">−$8.49</td></tr>
+        <tr><td>Buc-ee's<div class="muted">Capital One Spark · Oct 19</div></td><td class="hide-sm"><span class="tag review">Needs review</span></td><td class="hide-sm"><span class="tag">—</span></td><td class="amt num">−$41.03</td></tr>
+        <tr><td>The Brand Brain Install<div class="muted">Stripe · Oct 7</div></td><td class="hide-sm"><span class="tag">Sale</span></td><td class="hide-sm"><span class="tag">Brand Brain</span></td><td class="amt num income">+$2,900.00</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <p class="note">Design mock. Revenue figures are real (Oct 1–20); expenses and category amounts are placeholders until the bank sync is built.</p>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+  const STILL = location.hash === '#still';
+  if (STILL) document.body.classList.add('still');
+  const fmt = n => '$' + Math.round(n).toLocaleString('en-US');
+
+  // Count-up numbers
+  document.querySelectorAll('[data-count]').forEach((el, i) => {
+    if (STILL) { el.textContent = fmt(+el.dataset.count); return; }
+    const target = +el.dataset.count, start = performance.now() + 250 + i * 90, dur = 1200;
+    const step = t => { const p = Math.min(Math.max((t - start) / dur, 0), 1); const e = 1 - Math.pow(1 - p, 4);
+      el.textContent = fmt(target * e); if (p < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  });
+
+  // Monthly chart: revenue real (from revenue_entries), expenses placeholder
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'];
+  const rev = [6944,15285,25107,29755,17990,35175,26462,35077,50895,21973];
+  const exp = [4100,6800,9200,11400,8900,13100,12200,14600,18300,8740];
+  const svg = document.getElementById('trend'), NS = 'http://www.w3.org/2000/svg';
+  function draw() {
+    svg.innerHTML = '';
+    const W = svg.clientWidth, H = svg.clientHeight, padL = 44, padB = 26, padT = 8;
+    const max = 60000, y = v => padT + (H - padT - padB) * (1 - v / max);
+    const band = (W - padL) / months.length, bw = Math.min(16, band * 0.26), gap = 2;
+    const el = (tag, attrs, parent = svg) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+    const ax = el('g', { class: 'axis' });
+    for (let v = 0; v <= max; v += 20000) {
+      el('line', { x1: padL, x2: W, y1: y(v), y2: y(v), stroke: 'var(--grid)' }, ax);
+      el('text', { x: padL - 10, y: y(v) + 4, 'text-anchor': 'end' }, ax).textContent = v ? '$' + v / 1000 + 'k' : '$0';
+    }
+    const pts = [];
+    months.forEach((m, i) => {
+      const cx = padL + band * i + band / 2;
+      el('text', { x: cx, y: H - 6, 'text-anchor': 'middle' }, ax).textContent = m;
+      const bar = (x, v, color, d) => {
+        const top = y(v), h = y(0) - top, r = Math.min(4, h);
+        el('path', { class: 'bar', fill: color, style: `animation-delay:${d}s`,
+          d: `M${x},${y(0)} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${y(0)} Z` });
+      };
+      bar(cx - bw - gap / 2, rev[i], 'var(--series-rev)', .3 + i * .04);
+      bar(cx + gap / 2, exp[i], 'var(--series-exp)', .34 + i * .04);
+      pts.push([cx, y(rev[i] - exp[i])]);
+    });
+    el('path', { class: 'pline', fill: 'none', stroke: 'var(--series-profit)', 'stroke-width': 2, 'stroke-linejoin': 'round',
+      d: pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ',' + p[1]).join(' ') });
+    pts.forEach(p => el('circle', { class: 'pdot', cx: p[0], cy: p[1], r: 4, fill: 'var(--series-profit)', stroke: '#0d1015', 'stroke-width': 2 }));
+    // Hover targets
+    const tip = document.getElementById('tip');
+    months.forEach((m, i) => {
+      const r = el('rect', { class: 'hit', x: padL + band * i, y: padT, width: band, height: H - padT - padB, rx: 8 });
+      r.addEventListener('mousemove', e => {
+        tip.innerHTML = `<b>${m} 2026${i === 9 ? ' (to date)' : ''}</b>
+          <div class="row"><span>Revenue</span><span class="num">${fmt(rev[i])}</span></div>
+          <div class="row"><span>Expenses</span><span class="num">${fmt(exp[i])}</span></div>
+          <div class="row"><span>Profit</span><span class="num">${fmt(rev[i] - exp[i])}</span></div>`;
+        tip.style.left = Math.min(e.clientX + 14, innerWidth - 200) + 'px'; tip.style.top = (e.clientY - 20) + 'px'; tip.classList.add('show');
+      });
+      r.addEventListener('mouseleave', () => tip.classList.remove('show'));
+    });
+  }
+  draw(); addEventListener('resize', draw);
+
+  // Bar lists
+  function list(id, rows, color) {
+    const box = document.getElementById(id), max = Math.max(...rows.map(r => r[1]));
+    box.innerHTML = rows.map(r => `<div class="li"><div class="top"><span>${r[0]}</span><span class="num">${fmt(r[1])}</span></div>
+      <div class="track"><div class="fill" data-w="${(r[1] / max * 100).toFixed(1)}" style="background:${color}"></div></div></div>`).join('');
+    setTimeout(() => box.querySelectorAll('.fill').forEach(f => f.style.width = f.dataset.w + '%'), STILL ? 0 : 500);
+  }
+  list('biz', [['Brand Brain', 18100], ['Shirt School', 1970], ['Drop Studio', 1210], ['Elite', 693], ['Consulting', 0]], 'linear-gradient(90deg, #256abf, #3987e5)');
+  list('cats', [['Advertising', 4229], ['Software & subscriptions', 1860], ['Contractors', 1200], ['Payment processing', 690], ['Travel', 412], ['Meals', 189], ['Bank fees & interest', 160]], 'linear-gradient(90deg, #b8471b, #d95926)');
+</script>
+</body>
+</html>

@@ -86,7 +86,7 @@ const modules = [
   { id: 'content-agent', label: 'Content Agent', icon: IconEdit, comingSoon: false },
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
-  { id: 'sales-analytics', label: 'Sales Analytics', icon: IconChartBar, comingSoon: false },
+  { id: 'sales-analytics', label: 'Profit & Loss', icon: IconChartBar, comingSoon: false },
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
   { id: 'social-proof', label: 'Social Proof', icon: IconMegaphone, comingSoon: false },
   { id: 'utm-tracker', label: 'Lead Tracking', icon: IconLinkChain, comingSoon: false },
