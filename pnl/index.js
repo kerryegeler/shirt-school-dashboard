@@ -115,12 +115,14 @@ export async function syncBank({ days } = {}) {
       const account = { ...a }
       const existing = new Map()
       for (let i = 0; i < txs.length; i += 200) {
-        const { data } = await sb.from('bank_transactions').select('id,status').in('id', txs.slice(i, i + 200).map((t) => t.id))
+        const { data } = await sb.from('bank_transactions').select('id,status,kind,category,business,rule_id').in('id', txs.slice(i, i + 200).map((t) => t.id))
         for (const r of data || []) existing.set(r.id, r)
       }
       const rows = txs.map((t) => {
         const prev = existing.get(t.id)
-        if (prev && (prev.status === 'confirmed' || prev.status === 'suggested')) return t // keep Kerry's/Eddie's sorting
+        if (prev && (prev.status === 'confirmed' || prev.status === 'suggested')) { // keep Kerry's/Eddie's sorting
+          return { ...t, kind: prev.kind, category: prev.category, business: prev.business, rule_id: prev.rule_id, status: prev.status }
+        }
         const hit = R.applyRules(t, account, rules)
         return { ...t, ...(hit || { kind: null, category: null, business: null, rule_id: null, status: 'review' }) }
       })
