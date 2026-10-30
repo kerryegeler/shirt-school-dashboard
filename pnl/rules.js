@@ -54,8 +54,9 @@ export function revenueBusiness(r) {
 
 // ─── Bank/card lines ─────────────────────────────────────────────────────────
 
+// MidFirst business checking shows up as "Kevara Media LLC (5866)" since it was reconnected (2026-10-30)
 export function accountKind(account) {
-  return /checking|savings/i.test(account?.name || '') ? 'bank' : 'card'
+  return /checking|savings|kevara media/i.test(account?.name || '') ? 'bank' : 'card'
 }
 
 // Starting rules, from the first 90 days of real data. Lower priority runs first.

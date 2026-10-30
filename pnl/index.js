@@ -60,7 +60,7 @@ async function simplefin(startUnix, endUnix) {
 
 // Business accounts Kerry named on 2026-10-20. New accounts default to personal
 // (never stored) until flagged as business in bank_accounts.
-const BUSINESS_ACCOUNT = /business checking|business credit card|spark|business platinum|business gold|^k\. egeler/i
+const BUSINESS_ACCOUNT = /kevara|business checking|business credit card|spark|business platinum|business gold|^k\. egeler/i
 
 let syncRunning = false
 
@@ -116,7 +116,7 @@ export async function syncBank({ days } = {}) {
         const { data } = await sb.from('bank_transactions').select('id,status,kind,category,business,rule_id').in('id', txs.slice(i, i + 200).map((t) => t.id))
         for (const r of data || []) existing.set(r.id, r)
       }
-      const rows = txs.map((t) => {
+      let rows = txs.map((t) => {
         const prev = existing.get(t.id)
         if (prev && (prev.status === 'confirmed' || prev.status === 'suggested')) { // keep Kerry's/Eddie's sorting
           return { ...t, kind: prev.kind, category: prev.category, business: prev.business, rule_id: prev.rule_id, status: prev.status }
@@ -124,6 +124,22 @@ export async function syncBank({ days } = {}) {
         const hit = R.applyRules(t, account, rules)
         return { ...t, ...(hit || { kind: null, category: null, business: null, rule_id: null, status: 'review' }) }
       })
+      // When a bank is reconnected, SimpleFIN sends old lines again under new ids (sometimes a day off).
+      // Skip a new line that matches one we already have (same amount, within 3 days) that this sync didn't return.
+      const fresh = rows.filter((r) => !existing.has(r.id) && !r.pending)
+      if (fresh.length) {
+        const returned = new Set(txs.map((t) => t.id))
+        const earliest = addDays(fresh.map((r) => r.posted_on).sort()[0], -3)
+        const others = (await selectAll('bank_transactions', (q) => q.select('id,posted_on,amount_cents').eq('account_id', a.id).eq('pending', false).gte('posted_on', earliest)))
+          .filter((o) => !returned.has(o.id))
+        const skip = new Set()
+        for (const r of fresh.sort((x, y) => x.posted_on.localeCompare(y.posted_on))) {
+          let best = -1
+          others.forEach((o, i) => { if (o.amount_cents === r.amount_cents && dayDiff(o.posted_on, r.posted_on) <= 3 && (best < 0 || dayDiff(o.posted_on, r.posted_on) < dayDiff(others[best].posted_on, r.posted_on))) best = i })
+          if (best >= 0) { others.splice(best, 1); skip.add(r.id) }
+        }
+        rows = rows.filter((r) => !skip.has(r.id))
+      }
       for (const t of rows) existing.has(t.id) ? updated++ : inserted++
       for (let i = 0; i < rows.length; i += 500) {
         const { error } = await sb.from('bank_transactions').upsert(rows.slice(i, i + 500).map((r) => ({ ...r, updated_at: new Date().toISOString() })))
