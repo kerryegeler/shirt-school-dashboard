@@ -16,19 +16,13 @@ export const KINDS = ['expense', 'revenue', 'refund', 'payout', 'transfer', 'own
 // ─── Revenue: business + clean product name ──────────────────────────────────
 
 export function cleanProduct(r) {
+  if (r.source === 'stripe') return stripeProduct(r)
   let p = (r.product_name || '').trim()
   if (p.startsWith('{')) { try { p = JSON.parse(p).title || p } catch { /* keep */ } }
   p = p.replace(/^"+|"+$/g, '').trim()
   if (p) return p
   const d = (r.description || '').trim()
   switch (r.source) {
-    case 'stripe':
-      if (/brand brain/i.test(d)) return 'Brand Brain Install'
-      if (/^subscription/i.test(d)) return 'Drop Studio subscription'
-      if (/^stripe (charge|payment)$/i.test(d)) return 'Drop Studio one-time purchase'
-      if (/serve.?first/i.test(d)) return 'Serve-First'
-      if (/^payment for invoice$|^\w+ \d+-\d+$/i.test(d)) return 'Consulting retainer / invoice'
-      return d || 'Stripe payment'
     case 'impact': return 'Impact affiliate'
     case 'adsense': return 'YouTube / AdSense'
     case 'partnerstack': return 'PartnerStack affiliate'
@@ -39,14 +33,26 @@ export function cleanProduct(r) {
   }
 }
 
+// Stripe: payment-plan charges say only "Subscription update", so the product name
+// (looked up from the invoice) decides; Drop Studio plans keep one label.
+function stripeProduct(r) {
+  const d = (r.description || '').trim()
+  const text = `${r.product_name || ''} ${d}`
+  if (/brand brain/i.test(text)) return 'Brand Brain Install'
+  if (/serve.?first/i.test(text)) return 'Serve-First'
+  if (/^subscription/i.test(d)) return 'Drop Studio subscription'
+  if (/^stripe (charge|payment)$/i.test(d)) return 'Drop Studio one-time purchase'
+  if (/^payment for invoice$|^\w+ \d+-\d+$/i.test(d)) return 'Consulting retainer / invoice'
+  return d || 'Stripe payment'
+}
+
 export function revenueBusiness(r) {
   if (r.business) return r.business // manual override
   const p = cleanProduct(r)
   if (r.source === 'kajabi') return /elite/i.test(p) ? 'Elite' : 'Shirt School'
   if (r.source === 'stripe') {
-    const d = r.description || ''
-    if (/brand brain/i.test(d)) return 'Brand Brain'
-    if (/^subscription|^stripe (charge|payment)$/i.test(d)) return 'Drop Studio'
+    if (p === 'Brand Brain Install') return 'Brand Brain'
+    if (p.startsWith('Drop Studio')) return 'Drop Studio'
     return 'Consulting' // invoices, Serve-First Accelerator, retainers
   }
   return 'Shirt School' // affiliates, AdSense, other income

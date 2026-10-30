@@ -6900,6 +6900,7 @@ async function backfillStripeRevenue(daysBack = 90) {
       raw_data: c,
     }
     if (existingMap.has(c.id)) {
+      delete row.product_name // keep the product the webhook looked up
       toUpdate.push({ id: existingMap.get(c.id), ...row })
     } else {
       toInsert.push(row)
@@ -6931,6 +6932,25 @@ async function backfillStripeRevenue(daysBack = 90) {
 
   console.log(`[Backfill Stripe] ✓ Scanned ${scanned}, inserted ${inserted}, updated ${updated}, errors ${errors.length}`)
   return { inserted, updated, scanned, errors: errors.slice(0, 3) }
+}
+
+// Stripe labels payment-plan charges "Subscription creation/update". The invoice's product says what
+// was bought (Drop Studio plan, Brand Brain Install payment plan, Serve First Accelerator…). Used by the P&L.
+async function stripeChargeProduct(charge) {
+  if (!process.env.STRIPE_API_KEY || !charge.payment_intent || !/^subscription/i.test(charge.description || '')) return null
+  try {
+    const get = (u) => fetch(`https://api.stripe.com/v1/${u}`, { headers: { Authorization: `Bearer ${process.env.STRIPE_API_KEY}` } }).then((r) => r.json())
+    const pays = await get(`invoice_payments?payment[type]=payment_intent&payment[payment_intent]=${charge.payment_intent}`)
+    const invoice = pays.data?.[0]?.invoice
+    if (!invoice) return null
+    const lines = (await get(`invoices/${invoice}/lines`)).data || []
+    const line = lines.find((l) => l.parent?.type === 'subscription_item_details') || lines[0]
+    const productId = line?.pricing?.price_details?.product
+    return productId ? (await get(`products/${productId}`)).name || null : null
+  } catch (e) {
+    console.warn('[Stripe] product lookup failed:', e.message)
+    return null
+  }
 }
 
 // Stripe webhook (signature-less for now; enable signing later if you set STRIPE_WEBHOOK_SECRET)
@@ -6965,6 +6985,7 @@ app.post('/api/stripe/webhook', async (req, res) => {
     received_at: chicagoDate((charge.created || event.created || Date.now() / 1000) * 1000),
     description: charge.description || charge.statement_descriptor || 'Stripe charge',
     customer_email: charge.receipt_email || charge.billing_details?.email || null,
+    product_name: await stripeChargeProduct(charge),
     raw_data: charge,
   })
   console.log(`[Stripe Webhook] ✓ Recorded charge.succeeded ${externalId} (${amount} cents)`)
