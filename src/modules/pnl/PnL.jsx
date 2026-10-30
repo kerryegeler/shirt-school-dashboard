@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import SalesAnalytics from '../sales-analytics/SalesAnalytics.jsx'
 import './pnl.css'
 
 // Profit & Loss page. Server side: pnl/index.js. Plan: docs/pnl-plan.md
@@ -194,33 +193,38 @@ function TrendChart({ monthly }) {
 }
 
 // Sort one bank/card line: what it is, category, business, and whether to remember it.
-function SortControls({ tx, options, onSaved, forceRemember = false }) {
-  const [kind, setKind] = useState(tx.kind || (tx.amount_cents < 0 ? 'expense' : 'revenue'))
-  const [category, setCategory] = useState(tx.category || '')
-  const [business, setBusiness] = useState(tx.business || (tx.amount_cents < 0 ? 'Shared' : 'Shirt School'))
+const defaultSort = (tx) => ({ kind: tx.kind || (tx.amount_cents < 0 ? 'expense' : 'revenue'), category: tx.category || '', business: tx.business || (tx.amount_cents < 0 ? 'Shared' : 'Shirt School') })
+const sortBody = (v) => ({ kind: v.kind, category: v.kind === 'expense' || v.kind === 'revenue' ? v.category || null : null, business: ['expense', 'revenue', 'refund'].includes(v.kind) ? v.business : null })
+const sortReady = (v) => !(v.kind === 'expense' && !v.category)
+
+function SortControls({ tx, options, onSaved, forceRemember = false, value, onChange }) {
+  const [local, setLocal] = useState(() => defaultSort(tx))
+  const v = value || local
+  const set = (patch) => { const n = { ...v, ...patch }; onChange ? onChange(n) : setLocal(n) }
+  const { kind, category, business } = v
   const [remember, setRemember] = useState(true)
   const [saving, setSaving] = useState(false)
   const save = async () => {
     setSaving(true)
     try {
-      const r = await api(`/api/pnl/transactions/${encodeURIComponent(tx.id)}`, { method: 'PATCH', body: JSON.stringify({ kind, category: kind === 'expense' || kind === 'revenue' ? category || null : null, business: ['expense', 'revenue', 'refund'].includes(kind) ? business : null, makeRule: remember }) })
+      const r = await api(`/api/pnl/transactions/${encodeURIComponent(tx.id)}`, { method: 'PATCH', body: JSON.stringify({ ...sortBody(v), makeRule: remember }) })
       onSaved(r)
     } catch (e) { alert(e.message) } finally { setSaving(false) }
   }
   const cats = kind === 'revenue' ? ['Affiliate', 'YouTube / AdSense', 'Sponsorship', 'Other income'] : options.categories
   return (
     <div className="pnl-review-ctrls">
-      <select className="compact" value={kind} onChange={(e) => setKind(e.target.value)}>
+      <select className="compact" value={kind} onChange={(e) => set({ kind: e.target.value })}>
         {Object.entries(KIND_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
       </select>
       {(kind === 'expense' || kind === 'revenue') && (
-        <select className="compact" value={category} onChange={(e) => setCategory(e.target.value)}>
+        <select className="compact" value={category} onChange={(e) => set({ category: e.target.value })}>
           <option value="">Category…</option>
           {cats.map((c) => <option key={c}>{c}</option>)}
         </select>
       )}
       {['expense', 'revenue', 'refund'].includes(kind) && (
-        <select className="compact" value={business} onChange={(e) => setBusiness(e.target.value)}>
+        <select className="compact" value={business} onChange={(e) => set({ business: e.target.value })}>
           {[...BUSINESSES, 'Shared'].map((b) => <option key={b}>{b}</option>)}
         </select>
       )}
@@ -229,7 +233,7 @@ function SortControls({ tx, options, onSaved, forceRemember = false }) {
           <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Remember
         </label>
       )}
-      <button className="pnl-btn small primary" disabled={saving || (kind === 'expense' && !category)} onClick={save}>{saving ? 'Saving…' : 'Save'}</button>
+      <button className="pnl-btn small primary" disabled={saving || !sortReady(v)} onClick={save}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
   )
 }
@@ -324,7 +328,7 @@ function Overview({ s, range, business, animKey, onPickBusiness, onPickCategory 
             {activity.map((l) => (
               <tr key={l.ref}>
                 <td>{l.label}<div className="pnl-muted">{SOURCE_NAMES[l.account] || l.account} · {shortDate(l.date)}{l.pending ? ' · pending' : ''}</div></td>
-                <td className="hide-sm"><span className={`pnl-tag${l.group === 'Uncategorized' ? ' review' : ''}`}>{l.group === l.label ? 'Sale' : l.group}</span></td>
+                <td className="hide-sm"><span className={`pnl-tag${['Uncategorized', 'Unsorted deposits'].includes(l.group) ? ' review' : ''}`}>{l.group === l.label ? 'Sale' : l.group}</span></td>
                 <td className="hide-sm"><span className="pnl-tag">{l.business}</span></td>
                 <td className={`amt num${l.type === 'income' && l.cents > 0 ? ' pnl-income' : ''}`}>{l.type === 'income' ? (l.cents >= 0 ? '+' : '') + money(l.cents, true) : money(-l.cents, true)}</td>
               </tr>
@@ -359,10 +363,6 @@ function RevenueTab({ s, onPickBusiness }) {
           ) : <div className="pnl-empty">No revenue in this period.</div>}
         </div>
       </section>
-      <div className="pnl-legacy">
-        <h2>Sales log, manual entries and Slack sale alerts</h2>
-        <SalesAnalytics />
-      </div>
     </>
   )
 }
@@ -401,19 +401,20 @@ function ExpensesTab({ s, range, options, category, setCategory, onChanged }) {
 }
 
 // One row per merchant: saving sorts all its charges and remembers the merchant.
-function ReviewGroups({ txs, options, onChanged }) {
-  const groups = useMemo(() => {
-    const m = new Map()
-    for (const t of txs) {
-      // Same merchant even when the bank adds a booking code ("AIRBNB * HMJ8…"); matches the server's rule pattern
-      const merchant = (t.payee || t.description || '').toLowerCase().replace(/[#*].*$/, '').replace(/\s+\d[\d\s-]*$/, '').trim()
-      const key = `${merchant}|${t.amount_cents < 0 ? 'out' : 'in'}|${t.bank_accounts?.institution}`
-      const g = m.get(key) || { key, first: t, items: [], cents: 0 }
-      g.items.push(t); g.cents += t.amount_cents
-      m.set(key, g)
-    }
-    return [...m.values()].sort((a, b) => Math.abs(b.cents) - Math.abs(a.cents))
-  }, [txs])
+function groupByMerchant(txs) {
+  const m = new Map()
+  for (const t of txs) {
+    // Same merchant even when the bank adds a booking code ("AIRBNB * HMJ8…"); matches the server's rule pattern
+    const merchant = (t.payee || t.description || '').toLowerCase().replace(/[#*].*$/, '').replace(/\s+\d[\d\s-]*$/, '').trim()
+    const key = `${merchant}|${t.amount_cents < 0 ? 'out' : 'in'}|${t.bank_accounts?.institution}`
+    const g = m.get(key) || { key, first: t, items: [], cents: 0 }
+    g.items.push(t); g.cents += t.amount_cents
+    m.set(key, g)
+  }
+  return [...m.values()].sort((a, b) => Math.abs(b.cents) - Math.abs(a.cents))
+}
+
+function ReviewGroups({ groups, picks, setPick, options, onChanged }) {
   return (
     <table>
       <thead><tr><th>Merchant</th><th className="amt">Total</th></tr></thead>
@@ -423,7 +424,7 @@ function ReviewGroups({ txs, options, onChanged }) {
             <td>
               {g.first.payee || g.first.description} {statusTag(g.first)}
               <div className="pnl-muted">{g.first.bank_accounts?.institution} · {g.items.length > 1 ? `${g.items.length} charges, latest ${shortDate(g.first.posted_on)}` : shortDate(g.first.posted_on)} · {g.first.description}</div>
-              <div style={{ marginTop: 8 }}><SortControls tx={g.first} options={options} onSaved={onChanged} forceRemember /></div>
+              <div style={{ marginTop: 8 }}><SortControls tx={g.first} options={options} onSaved={onChanged} forceRemember value={picks[g.key] || defaultSort(g.first)} onChange={(v) => setPick(g.key, v)} /></div>
             </td>
             <td className={`amt num${g.cents > 0 ? ' pnl-income' : ''}`}>{g.cents > 0 ? '+' : ''}{money(g.cents, true)}</td>
           </tr>
@@ -435,18 +436,31 @@ function ReviewGroups({ txs, options, onChanged }) {
 
 function ReviewTab({ options, onChanged }) {
   const [txs, setTxs] = useState(null)
-  const load = useCallback(() => { api('/api/pnl/transactions?status=review,suggested&limit=1000').then((d) => setTxs(d.transactions)).catch(() => setTxs([])) }, [])
+  const [picks, setPicks] = useState({}) // merchant group → what Kerry picked (kept until saved)
+  const [saving, setSaving] = useState(false)
+  const load = useCallback(() => api('/api/pnl/transactions?status=review,suggested&limit=1000').then((d) => setTxs(d.transactions)).catch(() => setTxs([])), [])
   useEffect(() => { load() }, [load])
-  const suggested = (txs || []).filter((t) => t.status === 'suggested').length
-  const accept = async () => { await api('/api/pnl/review/accept', { method: 'POST', body: JSON.stringify({}) }); load(); onChanged() }
+  const groups = useMemo(() => groupByMerchant(txs || []), [txs])
+  const setPick = (key, v) => setPicks((p) => ({ ...p, [key]: v }))
+  // Ready = Kerry picked something (or it's Eddie's suggestion) and it has what it needs
+  const ready = groups.filter((g) => (picks[g.key] || g.first.status === 'suggested') && sortReady(picks[g.key] || defaultSort(g.first)))
+  const saveAll = async () => {
+    setSaving(true)
+    try {
+      const items = ready.map((g) => ({ id: g.first.id, ...sortBody(picks[g.key] || defaultSort(g.first)) }))
+      await api('/api/pnl/review/save', { method: 'POST', body: JSON.stringify({ items }) })
+      setPicks({})
+      await load(); onChanged()
+    } catch (e) { alert(e.message) } finally { setSaving(false) }
+  }
   return (
     <section className="pnl-grid">
       <div className="pnl-card s12">
         <div className="pnl-head">
-          <div><h3>Needs review</h3><div className="pnl-sub">Merchants the rules don't know yet, or Eddie's guesses. Saving one sorts every charge from that merchant, now and later.</div></div>
-          {suggested > 0 && <button className="pnl-btn primary" onClick={accept}>Accept all {suggested} suggestions</button>}
+          <div><h3>Needs review</h3><div className="pnl-sub">Pick a category on each line, then Save all. Each merchant is remembered, so its future charges sort themselves.</div></div>
+          {groups.length > 0 && <button className="pnl-btn primary" disabled={saving || !ready.length} onClick={saveAll}>{saving ? 'Saving…' : `Save all${ready.length ? ` (${ready.length})` : ''}`}</button>}
         </div>
-        {txs == null ? <div className="pnl-skel" style={{ marginTop: 16 }} /> : txs.length ? <ReviewGroups txs={txs} options={options} onChanged={() => { load(); onChanged() }} /> : <div className="pnl-empty">All caught up. Everything is sorted.</div>}
+        {txs == null ? <div className="pnl-skel" style={{ marginTop: 16 }} /> : groups.length ? <ReviewGroups groups={groups} picks={picks} setPick={setPick} options={options} onChanged={() => { load(); onChanged() }} /> : <div className="pnl-empty">All caught up. Everything is sorted.</div>}
       </div>
     </section>
   )
@@ -570,6 +584,7 @@ export default function PnL() {
         )}
 
         {error && <div className="pnl-error">{error}</div>}
+        {s?.freshness?.messages && <div className="pnl-error">Bank connection problem: {s.freshness.messages}. New deposits and charges from that bank are missing until it's reconnected in SimpleFIN Bridge.</div>}
         {!s && !error && <section className="pnl-grid"><div className="pnl-skel s4" /><div className="pnl-skel s4" /><div className="pnl-skel s4" /><div className="pnl-skel s8" style={{ height: 340 }} /><div className="pnl-skel s4" style={{ height: 340 }} /></section>}
 
         {s && tab === 'overview' && <Overview s={s} range={range} business={business} animKey={animKey} onPickBusiness={setBusiness} onPickCategory={(c) => { setCategory(c); setTab('expenses') }} />}

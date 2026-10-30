@@ -153,8 +153,6 @@
 .pnl-review-row td { padding-top: 12px; padding-bottom: 12px; }
 .pnl-review-ctrls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .pnl-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--p-text-2); white-space: nowrap; }
-.pnl-legacy { margin-top: 28px; }
-.pnl-legacy > h2 { font-size: 15px; font-weight: 600; color: var(--p-text-2); margin: 0 0 8px; }
 
 /* Export */
 .pnl-export-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 16px; }

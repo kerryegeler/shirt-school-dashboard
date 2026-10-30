@@ -71,11 +71,9 @@ export async function syncBank({ days } = {}) {
   try {
     const now = Math.floor(Date.now() / 1000)
     const known = Object.fromEntries((await selectAll('bank_accounts', (q) => q.select('*'))).map((a) => [a.id, a]))
-    let lookback = days
-    if (!lookback) {
-      const last = Object.values(known).filter((a) => a.is_business && a.last_synced_at).map((a) => new Date(a.last_synced_at).getTime())
-      lookback = last.length ? Math.min(45, Math.ceil((Date.now() - Math.min(...last)) / 86400000) + 7) : 90
-    }
+    // Always re-read the last 45 days (one SimpleFIN request). Going by the last sync time missed
+    // deposits when a bank connection broke: the account still "synced", just with no new lines.
+    const lookback = days || 45
     // SimpleFIN recommends <= 45 days per request
     const accounts = new Map()
     const messages = new Set()
@@ -139,7 +137,7 @@ export async function syncBank({ days } = {}) {
       if (gone.length) await sb.from('bank_transactions').delete().in('id', gone)
     }
     await setState('bank_last_sync', new Date().toISOString())
-    if (messages.size) await setState('bank_messages', [...messages].join(' | '))
+    await setState('bank_messages', [...messages].join(' | '))
     return { inserted, updated, lookback, messages: [...messages] }
   } finally {
     syncRunning = false
@@ -257,11 +255,13 @@ async function buildLines(from, to) {
   for (const t of bank) {
     if (!acct[t.account_id]?.is_business) continue
     const base = { date: t.posted_on, account: acctLabel(t.account_id), label: t.payee || t.description, ref: `bank:${t.id}`, pending: t.pending, status: t.status }
-    if (t.kind === 'revenue') {
+    // Unsorted deposits into business checking count as income until sorted (unsorted charges already count as expenses)
+    const unsortedDeposit = !t.kind && t.amount_cents > 0 && R.accountKind(acct[t.account_id]) === 'bank'
+    if (t.kind === 'revenue' || unsortedDeposit) {
       // Skip deposits Kerry already entered by hand (same amount within $1, within 10 days)
       const m = manualOther.find((r) => !r.used && Math.abs(r.amount_cents - t.amount_cents) <= 100 && dayDiff(r.received_at, t.posted_on) <= 10)
       if (m) { m.used = true; continue }
-      lines.push({ ...base, type: 'income', business: t.business || 'Shirt School', group: t.category || 'Other income', cents: t.amount_cents })
+      lines.push({ ...base, type: 'income', business: t.business || 'Shirt School', group: unsortedDeposit ? 'Unsorted deposits' : (t.category || 'Other income'), cents: t.amount_cents })
     } else if (t.kind === 'refund') {
       const amt = -t.amount_cents
       const sale = revenue.find((r) => r.source === 'kajabi' && Math.abs(r.amount_cents - amt) <= 1 && r.received_at <= t.posted_on && dayDiff(r.received_at, t.posted_on) <= 120)
@@ -412,25 +412,35 @@ export function registerPnl(app) {
     return { transaction: t, resorted }
   }))
 
-  // Confirm Eddie's suggestions in bulk
-  app.post('/api/pnl/review/accept', wrap(async (req) => {
-    const ids = req.body?.ids
-    let q = sb.from('bank_transactions').update({ status: 'confirmed', updated_at: new Date().toISOString() }).eq('status', 'suggested')
-    if (Array.isArray(ids) && ids.length) q = q.in('id', ids)
-    const { data, error } = await q.select('payee,description,amount_cents,kind,category,business,bank_accounts(name)')
-    if (error) throw new Error(error.message)
-    // Remember each merchant so its future charges sort themselves
-    const seen = new Set()
+  // Save many review lines at once (Needs review → Save all). Each one also becomes a rule,
+  // then the rules re-sort everything once instead of once per line.
+  app.post('/api/pnl/review/save', wrap(async (req) => {
+    const items = Array.isArray(req.body?.items) ? req.body.items : []
+    if (!items.length) return { saved: 0, rules: 0, resorted: 0 }
+    const now = new Date().toISOString()
     const rules = []
-    for (const t of data) {
+    const seen = new Set()
+    let saved = 0
+    for (const it of items) {
+      if (!R.KINDS.includes(it.kind)) continue
+      const { data: t, error } = await sb.from('bank_transactions').update({ kind: it.kind, category: it.category ?? null, business: it.business ?? null, status: 'confirmed', updated_at: now })
+        .eq('id', it.id).select('payee,description,amount_cents,bank_accounts(name)').maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!t) continue
+      saved++
       const pattern = merchantPattern(t)
-      const key = `${pattern}|${R.accountKind(t.bank_accounts)}`
+      const direction = t.amount_cents < 0 ? 'out' : 'in'
+      const key = `${pattern}|${R.accountKind(t.bank_accounts)}|${direction}`
       if (!pattern || seen.has(key)) continue
       seen.add(key)
-      rules.push({ pattern, account_kind: R.accountKind(t.bank_accounts), direction: null, kind: t.kind, category: t.category, business: t.business, priority: 70, created_by: req.dashboardUser?.email || 'kerry' })
+      rules.push({ pattern, account_kind: R.accountKind(t.bank_accounts), direction, kind: it.kind, category: it.category ?? null, business: it.business ?? null, priority: 70, created_by: req.dashboardUser?.email || 'kerry' })
     }
-    if (rules.length) await sb.from('category_rules').insert(rules)
-    return { confirmed: data.length, rules: rules.length }
+    if (rules.length) {
+      const { error } = await sb.from('category_rules').insert(rules)
+      if (error) throw new Error(`rules: ${error.message}`)
+    }
+    const resorted = rules.length ? await reapplyRules() : 0
+    return { saved, rules: rules.length, resorted }
   }))
 
   // Change a sale's business (e.g. a Stripe payment that's really Consulting)
