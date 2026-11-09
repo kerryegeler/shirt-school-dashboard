@@ -6,6 +6,7 @@ import ContentAgent from './modules/content-agent/ContentAgent.jsx'
 import ContentBoard from './modules/content-board/ContentBoard.jsx'
 import PaymentRecovery from './modules/payment-recovery/PaymentRecovery.jsx'
 import PnL from './modules/pnl/PnL.jsx'
+import YearlyPlanning from './modules/planning/YearlyPlanning.jsx'
 import Reminders from './modules/reminders/Reminders.jsx'
 import SocialProof from './modules/social-proof/SocialProof.jsx'
 import UtmTracker from './modules/utm-tracker/UtmTracker.jsx'
@@ -120,6 +121,7 @@ export default function App() {
           {activeModule === 'content-board' && <ContentBoard />}
           {activeModule === 'payment-recovery' && <PaymentRecovery />}
           {activeModule === 'sales-analytics' && <PnL />}
+          {activeModule === 'yearly-planning' && <YearlyPlanning />}
           {activeModule === 'reminders' && <Reminders />}
           {activeModule === 'social-proof' && <SocialProof />}
           {activeModule === 'utm-tracker' && <UtmTracker />}

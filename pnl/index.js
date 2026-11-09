@@ -467,6 +467,44 @@ export function registerPnl(app) {
     return { ok: true }
   }))
 
+  // Yearly Planning (src/modules/planning): one saved plan per year, kept in pnl_state
+  const planYear = (req) => {
+    const y = Number(req.params.year)
+    if (!Number.isInteger(y) || y < 2020 || y > 2099) throw new Error('Bad year')
+    return y
+  }
+
+  app.get('/api/pnl/plan/:year', wrap(async (req) => {
+    const year = planYear(req)
+    const raw = await getState(`yearly_plan_${year}`)
+    const accounts = await selectAll('bank_accounts', (q) => q.select('name,balance_cents,balance_at').eq('is_business', true))
+    const from = `${year}-01-01`
+    const end = `${year}-12-31`
+    const now = today()
+    const actuals = []
+    if (from <= now) {
+      const to = now < end ? now : end
+      const lines = await buildLines(from, to)
+      for (let m = 1; m <= +to.slice(5, 7); m++) {
+        const mFrom = `${year}-${String(m).padStart(2, '0')}-01`
+        const mTo = addDays(addMonths(mFrom, 1), -1)
+        const t = totals(lines, mFrom, mTo)
+        const ads = lines.filter((l) => l.type === 'expense' && l.group === 'Advertising' && l.date >= mFrom && l.date <= mTo).reduce((s, l) => s + l.cents, 0)
+        actuals.push({ month: m - 1, revenue: t.revenue, profit: t.profit, adSpend: ads, partial: mFrom.slice(0, 7) === now.slice(0, 7) })
+      }
+    }
+    return { plan: raw ? JSON.parse(raw) : null, balances: accounts.map((a) => ({ name: a.name, cents: a.balance_cents, at: a.balance_at })), actuals }
+  }))
+
+  app.put('/api/pnl/plan/:year', wrap(async (req) => {
+    const year = planYear(req)
+    const plan = req.body
+    if (!plan || !Array.isArray(plan.events) || typeof plan.assumptions !== 'object' || plan.year !== year) throw new Error('That plan could not be saved (bad format).')
+    const { error } = await sb.from('pnl_state').upsert({ key: `yearly_plan_${year}`, value: JSON.stringify(plan), updated_at: new Date().toISOString() })
+    if (error) throw new Error(error.message)
+    return { ok: true }
+  }))
+
   app.post('/api/pnl/sync', wrap(async () => ({ bank: await syncBank(), stripe: await syncStripeAdjustments() })))
 
   // CSV for the CPA. type=lines (every income/expense line) or type=summary (month × category)

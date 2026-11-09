@@ -67,6 +67,13 @@ const IconCalendar = () => (
   </svg>
 )
 
+const IconMap = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1.5 3.5l4-1.5 5 2 4-1.5v10l-4 1.5-5-2-4 1.5v-10z" />
+    <path d="M5.5 2v10M10.5 4v10" />
+  </svg>
+)
+
 const IconLinkChain = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M6.5 9.5a3 3 0 004.24 0l2.12-2.12a3 3 0 00-4.24-4.24L7.56 4.2" />
@@ -87,6 +94,7 @@ const modules = [
   { id: 'content-board', label: 'Content Board', icon: IconBoard, comingSoon: false },
   { id: 'payment-recovery', label: 'Payment Recovery', icon: IconCard, comingSoon: false },
   { id: 'sales-analytics', label: 'Profit & Loss', icon: IconChartBar, comingSoon: false },
+  { id: 'yearly-planning', label: 'Yearly Planning', icon: IconMap, comingSoon: false },
   { id: 'reminders', label: 'Reminders', icon: IconClock, comingSoon: false },
   { id: 'social-proof', label: 'Social Proof', icon: IconMegaphone, comingSoon: false },
   { id: 'utm-tracker', label: 'Lead Tracking', icon: IconLinkChain, comingSoon: false },
