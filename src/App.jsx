@@ -151,6 +151,7 @@ const MOBILE_SECTIONS = [
   { id: 'content-board', label: 'Content Board', short: 'Board' },
   { id: 'payment-recovery', label: 'Payment Recovery', short: 'Payments' },
   { id: 'sales-analytics', label: 'Profit & Loss', short: 'P&L' },
+  { id: 'yearly-planning', label: 'Yearly Planning', short: 'Plan' },
   { id: 'reminders', label: 'Reminders', short: 'Reminders' },
   { id: 'social-proof', label: 'Social Proof', short: 'Proof' },
   { id: 'utm-tracker', label: 'Lead Tracking', short: 'Leads' },
